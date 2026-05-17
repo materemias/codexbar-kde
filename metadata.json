@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            { "Name": "Mate Remias", "Email": "materemias@gmail.com" }
+        ],
+        "Category": "System Information",
+        "Description": "AI coding-provider usage limits and reset countdowns in your KDE system tray. Linux companion to CodexBar.",
+        "Icon": "applications-development",
+        "Id": "org.codexbar.plasmoid",
+        "Name": "CodexBar",
+        "Version": "0.1.0",
+        "License": "MIT",
+        "Website": "https://github.com/materemias/codexbar-kde"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

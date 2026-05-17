@@ -1,0 +1,23 @@
+NOTICE — Third-party trademarks and icons
+=========================================
+
+The SVG icons under `contents/icons/` depict logos and word-marks owned by
+their respective companies. They are bundled with this plasmoid solely to
+visually identify each supported provider in the system tray and popup, and
+are used in nominative-fair-use fashion. No endorsement, affiliation, or
+sponsorship by any of these companies is claimed or implied.
+
+| Icon file                  | Trademark / brand owner |
+| -------------------------- | ----------------------- |
+| `contents/icons/claude.svg`     | Anthropic, PBC          |
+| `contents/icons/codex.svg`      | OpenAI, OpCo, LLC       |
+| `contents/icons/kilo.svg`       | Kilo Code               |
+| `contents/icons/openrouter.svg` | OpenRouter, Inc.        |
+| `contents/icons/zai.svg`        | Z.AI / Zhipu AI         |
+
+If you are the trademark owner and wish to have your icon removed or replaced,
+please open an issue at https://github.com/materemias/codexbar-kde/issues and
+it will be addressed promptly.
+
+The plasmoid source code itself is distributed under the MIT License — see
+the `LICENSE` file for the full text.

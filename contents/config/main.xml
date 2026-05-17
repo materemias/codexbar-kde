@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+                          http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+    <kcfgfile name=""/>
+    <group name="General">
+        <entry name="cliPath" type="String">
+            <label>Path to the codexbar CLI binary</label>
+            <default>~/.local/bin/codexbar</default>
+        </entry>
+        <entry name="refreshSeconds" type="Int">
+            <label>Polling interval in seconds</label>
+            <default>30</default>
+            <min>10</min>
+            <max>3600</max>
+        </entry>
+        <entry name="enableCodex" type="Bool">
+            <default>true</default>
+        </entry>
+        <entry name="enableClaude" type="Bool">
+            <default>true</default>
+        </entry>
+        <entry name="enableOpenRouter" type="Bool">
+            <default>true</default>
+        </entry>
+        <entry name="enableKilo" type="Bool">
+            <default>true</default>
+        </entry>
+        <entry name="enableZai" type="Bool">
+            <default>true</default>
+        </entry>
+        <entry name="compactStyle" type="Int">
+            <label>Compact representation style (0=ring+percent, 1=ring only, 2=percent only)</label>
+            <default>0</default>
+        </entry>
+        <entry name="trayIndicators" type="StringList">
+            <label>Which (provider, window) indicators to render in the tray</label>
+            <default>claude:primary,codex:primary,zai:primary,openrouter:primary,kilo:primary</default>
+        </entry>
+        <entry name="trayIconSize" type="Int">
+            <label>Tray icon + ring size in pixels (capped by panel thickness)</label>
+            <default>22</default>
+            <min>14</min>
+            <max>48</max>
+        </entry>
+    </group>
+</kcfg>
