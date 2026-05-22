@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import org.kde.plasma.plasmoid
+import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.components as PC3
 import org.kde.kirigami as Kirigami
 
@@ -98,6 +99,29 @@ Item {
     }
     readonly property int iconSize: ringSize
 
+    // True only when there's room for a horizontal panel + a topic label —
+    // vertical/tray panels stay terse.
+    readonly property bool _isHorizontalPanel: Plasmoid.formFactor === PlasmaCore.Types.Horizontal
+    readonly property bool topicVisible: _isHorizontalPanel
+        && Plasmoid.configuration.showAgentTopicInPanel !== false
+        && featuredTopic.length > 0
+    readonly property string featuredTopic: {
+        var f = root.featuredAgent ? root.featuredAgent() : null
+        if (!f) return ""
+        return f.windowTitle || f.lastPrompt || ""
+    }
+    readonly property string featuredState: {
+        var f = root.featuredAgent ? root.featuredAgent() : null
+        return f ? f.state : ""
+    }
+
+    // Per-state agent counts for the inline status dots.
+    readonly property var _agentCounts: (root.agentSnapshot && root.agentSnapshot.counts) || ({})
+    readonly property int workingCount: _agentCounts.working || 0
+    readonly property int idleCount: _agentCounts.idle || 0
+    readonly property bool stateDotsVisible: Plasmoid.configuration.showAgentStateDots !== false
+        && (workingCount + blockedAgentCount + idleCount) > 0
+
     Layout.fillWidth: false
     Layout.minimumWidth: row.implicitWidth + Kirigami.Units.smallSpacing
     Layout.preferredWidth: row.implicitWidth + Kirigami.Units.smallSpacing
@@ -111,6 +135,42 @@ Item {
             } else {
                 root.expanded = !root.expanded
             }
+        }
+    }
+
+    // Blocked-agent indicator: small red dot in the top-right corner of the
+    // tray icon group whenever an agent is waiting on user input. Gated by
+    // `agentBlockedBadge` so users who don't want it can switch off.
+    readonly property int blockedAgentCount: {
+        var s = root.agentSnapshot
+        if (!s || !s.counts) return 0
+        return s.counts.blocked || 0
+    }
+
+    Rectangle {
+        id: blockedBadge
+        visible: Plasmoid.configuration.agentBlockedBadge !== false
+            && compact.blockedAgentCount > 0
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: -1
+        anchors.rightMargin: -1
+        width: Math.max(8, Math.floor(compact.ringSize / 3))
+        height: width
+        radius: width / 2
+        color: "#ef4444"
+        border.width: 1
+        border.color: Kirigami.Theme.backgroundColor
+        z: 10
+
+        // Number-in-dot — only when the dot is large enough to read it.
+        PC3.Label {
+            visible: parent.width >= 12
+            anchors.centerIn: parent
+            text: compact.blockedAgentCount.toString()
+            color: "white"
+            font.pixelSize: Math.max(7, Math.floor(parent.width * 0.7))
+            font.weight: Font.Bold
         }
     }
 
@@ -143,6 +203,7 @@ Item {
                 }
 
                 Repeater {
+                    id: _windowsRepeater
                     model: modelData.windows
                     delegate: Item {
                         id: indicatorRoot
@@ -228,6 +289,71 @@ Item {
                         }
                     }
                 }
+            }
+        }
+
+        // Vertical stack of small colored dots with their count next to them.
+        // 3 rows fit inside a single ring-height slot in a horizontal panel.
+        ColumnLayout {
+            id: dotsStack
+            visible: compact.stateDotsVisible
+            spacing: 0
+            Layout.alignment: Qt.AlignVCenter
+            Layout.leftMargin: Kirigami.Units.smallSpacing
+
+            Repeater {
+                model: [
+                    { stateKey: "working", count: compact.workingCount },
+                    { stateKey: "blocked", count: compact.blockedAgentCount },
+                    { stateKey: "idle",    count: compact.idleCount }
+                ]
+                delegate: RowLayout {
+                    required property var modelData
+                    spacing: 4
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Rectangle {
+                        readonly property real _scale: (Plasmoid.configuration.agentStateDotsScale || 100) / 100.0
+                        readonly property int dotSize: Math.max(4, Math.floor(compact.ringSize * 0.38 * _scale))
+                        width: dotSize; height: dotSize; radius: dotSize / 2
+                        color: root.agentStateColor(modelData.stateKey)
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    PC3.Label {
+                        readonly property real _scale: (Plasmoid.configuration.agentStateDotsScale || 100) / 100.0
+                        text: modelData.count
+                        color: root.agentStateColor(modelData.stateKey)
+                        font.pixelSize: Math.max(6, Math.floor(compact.ringSize * 0.42 * _scale))
+                        font.weight: Font.DemiBold
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                }
+            }
+        }
+
+        // Featured-agent topic. Asterisk + dim grey text, capped width.
+        // Shown only on horizontal panels (vertical/tray is too narrow).
+        RowLayout {
+            visible: compact.topicVisible
+            spacing: 4
+            Layout.alignment: Qt.AlignVCenter
+
+            PC3.Label {
+                text: "✳"
+                color: root.agentStateColor(compact.featuredState)
+                font.pixelSize: Math.max(10, Math.floor(compact.ringSize * 0.55))
+                font.weight: Font.Bold
+                Layout.alignment: Qt.AlignVCenter
+            }
+
+            PC3.Label {
+                text: compact.featuredTopic
+                color: "#9ca3af"
+                font.pixelSize: Math.max(9, Math.floor(compact.ringSize * 0.45))
+                font.italic: true
+                elide: Text.ElideRight
+                Layout.maximumWidth: Plasmoid.configuration.agentTopicMaxWidth || 260
+                Layout.alignment: Qt.AlignVCenter
             }
         }
     }

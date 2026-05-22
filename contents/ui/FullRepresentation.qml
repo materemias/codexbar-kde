@@ -9,8 +9,6 @@ Item {
     id: full
 
     implicitWidth: Kirigami.Units.gridUnit * 24
-    // Per-window rows are ~24px after the compact one-row layout, so 4 providers
-    // with up to 3 windows each fits comfortably under the tray's clamp.
     implicitHeight: 460
 
     Layout.preferredWidth: implicitWidth
@@ -19,7 +17,19 @@ Item {
     Layout.minimumHeight: 280
     Layout.maximumHeight: Math.min(900, Screen.desktopAvailableHeight * 0.85)
 
-    // Header sits outside the scroll area so it stays pinned.
+    readonly property bool agentsTabVisible: Plasmoid.configuration.showAgents !== false
+    readonly property int blockedCount: {
+        var s = root.agentSnapshot
+        if (!s || !s.counts) return 0
+        return s.counts.blocked || 0
+    }
+    readonly property int agentTotalCount: {
+        var s = root.agentSnapshot
+        if (!s || !s.counts) return 0
+        return (s.counts.total || 0) + (s.counts.untracked || 0)
+    }
+
+    // Header sits outside the tab area so it stays pinned.
     ColumnLayout {
         id: headerWrap
         anchors.top: parent.top
@@ -50,13 +60,50 @@ Item {
             }
             PC3.ToolButton {
                 icon.name: "view-refresh"
-                onClicked: root.refresh()
+                onClicked: {
+                    root.refresh()
+                    root.refreshAgents()
+                }
                 PC3.ToolTip.visible: hovered
                 PC3.ToolTip.text: "Refresh now"
             }
         }
 
-        Kirigami.Separator { Layout.fillWidth: true }
+        QQC2.TabBar {
+            id: tabBar
+            Layout.fillWidth: true
+            visible: full.agentsTabVisible
+            currentIndex: root.requestedTab === "agents" ? 1
+                : root.requestedTab === "usage" ? 0
+                : (full.blockedCount > 0 ? 1 : 0)
+
+            // A manual user click on a TabButton breaks the binding above.
+            // Re-establish it explicitly whenever requestedTab changes (e.g.
+            // when Super+A nudges us to Agents on an already-open popup).
+            Connections {
+                target: root
+                function onRequestedTabChanged() {
+                    if (root.requestedTab === "agents") tabBar.currentIndex = 1
+                    else if (root.requestedTab === "usage") tabBar.currentIndex = 0
+                }
+            }
+
+            QQC2.TabButton {
+                text: "Usage"
+                width: implicitWidth
+            }
+            QQC2.TabButton {
+                text: full.agentTotalCount > 0
+                    ? "Agents (" + full.agentTotalCount + ")"
+                    : "Agents"
+                width: implicitWidth
+            }
+        }
+
+        Kirigami.Separator {
+            Layout.fillWidth: true
+            visible: !full.agentsTabVisible
+        }
 
         PC3.Label {
             Layout.fillWidth: true
@@ -69,19 +116,11 @@ Item {
                 return ""
             }
         }
-
-        PC3.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            opacity: 0.7
-            visible: (root.snapshot.providers || []).length === 0
-                && !root.lastError && !root.snapshot.fatal
-            text: root.loading ? "Loading…" : "No providers enabled. Open Settings to enable some."
-        }
     }
 
-    QQC2.ScrollView {
-        id: scrollContainer
+    // Tab content area.
+    Item {
+        id: tabHost
         anchors.top: headerWrap.bottom
         anchors.left: parent.left
         anchors.right: parent.right
@@ -90,47 +129,107 @@ Item {
         anchors.rightMargin: Kirigami.Units.largeSpacing
         anchors.bottomMargin: Kirigami.Units.largeSpacing
         anchors.topMargin: Kirigami.Units.smallSpacing
-        contentWidth: availableWidth
-        clip: true
 
-        // Force scroll to top whenever the popup re-opens or data refreshes,
-        // so the first provider's header is never hidden behind a scroll position.
-        Connections {
-            target: root
-            function onExpandedChanged() {
-                if (root.expanded && scrollContainer.contentItem) {
-                    scrollContainer.contentItem.contentY = 0
+        readonly property int activeTab: full.agentsTabVisible ? tabBar.currentIndex : 0
+
+        // --- Usage tab ---
+        QQC2.ScrollView {
+            anchors.fill: parent
+            visible: tabHost.activeTab === 0
+            contentWidth: availableWidth
+            clip: true
+
+            ColumnLayout {
+                width: parent.width
+                spacing: Kirigami.Units.smallSpacing
+
+                PC3.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    opacity: 0.7
+                    visible: (root.snapshot.providers || []).length === 0
+                        && !root.lastError && !root.snapshot.fatal
+                    text: root.loading ? "Loading…" : "No providers enabled. Open Settings to enable some."
+                }
+
+                Repeater {
+                    model: root.snapshot.providers || []
+                    delegate: ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+                        required property var modelData
+                        required property int index
+
+                        ProviderSection {
+                            Layout.fillWidth: true
+                            record: parent.modelData
+                        }
+
+                        Kirigami.Separator {
+                            Layout.fillWidth: true
+                            visible: parent.index < (root.snapshot.providers || []).length - 1
+                            Layout.topMargin: Kirigami.Units.smallSpacing
+                            Layout.bottomMargin: Kirigami.Units.smallSpacing / 2
+                            opacity: 0.4
+                        }
+                    }
                 }
             }
         }
 
-        ColumnLayout {
-            id: content
-            width: scrollContainer.availableWidth
-            spacing: Kirigami.Units.smallSpacing
+        // --- Agents tab ---
+        QQC2.ScrollView {
+            anchors.fill: parent
+            visible: tabHost.activeTab === 1 && full.agentsTabVisible
+            contentWidth: availableWidth
+            clip: true
 
-            Repeater {
-                model: root.snapshot.providers || []
-                delegate: ColumnLayout {
+            ColumnLayout {
+                width: parent.width
+                spacing: Kirigami.Units.smallSpacing
+
+                AgentsSection {
+                    id: agentsSection
                     Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
-                    required property var modelData
-                    required property int index
-
-                    ProviderSection {
-                        Layout.fillWidth: true
-                        record: parent.modelData
-                    }
-
-                    Kirigami.Separator {
-                        Layout.fillWidth: true
-                        visible: parent.index < (root.snapshot.providers || []).length - 1
-                        Layout.topMargin: Kirigami.Units.smallSpacing
-                        Layout.bottomMargin: Kirigami.Units.smallSpacing / 2
-                        opacity: 0.4
-                    }
                 }
             }
         }
     }
+
+    // Keyboard navigation: up/down moves the agent selection, Enter
+    // activates the highlighted row. Works on any tab — pressing Enter
+    // also switches to the Agents tab so the user sees what they activated.
+    focus: true
+    Keys.onPressed: function(event) {
+        if (!agentsSection) return
+        if (event.key === Qt.Key_Up) {
+            agentsSection.selectPrevious()
+            event.accepted = true
+        } else if (event.key === Qt.Key_Down) {
+            agentsSection.selectNext()
+            event.accepted = true
+        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            root.requestedTab = "agents"
+            agentsSection.activateSelected()
+            event.accepted = true
+        }
+    }
+
+    // Grab focus on a slight delay (the popup window isn't always settled
+    // by the time expandedChanged fires) so arrow keys work immediately.
+    Connections {
+        target: root
+        function onExpandedChanged() {
+            if (root.expanded) {
+                refocusTimer.restart()
+                agentsSection.selectedIndex = 0
+            }
+        }
+    }
+    Timer {
+        id: refocusTimer
+        interval: 50
+        onTriggered: full.forceActiveFocus()
+    }
+    Component.onCompleted: full.forceActiveFocus()
 }

@@ -44,5 +44,51 @@
             <min>14</min>
             <max>48</max>
         </entry>
+        <entry name="showAgents" type="Bool">
+            <label>Show running/blocked Claude + Codex agents in the popup</label>
+            <default>true</default>
+        </entry>
+        <entry name="agentBlockedBadge" type="Bool">
+            <label>Show a red dot on the tray icon while any agent is blocked (legacy corner badge)</label>
+            <default>false</default>
+        </entry>
+        <entry name="showAgentStateDots" type="Bool">
+            <label>Show colored count dots (working/blocked/idle) next to the tray indicators</label>
+            <default>true</default>
+        </entry>
+        <entry name="agentStateDotsScale" type="Int">
+            <label>Size scale for the stacked agent state dots, percent of the default size</label>
+            <default>100</default>
+            <min>50</min>
+            <max>200</max>
+        </entry>
+        <entry name="showAgentPrompts" type="Bool">
+            <label>Show the last user prompt for each session in the popup</label>
+            <default>true</default>
+        </entry>
+        <entry name="includeUntrackedAgents" type="Bool">
+            <label>Also count claude/codex processes without an active hook sentinel</label>
+            <default>true</default>
+        </entry>
+        <entry name="agentsRefreshSeconds" type="Int">
+            <label>Polling interval for agent state in seconds</label>
+            <default>5</default>
+            <min>2</min>
+            <max>120</max>
+        </entry>
+        <entry name="showAgentTopicInPanel" type="Bool">
+            <label>Show the most interesting agent's task next to the tray indicators</label>
+            <default>false</default>
+        </entry>
+        <entry name="agentTopicMaxWidth" type="Int">
+            <label>Maximum width (in pixels) for the panel topic label before it elides</label>
+            <default>260</default>
+            <min>80</min>
+            <max>800</max>
+        </entry>
+        <entry name="closePopupOnFocusLoss" type="Bool">
+            <label>Close the popup when focus moves away (click-to-focus briefly suppresses this so terminal jumps don't close it)</label>
+            <default>true</default>
+        </entry>
     </group>
 </kcfg>
