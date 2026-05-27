@@ -180,10 +180,10 @@ def _pids_for(provider: str) -> list[int]:
     # brief startup before the rename, so we don't bother scanning cmdlines.
     if provider == "pi":
         return _pgrep(provider)
-    # omp keeps comm="bun" (no proctitle rename) — scan bun cmdlines for the
-    # script path. Restricting to comm="bun" avoids matching unrelated shells.
+    # omp sets its proctitle to "omp" via procmgr (same as pi). Older versions
+    # ran as comm="bun" with the script path in cmdline, but that's obsolete.
     if provider == "omp":
-        return _scan_cmdline("/.node_modules/bin/omp", comm_must_be="bun")
+        return _pgrep(provider)
     return _pgrep(provider)
 
 
