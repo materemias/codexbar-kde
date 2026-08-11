@@ -39,11 +39,13 @@ KNOWN_HOSTS = {
 }
 
 # Cmdline tokens that mean "not an interactive agent session" — claude
-# desktop helper procs, mcp servers, etc.
+# desktop helper procs, mcp servers, omp/pi worker subprocesses, etc.
+# omp/pi fork helper processes (embeddings, js eval, ...) that keep comm="omp"
+# and so show up in `pgrep -x omp`; their cmdline carries a `__*_worker_` verb.
 _PGREP_CMD_SKIP = (
     "remote-control", "mcp", "--print", "doctor", "agents",
     "--type=", "/claude-desktop-bin/", "claude-desktop",
-    "app-server-protocol",
+    "app-server-protocol", "__omp_worker", "__pi_worker",
 )
 
 # Tags Claude/Codex/etc inject into the user-message stream that aren't
