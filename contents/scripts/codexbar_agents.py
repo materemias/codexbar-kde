@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 AGGREGATE_PATH = Path.home() / ".codexbar" / "agents.json"
@@ -33,20 +34,27 @@ AGGREGATE_PATH = Path.home() / ".codexbar" / "agents.json"
 # Hosts we treat as terminal emulators when walking the proc tree.
 KNOWN_HOSTS = {
     "kitty", "konsole", "code", "code-insiders", "code-flatpak",
-    "tmux", "tmux: server", "wezterm", "alacritty",
+    "tmux", "tmux: server", "wezterm", "alacritty", "ghostty",
     "gnome-terminal", "gnome-terminal-", "xterm", "foot",
     "yakuake", "tilix", "ptyhost",
 }
 
-# Cmdline tokens that mean "not an interactive agent session" — claude
-# desktop helper procs, mcp servers, omp/pi worker subprocesses, etc.
-# omp/pi fork helper processes (embeddings, js eval, ...) that keep comm="omp"
-# and so show up in `pgrep -x omp`; their cmdline carries a `__*_worker_` verb.
-_PGREP_CMD_SKIP = (
-    "remote-control", "mcp", "--print", "doctor", "agents",
-    "--type=", "/claude-desktop-bin/", "claude-desktop",
-    "app-server-protocol", "__omp_worker", "__pi_worker",
-)
+# argv[1] verbs that mean a background service rather than an interactive
+# session: `claude daemon run`, `omp browser-relay`, `codex app-server`, mcp
+# servers, and friends. Matched on the first real argument, not as a substring,
+# so a prompt that happens to mention "daemon" doesn't hide a real session.
+_SERVICE_VERBS = {
+    "daemon", "browser-relay", "remote-control", "mcp", "mcp-server",
+    "app-server", "app-server-protocol", "serve", "doctor", "agents", "lsp",
+}
+
+# Headless/piped invocations (SDK calls from claudecodeui, `-p` one-shots).
+# Real processes, but no terminal session behind them.
+_HEADLESS_FLAGS = {"--output-format", "--input-format", "--print", "-p"}
+
+# Fork helpers (embeddings, js eval, lsp mux, ...) keep comm="omp"/"pi" and so
+# show up in `pgrep -x`; their cmdline carries a `__*_worker_` verb.
+_WORKER_PREFIXES = ("__omp_worker", "__pi_worker")
 
 # Tags Claude/Codex/etc inject into the user-message stream that aren't
 # actual user prompts. Used to filter `lastPrompt`.
@@ -59,6 +67,13 @@ _PROMPT_SKIP_PREFIXES = (
     "<environment_context>", "<user_instructions>",
     "[request interrupted", "caveat:",
 )
+
+
+# Peek preview: how many recent messages to keep per session and the cap on
+# each message's text. Both bound the size of ~/.codexbar/agents.json, which
+# the plasmoid re-reads every poll tick.
+_PEEK_MSGS = 8
+_PEEK_CHARS = 320
 
 # In-process cache so we don't re-parse the same transcript every tick when
 # nothing has changed. Keyed by absolute path → (mtime, (title, prompt)).
@@ -108,6 +123,14 @@ def _pid_alive(pid: int) -> bool:
     return pid > 0 and Path(f"/proc/{pid}").is_dir()
 
 
+def _argv_of(pid: int) -> list[str]:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+    except OSError:
+        return []
+
+
 def _parent_walk_for_host(start_pid: int) -> tuple[str, int]:
     """Walk up the proc tree from start_pid, return (host_name, host_pid).
     Returns ("", 0) if no known terminal emulator found."""
@@ -134,25 +157,39 @@ def _parent_walk_for_host(start_pid: int) -> tuple[str, int]:
 # Process discovery
 # ---------------------------------------------------------------------------
 
+def _is_service_argv(argv: list[str]) -> bool:
+    """True when the argv belongs to a daemon, a fork helper or a piped
+    one-shot — anything that isn't a session sitting in a terminal."""
+    if not argv:
+        return True
+    if "claude-desktop" in argv[0]:
+        return True
+    rest = argv[1:]
+    for a in rest:
+        if a.startswith(_WORKER_PREFIXES) or a.startswith("--type="):
+            return True
+    if rest and rest[0] in _SERVICE_VERBS:
+        return True
+    return any(a in _HEADLESS_FLAGS for a in rest)
+
+
 def _pgrep(name: str) -> list[int]:
     try:
         proc = subprocess.run(
-            ["pgrep", "-x", "-a", name],
+            ["pgrep", "-x", name],
             capture_output=True, text=True, timeout=2.0, check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
     out: list[int] = []
     for ln in (proc.stdout or "").splitlines():
-        parts = ln.strip().split(maxsplit=1)
-        if not parts or not parts[0].isdigit():
+        pid_s = ln.strip()
+        if not pid_s.isdigit():
             continue
-        cmdline = parts[1] if len(parts) > 1 else ""
-        if any(tok in cmdline for tok in _PGREP_CMD_SKIP):
+        pid = int(pid_s)
+        if _is_service_argv(_argv_of(pid)):
             continue
-        if name == "codex" and " app-server" in (" " + cmdline):
-            continue
-        out.append(int(parts[0]))
+        out.append(pid)
     return out
 
 
@@ -193,6 +230,87 @@ def _pids_for(provider: str) -> list[int]:
 # Transcript parsing (Claude + pi/omp use JSONL)
 # ---------------------------------------------------------------------------
 
+def _ts_ms(ts) -> int:
+    """Best-effort epoch-ms from whatever timestamp shape a transcript uses
+    (ISO string, ms int, or seconds float). 0 when unusable."""
+    if isinstance(ts, (int, float)) and ts > 0:
+        return int(ts if ts > 1e12 else ts * 1000)
+    if isinstance(ts, str) and ts:
+        try:
+            return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            pass
+    return 0
+
+
+def _peek_squash(text: str) -> str:
+    return " ".join(text.split())[:_PEEK_CHARS]
+
+
+def _content_preview(content) -> str:
+    """Readable text of a message content field: either a plain string or a
+    list of parts. Text parts are joined; a message that only ran a tool
+    collapses to "→ toolname" so tool activity still shows up in the peek."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    texts, tool = [], ""
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") == "text" and c.get("text"):
+            texts.append(c["text"])
+        elif not tool and c.get("name"):
+            tool = c.get("name")
+    if texts:
+        return " ".join(texts)
+    return "→ " + tool if tool else ""
+
+
+def _peek_add(buf: list, role: str, text: str, ts, kind: str = "text") -> None:
+    """kind "tools" marks a tool-only turn emitted by the provider walks
+    (name only, no arrow prefix). Tagging here — rather than sniffing a "→ "
+    prefix later — keeps a user prompt that literally starts with an arrow
+    from being merged into a tool run."""
+    if role in ("user", "assistant") and text:
+        buf.append((role, kind if kind in ("text", "tools") else "text", _peek_squash(text), _ts_ms(ts)))
+
+
+def _peek_finalize(buf: list) -> list[dict]:
+    """Turn the collected (role, kind, text, ts) tuples into the per-session
+    peek list. User entries go through the same injected-noise filter as
+    lastPrompt, so harness blocks like <system-reminder> never surface.
+
+    Runs of consecutive tool-only turns collapse into one `kind:"tools"`
+    entry ("write, edit, bash +2 more") so the panel stays a conversation
+    summary instead of a wall of one-word lines."""
+    kept = []
+    for role, kind, text, ts in buf:
+        if not text:
+            continue
+        if role == "user" and not _is_real_user_prompt(text):
+            continue
+        kept.append((role, kind, text, ts))
+    collapsed: list = []  # [role, kind, payload(list), ts]
+    for role, kind, text, ts in kept:
+        if kind == "tools" and collapsed and collapsed[-1][1] == "tools":
+            collapsed[-1][2].append(text)
+            collapsed[-1][3] = ts
+        else:
+            collapsed.append([role, kind, [text], ts])
+    out = []
+    for role, kind, payload, ts in collapsed:
+        if kind != "tools":
+            out.append({"role": role, "kind": "text", "text": payload[0], "ts": ts})
+            continue
+        shown = payload[:10]
+        more = len(payload) - len(shown)
+        label = ", ".join(shown) + (f" +{more} more" if more > 0 else "")
+        out.append({"role": role, "kind": "tools", "text": label, "ts": ts})
+    return out[-_PEEK_MSGS:]
+
+
 def _is_real_user_prompt(text: str) -> bool:
     if not text:
         return False
@@ -200,27 +318,32 @@ def _is_real_user_prompt(text: str) -> bool:
     return bool(head) and not any(head.startswith(p) for p in _PROMPT_SKIP_PREFIXES)
 
 
-def _tail_claude_transcript(path: str) -> tuple[str, str]:
-    """Returns (ai_title, last_user_prompt) for a Claude transcript. Cached
-    by mtime so re-reads are free when nothing has changed."""
+
+def _tail_claude_transcript(path: str) -> tuple[str, str, list]:
+    """Returns (ai_title, last_user_prompt, recent_messages) for a Claude
+    transcript. Cached by mtime so re-reads are free when nothing changed."""
     if not path or not os.path.isfile(path):
-        return "", ""
+        return "", "", []
     try:
         mtime = os.path.getmtime(path)
     except OSError:
-        return "", ""
+        return "", "", []
     cached = _TRANSCRIPT_CACHE.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
 
     title = ""
     last_real, last_any = "", ""
+    peek: list = []
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for raw in f:
-                # Cheap filter so we don't json-parse the long assistant rows.
+                # Cheap filter so we don't json-parse every long assistant
+                # row: only rows that can contribute survive.
                 if '"ai-title"' not in raw and '"role":"user"' not in raw \
-                        and '"type":"user"' not in raw:
+                        and '"type":"user"' not in raw \
+                        and '"role":"assistant"' not in raw \
+                        and '"type":"assistant"' not in raw:
                     continue
                 try:
                     rec = json.loads(raw)
@@ -232,28 +355,40 @@ def _tail_claude_transcript(path: str) -> tuple[str, str]:
                     if tt:
                         title = tt
                     continue
-                if t != "user" and rec.get("role") != "user":
+                if t not in ("user", "assistant") and rec.get("role") not in ("user", "assistant"):
                     continue
                 inner = rec.get("message") if isinstance(rec.get("message"), dict) else rec
                 content = inner.get("content") if isinstance(inner, dict) else None
                 text = ""
+                is_tool = False
                 if isinstance(content, str):
                     text = content
                 elif isinstance(content, list):
+                    tool = ""
                     for c in content:
-                        if isinstance(c, dict) and c.get("type") == "text":
-                            x = c.get("text") or ""
-                            if x:
-                                text = x
-                if text:
-                    last_any = text
-                    if _is_real_user_prompt(text):
-                        last_real = text
+                        if not isinstance(c, dict):
+                            continue
+                        if c.get("type") == "text" and c.get("text"):
+                            text = c.get("text") or text
+                        elif c.get("type") == "tool_use" and c.get("name") and not tool:
+                            tool = c["name"]
+                    if not text and tool:
+                        text = tool
+                        is_tool = True
+                role = t if t in ("user", "assistant") else rec.get("role")
+                if text and not rec.get("isSidechain"):
+                    _peek_add(peek, role, text, rec.get("timestamp"),
+                              "tools" if is_tool else "text")
+                if role != "user" or not text:
+                    continue
+                last_any = text
+                if _is_real_user_prompt(text):
+                    last_real = text
     except OSError:
-        return "", ""
+        return "", "", []
     chosen = last_real or last_any
     prompt = " ".join(chosen.split())[:200]
-    result = (title, prompt)
+    result = (title, prompt, _peek_finalize(peek))
     _TRANSCRIPT_CACHE[path] = (mtime, result)
     return result
 
@@ -291,11 +426,13 @@ def _claude_info(pid: int) -> dict:
 
     if sid and cwd:
         transcript = Path.home() / ".claude" / "projects" / _claude_slug(cwd) / f"{sid}.jsonl"
-        title, prompt = _tail_claude_transcript(str(transcript))
+        title, prompt, recent = _tail_claude_transcript(str(transcript))
         if title:
             info["windowTitle"] = title
         if prompt:
             info["lastPrompt"] = prompt
+        if recent:
+            info["recent"] = recent
     return info
 
 
@@ -305,6 +442,7 @@ def _codex_info(pid: int) -> dict:
     if not rollout:
         return info
     last_real, last_any, last_event = "", "", ""
+    peek: list = []
     try:
         with open(rollout, "r", encoding="utf-8", errors="replace") as f:
             for raw in f:
@@ -318,15 +456,19 @@ def _codex_info(pid: int) -> dict:
                     info["sessionId"] = p.get("id") or info["sessionId"]
                     info["cwd"] = p.get("cwd") or info["cwd"]
                 elif t == "response_item":
-                    if p.get("type") == "message" and p.get("role") == "user":
+                    if p.get("type") == "message":
+                        role = p.get("role")
                         text = ""
                         for c in (p.get("content") or []):
-                            if isinstance(c, dict) and c.get("type") == "input_text":
+                            if isinstance(c, dict) and c.get("type") in ("input_text", "output_text"):
                                 text = c.get("text") or text
-                        if text:
+                        _peek_add(peek, role, text, rec.get("timestamp"))
+                        if role == "user" and text:
                             last_any = text
                             if _is_real_user_prompt(text):
                                 last_real = text
+                    elif p.get("type") == "function_call" and p.get("name"):
+                        _peek_add(peek, "assistant", p["name"], rec.get("timestamp"), "tools")
                 elif t == "event_msg":
                     sub = p.get("type")
                     if sub in ("task_started", "user_message", "task_complete"):
@@ -341,6 +483,7 @@ def _codex_info(pid: int) -> dict:
         info["cwd"] = _cwd_of(pid)
     chosen = last_real or last_any
     info["lastPrompt"] = " ".join(chosen.split())[:200]
+    info["recent"] = _peek_finalize(peek)
     return info
 
 
@@ -350,6 +493,7 @@ def _opencode_info(pid: int) -> dict:
     if not db.is_file():
         return info
     cwd = _cwd_of(pid)
+    peek: list = []
     try:
         import sqlite3
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
@@ -365,6 +509,42 @@ def _opencode_info(pid: int) -> dict:
                     "SELECT id, directory, title, time_updated FROM session "
                     "ORDER BY time_updated DESC LIMIT 1"
                 ).fetchone()
+            if row:
+                # Last messages with their parts, oldest first, for the peek
+                # panel. Parts arrive one row per part; text parts of one
+                # message are joined before entering the peek buffer.
+                cur = con.execute(
+                    "SELECT m.id, m.data, p.data, m.time_created FROM ("
+                    "  SELECT id, data, time_created FROM message"
+                    "  WHERE session_id = ?"
+                    "  ORDER BY time_created DESC LIMIT 40"
+                    ") m LEFT JOIN part p ON p.message_id = m.id"
+                    " ORDER BY m.time_created ASC, p.time_created ASC",
+                    (row[0],),
+                )
+                joined: dict[str, list] = {}
+                order: list[str] = []
+                for mid, mdata, pdata, mtime in cur:
+                    entry = joined.get(mid)
+                    if entry is None:
+                        role = ""
+                        try:
+                            role = (json.loads(mdata) or {}).get("role") or ""
+                        except (TypeError, json.JSONDecodeError):
+                            pass
+                        entry = joined[mid] = [role, "", mtime]
+                        order.append(mid)
+                    if not pdata:
+                        continue
+                    try:
+                        pd = json.loads(pdata) or {}
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if pd.get("type") == "text" and pd.get("text"):
+                        entry[1] = (entry[1] + " " + pd["text"]).strip()
+                for mid in order:
+                    role, text, mtime = joined[mid]
+                    _peek_add(peek, role, text, mtime)
         finally:
             con.close()
     except Exception:
@@ -375,6 +555,7 @@ def _opencode_info(pid: int) -> dict:
     info["sessionId"] = sid or ""
     info["cwd"] = directory or cwd
     info["windowTitle"] = (title or "").strip()
+    info["recent"] = _peek_finalize(peek)
     # Opencode bumps session.time_updated every few seconds while the
     # assistant is streaming tokens. If nothing has touched the row in 30s,
     # the session isn't doing anything — call it idle.
@@ -419,6 +600,48 @@ def _find_pi_rollout(cwd: str) -> str:
     return ""
 
 
+def _is_sidecar_jsonl(path: str) -> bool:
+    """omp writes advisor transcripts as `__advisor.<name>.jsonl` inside a
+    `<rollout-stem>/` directory sitting next to the rollout itself. A sidecar
+    carries the advisor's own session id and its "### Session update
+    **agent**: ..." messages, so reading one as the session rollout labels the
+    row with the advisor's chatter and points click-to-focus at a session id
+    that no terminal owns."""
+    return os.path.basename(path).startswith("__")
+
+
+def _rollout_for_sidecar(path: str) -> str:
+    """`.../<stem>/__advisor.luna.jsonl` -> `.../<stem>.jsonl`, or "" when
+    that rollout is gone."""
+    main = os.path.dirname(path) + ".jsonl"
+    return main if os.path.isfile(main) else ""
+
+
+def _newest_jsonl(base: Path) -> str:
+    """Newest session rollout anywhere under `base`, or "" if there is none.
+    Advisor sidecars don't count."""
+    try:
+        candidates = sorted(
+            (p for p in base.rglob("*.jsonl") if not _is_sidecar_jsonl(str(p))),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return ""
+    return str(candidates[0]) if candidates else ""
+
+
+def _session_dir_of(pid: int) -> str:
+    argv = _argv_of(pid)
+    for i, a in enumerate(argv):
+        if a == "--session-dir" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--session-dir="):
+            return a.split("=", 1)[1]
+    return ""
+
+
+
 def _pi_info(pid: int) -> dict:
     """pi and omp share the same JSONL layout. omp keeps the active file open
     on an fd (so we can see it via /proc/<pid>/fd); pi closes it between
@@ -429,7 +652,11 @@ def _pi_info(pid: int) -> dict:
     info = {"sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "", "state": "working"}
     rollout = _open_jsonl_under(pid, "/.pi/agent/sessions/", "/.omp/agent/sessions/")
     if not rollout:
-        rollout = _find_pi_rollout(_cwd_of(pid))
+        # A run started with an explicit --session-dir doesn't live under the
+        # cwd slug, and the slug lookup would hand it a *different* session's
+        # rollout — duplicating that session's row under a wrong pid.
+        sess_dir = _session_dir_of(pid)
+        rollout = _newest_jsonl(Path(sess_dir)) if sess_dir else _find_pi_rollout(_cwd_of(pid))
     if not rollout:
         info["cwd"] = _cwd_of(pid)
         return info
@@ -441,6 +668,7 @@ def _pi_info(pid: int) -> dict:
     except OSError:
         pass
     last_real, last_any = "", ""
+    peek: list = []
     try:
         with open(rollout, "r", encoding="utf-8", errors="replace") as f:
             for raw in f:
@@ -449,6 +677,16 @@ def _pi_info(pid: int) -> dict:
                 except json.JSONDecodeError:
                     continue
                 t = rec.get("type")
+                if t in ("title", "title_change"):
+                    # omp renames a session mid-run and appends the new name
+                    # as its own record; the header keeps whatever the name
+                    # was at session start. Last one in the file wins, which
+                    # is what the terminal tab shows. `title_change.id` is the
+                    # message that triggered the rename, never a session id.
+                    title = (rec.get("title") or "").strip()
+                    if title:
+                        info["windowTitle"] = title
+                    continue
                 if t in ("session", "session-meta", "session-start", "meta"):
                     info["sessionId"] = rec.get("id") or info["sessionId"]
                     info["cwd"] = rec.get("cwd") or info["cwd"]
@@ -457,7 +695,17 @@ def _pi_info(pid: int) -> dict:
                         info["windowTitle"] = title
                     continue
                 msg_obj = rec.get("message") if isinstance(rec.get("message"), dict) else rec
-                if (msg_obj.get("role") or rec.get("role")) != "user":
+                role = msg_obj.get("role") or rec.get("role")
+                if role == "assistant":
+                    preview = _content_preview(msg_obj.get("content"))
+                    # The "→ " marker here is _content_preview's own output
+                    # for tool-only assistant messages, never user input.
+                    if preview.startswith("→ "):
+                        _peek_add(peek, "assistant", preview[2:], rec.get("timestamp"), "tools")
+                    else:
+                        _peek_add(peek, "assistant", preview, rec.get("timestamp"))
+                    continue
+                if role != "user":
                     continue
                 content = msg_obj.get("content")
                 text = ""
@@ -470,6 +718,7 @@ def _pi_info(pid: int) -> dict:
                             if x:
                                 text = x
                 if text:
+                    _peek_add(peek, "user", text, rec.get("timestamp"))
                     last_any = text
                     if _is_real_user_prompt(text):
                         last_real = text
@@ -479,17 +728,28 @@ def _pi_info(pid: int) -> dict:
         info["cwd"] = _cwd_of(pid)
     chosen = last_real or last_any
     info["lastPrompt"] = " ".join(chosen.split())[:200]
+    info["recent"] = _peek_finalize(peek)
     return info
 
 
 def _open_jsonl_under(pid: int, *needles: str) -> str:
-    """Return the first open JSONL file the pid has whose path contains one
-    of the given needles. Returns "" if none."""
+    """Return the session rollout the pid holds open whose path contains one
+    of the given needles. Returns "" if none.
+
+    A rollout the pid has open itself always wins over one reached through an
+    advisor sidecar: a process can hold sidecar fds for a session another
+    process owns, and picking that would attribute a live session to the wrong
+    terminal. Sidecars still count as a fallback, because omp keeps them open
+    for sessions whose own rollout fd it has already closed. Within a tier the
+    newest mtime wins, since a resumed session leaves the earlier rollout open
+    alongside the current one."""
     fd_dir = f"/proc/{pid}/fd"
     try:
         entries = os.listdir(fd_dir)
     except OSError:
         return ""
+    direct: set[str] = set()
+    via_sidecar: set[str] = set()
     for entry in entries:
         try:
             target = os.readlink(os.path.join(fd_dir, entry))
@@ -497,9 +757,23 @@ def _open_jsonl_under(pid: int, *needles: str) -> str:
             continue
         if not target.endswith(".jsonl"):
             continue
-        if any(n in target for n in needles):
-            return target
-    return ""
+        if not any(n in target for n in needles):
+            continue
+        if not _is_sidecar_jsonl(target):
+            direct.add(target)
+            continue
+        rollout = _rollout_for_sidecar(target)
+        if rollout:
+            via_sidecar.add(rollout)
+    newest, newest_mtime = "", -1.0
+    for path in direct or via_sidecar:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime > newest_mtime:
+            newest, newest_mtime = path, mtime
+    return newest
 
 
 _INFO_FN = {
@@ -518,12 +792,20 @@ _INFO_FN = {
 def _build_records() -> list[dict]:
     """Sweep all known providers, return the per-session records."""
     records: list[dict] = []
+    seen_sids: set[str] = set()
     now_ms = int(time.time() * 1000)
     for provider, info_fn in _INFO_FN.items():
         for pid in _pids_for(provider):
             host, host_pid = _parent_walk_for_host(pid)
+            # No terminal ancestor → a daemon, a detached run or a piped call.
+            # Nothing the user can focus, so it isn't a session row.
+            if not host:
+                continue
             info = info_fn(pid) or {}
             sid = info.get("sessionId") or f"untracked-{provider}-{pid}"
+            if sid in seen_sids:
+                continue
+            seen_sids.add(sid)
             records.append({
                 "provider": provider,
                 "sessionId": sid,
@@ -534,6 +816,7 @@ def _build_records() -> list[dict]:
                 "tty": "",
                 "state": info.get("state") or "working",
                 "lastPrompt": info.get("lastPrompt") or "",
+                "recent": info.get("recent") or [],
                 "windowTitle": info.get("windowTitle") or "",
                 "lastEvent": "",
                 "startedAt": 0,

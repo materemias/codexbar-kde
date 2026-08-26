@@ -25,6 +25,12 @@ your machine, grouped by project folder:
   scripting. Works with Kitty, Konsole, and other terminal emulators.
 - **Folder grouping** — sessions clustered by project directory so you can scan
   at a glance.
+- **Conversation peek.** Click the arrow on a session row or press `Space` to
+  expand its last eight user and assistant turns. Tool-only turns collapse into
+  a short command summary.
+- **Type-to-filter search.** Start typing on the Agents tab. The filter fuzzy
+  matches the session title, last prompt, working directory, and provider.
+  Recent conversation text uses exact case-insensitive substring matching.
 - **Auto-tab** — the popup opens directly to Agents when `Super+A` is pressed,
   or when any agent is blocked.
 - **Tray presence** — colored count dots (working/blocked/idle) beside the
@@ -170,12 +176,15 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 
 ## Keyboard shortcuts
 
-| Shortcut  | Action                                           |
-| --------- | ------------------------------------------------ |
-| `Super+A` | Open popup and switch to Agents tab              |
-| `↑` / `↓` | Navigate agent rows                              |
-| `Enter`   | Focus the terminal hosting the selected session   |
-| `Esc`     | Close the popup                                  |
+| Shortcut         | Action                                             |
+| ---------------- | -------------------------------------------------- |
+| `Super+A`        | Open popup and switch to Agents tab                |
+| `↑` / `↓`        | Navigate agent rows                                |
+| `Enter`          | Focus the terminal hosting the selected session    |
+| `Space`          | Expand or collapse the selected conversation peek  |
+| Printable text   | Filter sessions on the Agents tab                   |
+| `Backspace`      | Edit the active filter                              |
+| `Esc`            | Clear the active filter, then close the popup       |
 
 ## Layout
 

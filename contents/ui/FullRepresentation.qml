@@ -208,9 +208,39 @@ Item {
         } else if (event.key === Qt.Key_Down) {
             agentsSection.selectNext()
             event.accepted = true
+        } else if (event.key === Qt.Key_Space
+            && agentsSection.filterText.length === 0) {
+            // Space with no query in progress = peek toggle. Once the user
+            // is typing a filter, space is just a space.
+            root.requestedTab = "agents"
+            agentsSection.togglePeek()
+            event.accepted = true
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.requestedTab = "agents"
             agentsSection.activateSelected()
+            event.accepted = true
+        } else if (event.key === Qt.Key_Escape) {
+            if (agentsSection.filterText.length > 0) {
+                agentsSection.filterText = ""
+                event.accepted = true
+            }
+        } else if (event.key === Qt.Key_Right
+            && tabBar.currentIndex < tabBar.count - 1) {
+            tabBar.currentIndex++
+            event.accepted = true
+        } else if (event.key === Qt.Key_Left
+            && tabBar.currentIndex > 0) {
+            tabBar.currentIndex--
+            event.accepted = true
+        } else if (event.key === Qt.Key_Backspace) {
+            agentsSection.filterText =
+                agentsSection.filterText.slice(0, -1)
+            event.accepted = true
+        } else if (event.text.length > 0
+            && (event.modifiers & ~Qt.ShiftModifier) === Qt.NoModifier) {
+            // Type-to-filter: any printable key starts/extends the query.
+            root.requestedTab = "agents"
+            agentsSection.filterText += event.text
             event.accepted = true
         }
     }
@@ -223,6 +253,8 @@ Item {
             if (root.expanded) {
                 refocusTimer.restart()
                 agentsSection.selectedIndex = 0
+            } else {
+                agentsSection.filterText = ""
             }
         }
     }

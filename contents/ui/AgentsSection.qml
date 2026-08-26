@@ -24,6 +24,7 @@ ColumnLayout {
         for (var i = 0; i < src.length; i++) {
             var a = src[i]
             if (!a) continue
+            if (!agents._matchesFilter(a)) continue
             var folder = root.cwdLabel(a.cwd || "") || (a.provider || "agent")
             var g = byFolder[folder]
             if (!g) {
@@ -53,10 +54,62 @@ ColumnLayout {
         }
         return out
     }
+
+    // Peek panel: sessionId of the one row whose recent messages are
+    // expanded inline. Compared by string, same reason as selectedIndex —
+    // the aggregate objects are replaced on every poll tick.
+    property string peekSid: ""
+
+    // Type-to-filter: printable keys typed while the popup has focus
+    // accumulate here (FullRepresentation forwards them). Empty = no filter.
+    property string filterText: ""
+
+    // Fuzzy matching stays within one session field. Recent turns use exact
+    // substring matching so unrelated prose cannot satisfy a short query.
+    function _fuzzyMatches(text, q) {
+        var hay = (text || "").toLowerCase()
+        var j = 0
+        for (var i = 0; i < hay.length && j < q.length; i++) {
+            if (hay[i] === q[j]) j++
+        }
+        return j === q.length
+    }
+
+    function _matchesFilter(a) {
+        var q = filterText.toLowerCase()
+        if (!q) return true
+
+        var fields = [a.windowTitle, a.lastPrompt, a.cwd, a.provider]
+        for (var i = 0; i < fields.length; i++) {
+            if (_fuzzyMatches(fields[i], q)) return true
+        }
+
+        var rec = a.recent || []
+        for (var j = 0; j < rec.length; j++) {
+            if ((rec[j].text || "").toLowerCase().indexOf(q) !== -1) return true
+        }
+        return false
+    }
+
+    function togglePeek() {
+        if (selectedIndex < 0 || selectedIndex >= flatAgents.length) return
+        var a = flatAgents[selectedIndex]
+        if (!a || !a.sessionId) return
+        peekSid = peekSid === a.sessionId ? "" : a.sessionId
+    }
+
     onFlatAgentsChanged: {
         if (flatAgents.length === 0) selectedIndex = -1
         else if (selectedIndex < 0 || selectedIndex >= flatAgents.length) selectedIndex = 0
+        if (peekSid !== "") {
+            var still = false
+            for (var k = 0; k < flatAgents.length; k++) {
+                if (flatAgents[k].sessionId === peekSid) { still = true; break }
+            }
+            if (!still) peekSid = ""
+        }
     }
+
 
     function selectNext() {
         if (flatAgents.length === 0) return
@@ -146,6 +199,26 @@ ColumnLayout {
         }
     }
 
+    // Active filter query + match count. Only shown while typing.
+    RowLayout {
+        visible: agents.filterText.length > 0
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.smallSpacing
+
+        PC3.Label {
+            text: "filter: " + agents.filterText
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            opacity: 0.85
+            Layout.fillWidth: true
+        }
+        PC3.Label {
+            text: agents.flatAgents.length + (agents.flatAgents.length === 1 ? " match" : " matches")
+                + " · Esc clears"
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            opacity: 0.6
+        }
+    }
+
     PC3.Label {
         visible: root.agentsError && root.agentsError.length > 0
         Layout.fillWidth: true
@@ -192,7 +265,262 @@ ColumnLayout {
             Layout.leftMargin: 6
             required property var modelData
 
-            implicitHeight: rowContent.implicitHeight + 4
+            implicitHeight: rowCol.implicitHeight + 4
+            readonly property bool peekOpen: agents.peekSid !== ""
+                && modelData && modelData.sessionId === agents.peekSid
+
+            // While a filter is active: up to two conversation lines that
+            // contain the query, as StyledText with the query highlighted.
+            readonly property var filterSnippets: {
+                var q = agents.filterText.toLowerCase()
+                if (!q || !modelData) return []
+                var out = []
+                var esc = function(s) {
+                    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                        .replace(/>/g, "&gt;")
+                }
+                var hl = "<b><font color=\"#ffb300\">"
+                var rec = modelData.recent || []
+                for (var i = 0; i < rec.length && out.length < 2; i++) {
+                    var t = (rec[i].text || "").replace(/\s+/g, " ")
+                    var idx = t.toLowerCase().indexOf(q)
+                    if (idx === -1) continue
+                    var start = Math.max(0, idx - 60)
+                    var end = Math.min(t.length, idx + q.length + 100)
+                    out.push((rec[i].role === "user" ? "> " : "· ")
+                        + (start > 0 ? "… " : "")
+                        + esc(t.slice(start, idx))
+                        + hl + esc(t.slice(idx, idx + q.length)) + "</font></b>"
+                        + esc(t.slice(idx + q.length, end))
+                        + (end < t.length ? " …" : ""))
+                }
+                return out
+            }
+
+            // Row + optional peek panel stacked. The panel grows inside the
+            // popup's ScrollView when open; only one row peeks at a time
+            // (agents.peekSid), so height stays bounded.
+            ColumnLayout {
+                id: rowCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                spacing: 0
+
+                RowLayout {
+                    id: rowContent
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 4
+                    Layout.rightMargin: 4
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Rectangle {
+                        width: 10; height: 10; radius: 5
+                        color: rowItem.tint
+                        Layout.alignment: Qt.AlignVCenter
+
+                        // Gently pulse the state dot for the first minute
+                        // after a session goes idle, so freshly-finished
+                        // agents catch the eye. `alwaysRunToEnd` ensures the
+                        // animation lands back at full opacity when the
+                        // minute elapses.
+                        SequentialAnimation on opacity {
+                            running: rowItem.recentlyIdle
+                            loops: Animation.Infinite
+                            alwaysRunToEnd: true
+                            NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0;  duration: 700; easing.type: Easing.InOutSine }
+                        }
+                    }
+
+                    Kirigami.Icon {
+                        source: rowItem.modelData.provider
+                            ? Qt.resolvedUrl("../icons/" + rowItem.modelData.provider + ".svg")
+                            : ""
+                        implicitWidth: Kirigami.Units.iconSizes.small
+                        implicitHeight: Kirigami.Units.iconSizes.small
+                        smooth: true
+                        visible: source.toString().length > 0
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+
+                    PC3.Label {
+                        text: rowItem.taskLabel
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+
+                    PC3.Label {
+                        text: rowItem.modelData.host || ""
+                        visible: text.length > 0
+                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                        opacity: 0.55
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+
+                    PC3.Label {
+                        text: rowItem.state + " " + agents._ageLabel(rowItem.modelData.stateChangedAt)
+                        color: rowItem.tint
+                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                        font.weight: Font.DemiBold
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+
+                    PC3.ToolButton {
+                        // Keep the button's slot in the layout when its icon is hidden.
+                        visible: true
+                        opacity: rowMouse.containsMouse || rowItem.peekOpen ? 1 : 0
+                        enabled: rowMouse.containsMouse || rowItem.peekOpen
+                        icon.name: rowItem.peekOpen ? "arrow-up" : "arrow-down"
+                        Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                        implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                        implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                        padding: 1
+                        onClicked: {
+                            agents.peekSid = rowItem.peekOpen
+                                ? "" : (rowItem.modelData.sessionId || "")
+                        }
+                        PC3.ToolTip.visible: hovered
+                        PC3.ToolTip.text: "Peek at recent messages (or press Space)"
+                        PC3.ToolTip.delay: 400
+                    }
+                }
+
+                // Filter-hit snippet panel: the conversation lines that
+                // matched the active filter, query highlighted.
+                Rectangle {
+                    visible: agents.filterText.length > 0
+                        && rowItem.filterSnippets.length > 0
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 18
+                    Layout.topMargin: 2
+                    implicitHeight: snipCol.implicitHeight + 8
+                    radius: 4
+                    color: Kirigami.Theme.backgroundColor
+                    border.color: Qt.rgba(
+                        Kirigami.Theme.textColor.r,
+                        Kirigami.Theme.textColor.g,
+                        Kirigami.Theme.textColor.b,
+                        0.14
+                    )
+                    border.width: 1
+
+                    ColumnLayout {
+                        id: snipCol
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 4
+                        spacing: 1
+
+                        Repeater {
+                            model: rowItem.filterSnippets
+                            delegate: PC3.Label {
+                                required property string modelData
+                                Layout.fillWidth: true
+                                text: modelData
+                                textFormat: Text.StyledText
+                                wrapMode: Text.WordWrap
+                                maximumLineCount: 2
+                                elide: Text.ElideRight
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                opacity: 0.85
+                            }
+                        }
+                    }
+                }
+
+                // Inline peek panel: the last few turns of the session,
+                // straight from its transcript via the aggregator's
+                // `recent` field.
+                Rectangle {
+                    visible: rowItem.peekOpen
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 18
+                    Layout.topMargin: 2
+                    Layout.bottomMargin: 4
+                    implicitHeight: peekCol.implicitHeight + 10
+                    radius: 4
+                    color: Kirigami.Theme.backgroundColor
+                    border.color: Qt.rgba(
+                        Kirigami.Theme.textColor.r,
+                        Kirigami.Theme.textColor.g,
+                        Kirigami.Theme.textColor.b,
+                        0.14
+                    )
+                    border.width: 1
+
+                    ColumnLayout {
+                        id: peekCol
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 5
+                        spacing: 1
+
+                        PC3.Label {
+                            Layout.fillWidth: true
+                            text: (rowItem.modelData.cwd || "")
+                                + (rowItem.modelData.host ? "  ·  " + rowItem.modelData.host : "")
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            opacity: 0.85
+                            elide: Text.ElideMiddle
+                        }
+
+                        Repeater {
+                            model: rowItem.modelData.recent || []
+                            delegate: RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+                                required property var modelData
+
+                                PC3.Label {
+                                    text: modelData.role === "user" ? "you" : "ai"
+                                    color: modelData.role === "user"
+                                        ? Kirigami.Theme.highlightColor
+                                        : Kirigami.Theme.textColor
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    font.weight: Font.DemiBold
+                                    Layout.preferredWidth: 22
+                                    Layout.alignment: Qt.AlignTop
+                                    horizontalAlignment: Text.AlignRight
+                                }
+
+                                PC3.Label {
+                                    text: modelData.kind === "tools"
+                                        ? "→ " + (modelData.text || "")
+                                        : (modelData.text || "")
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    font.italic: modelData.kind === "tools"
+                                    color: Kirigami.Theme.textColor
+                                    opacity: modelData.kind === "tools" ? 0.75 : 1
+                                    wrapMode: modelData.kind === "tools" ? Text.NoWrap : Text.Wrap
+                                    maximumLineCount: modelData.kind === "tools" ? 1 : 4
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+
+                        PC3.Label {
+                            visible: ((rowItem.modelData.recent || []).length === 0)
+                            text: "no messages captured yet"
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            opacity: 0.7
+                        }
+                    }
+
+                    // Swallow clicks so clicking inside the panel doesn't
+                    // focus the terminal — reading shouldn't teleport.
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                    }
+                }
+            }
+
             // Compare by sessionId (stable string), NOT by object reference.
             // The aggregate JSON re-parses every 5s, replacing all agent
             // objects — so `flatAgents[selectedIndex] === modelData` silently
@@ -219,18 +547,38 @@ ColumnLayout {
             // "Just finished" green wash. Sits below the selection/hover
             // highlight so both can apply at once.
             Rectangle {
-                anchors.fill: parent
+                z: -1
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: rowContent.implicitHeight + 4
                 radius: 4
                 color: root.agentStateColor("working")
-                opacity: rowItem._idleFreshness * 0.18
+                opacity: rowItem._idleFreshness * 0.08
             }
 
             Rectangle {
-                anchors.fill: parent
+                z: -1
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: rowContent.implicitHeight + 4
                 radius: 4
-                color: Kirigami.Theme.hoverColor
-                opacity: rowItem.selected ? 0.45
-                    : rowMouse.containsMouse ? 0.25 : 0
+                color: Kirigami.Theme.alternateBackgroundColor
+                opacity: rowItem.selected ? 0.1
+                    : rowMouse.containsMouse ? 0.04 : 0
+                Behavior on opacity { NumberAnimation { duration: 120 } }
+            }
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                width: 3
+                height: rowContent.implicitHeight + 4
+                radius: 1
+                color: rowItem.tint
+                opacity: rowItem.selected ? 1
+                    : rowMouse.containsMouse ? 0.7 : 0
                 Behavior on opacity { NumberAnimation { duration: 120 } }
             }
 
@@ -256,71 +604,15 @@ ColumnLayout {
                 return (Date.now() - since) < 60000
             }
 
-            RowLayout {
-                id: rowContent
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: 4
-                anchors.rightMargin: 4
-                spacing: Kirigami.Units.smallSpacing
-
-                Rectangle {
-                    width: 10; height: 10; radius: 5
-                    color: rowItem.tint
-                    Layout.alignment: Qt.AlignVCenter
-
-                    // Gently pulse the state dot for the first minute after
-                    // a session goes idle, so freshly-finished agents catch
-                    // the eye. `alwaysRunToEnd` ensures the animation lands
-                    // back at full opacity when the minute elapses.
-                    SequentialAnimation on opacity {
-                        running: rowItem.recentlyIdle
-                        loops: Animation.Infinite
-                        alwaysRunToEnd: true
-                        NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
-                        NumberAnimation { to: 1.0;  duration: 700; easing.type: Easing.InOutSine }
-                    }
-                }
-
-                Kirigami.Icon {
-                    source: rowItem.modelData.provider
-                        ? Qt.resolvedUrl("../icons/" + rowItem.modelData.provider + ".svg")
-                        : ""
-                    implicitWidth: Kirigami.Units.iconSizes.small
-                    implicitHeight: Kirigami.Units.iconSizes.small
-                    smooth: true
-                    visible: source.toString().length > 0
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                PC3.Label {
-                    text: rowItem.taskLabel
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                PC3.Label {
-                    text: rowItem.modelData.host || ""
-                    visible: text.length > 0
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    opacity: 0.55
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                PC3.Label {
-                    text: rowItem.state + " " + agents._ageLabel(rowItem.modelData.stateChangedAt)
-                    color: rowItem.tint
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    font.weight: Font.DemiBold
-                    Layout.alignment: Qt.AlignVCenter
-                }
-            }
 
             MouseArea {
                 id: rowMouse
-                anchors.fill: parent
+                // Only the single-line row is clickable-to-focus; the peek
+                // panel below swallows its own clicks.
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: rowContent.implicitHeight + 6
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 acceptedButtons: Qt.LeftButton
@@ -336,7 +628,7 @@ ColumnLayout {
                 && (rowItem.modelData.cwd || "").length > 0
             PC3.ToolTip.text: (rowItem.modelData.cwd || "")
                 + (rowItem.modelData.host ? "  (" + rowItem.modelData.host + ")" : "")
-                + "\nclick to focus terminal"
+                + "\nclick to focus · peek button or Space for recent messages"
             PC3.ToolTip.delay: 600
         }
     }
