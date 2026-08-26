@@ -1,135 +1,68 @@
-# CodexBar KDE Plasmoid
+# CodexBar KDE
 
-System-tray plasmoid for KDE Plasma 6 with two surfaces:
+KDE Plasma 6 system-tray applet for AI provider usage and active coding-agent sessions. It ports the macOS CodexBar CLI data to Linux and adds a machine-wide agent view.
 
-1. **Usage** — AI coding-provider rate limits and reset countdowns (Claude, Codex, z.ai, OpenRouter, Kilo)
-2. **Agent View** — real-time overview of every active coding-agent session on the machine, with one-click terminal focus
+## Architecture
 
-Linux port of macOS CodexBar (https://github.com/steipete/CodexBar).
+- `contents/ui/main.qml` owns polling and normalized snapshots. `contents/scripts/codexbar_fetch.py` is the single provider normalization path.
+- `contents/scripts/codexbar_agents.py` scans `/proc`, reads transcripts, and writes `~/.codexbar/agents.json`.
+- `contents/config/main.xml` is the sole configuration schema. Settings pages live in `contents/ui/config*.qml`.
+- `contents/scripts/codexbar_focus.py` and `contents/scripts/install_integration.py` implement terminal focus and integration setup.
 
-## Stack
+Extend these paths instead of adding another polling, normalization, or configuration path.
 
-- Plasma 6 (KPackage `Plasma/Applet`)
-- QML / Qt 6, `org.kde.plasma.plasmoid`, `Plasma5Support.DataSource` (executable engine)
-- Python helper invoking `codexbar` CLI (Linux build from `steipete/CodexBar` releases)
-- Python agent aggregator scanning `/proc` for Claude, Codex, OpenCode, pi/omp sessions
-- Plasmoid ID: `org.codexbar.plasmoid`
-
-## Layout
-
-```
-contents/
-  config/main.xml              # KConfigXT schema
-  config/config.qml             # Settings tab definitions (Backend / Providers / Tray / Agents)
-  ui/main.qml                   # PlasmoidItem root, polling Timer, helpers
-  ui/CompactRepresentation.qml  # Tray: rings, state dots, topic label
-  ui/FullRepresentation.qml     # Popup: tab bar (Usage / Agents)
-  ui/ProviderSection.qml        # Per-provider usage section
-  ui/AgentsSection.qml          # Agent list with folder groups
-  ui/configBackend.qml          # Settings → Backend
-  ui/configProviders.qml        # Settings → Providers
-  ui/configTray.qml             # Settings → Tray
-  ui/configAgents.qml           # Settings → Agents (incl. integration install)
-  scripts/codexbar_fetch.py     # Parallel CLI invocation, merges JSON
-  scripts/codexbar_agents.py    # Agent state aggregator (/proc scanner)
-  scripts/codexbar_focus.py     # Click-to-focus: KWin + Kitty activation
-  scripts/install_integration.py # One-shot: env scripts + URL handler + cleanup
-  icons/*.svg                   # Per-provider icons
-```
-
-## Dev workflow
+## Development
 
 ```sh
-# install (first time)
+# First install
 kpackagetool6 -t Plasma/Applet -i .
 
-# upgrade after edits
+# Upgrade after edits
 kpackagetool6 -t Plasma/Applet -u .
 
-# clean reinstall (when files are deleted, not just modified)
+# Clean reinstall after deleting packaged files
 kpackagetool6 -t Plasma/Applet -r org.codexbar.plasmoid
 kpackagetool6 -t Plasma/Applet -i .
 
-# restart plasmashell (real one runs as transient app-plasmashell@*.service,
-# `systemctl --user restart plasma-plasmashell` does NOT work)
-plasmashell --replace
-# or
+# Reload the real panel
 kquitapp6 plasmashell && kstart plasmashell
 ```
 
-Installed copy lives at `~/.local/share/plasma/plasmoids/org.codexbar.plasmoid/` — self-contained, independent of source path.
+For changed QML, run `qmllint`. For changed Python, run
+`uv run python -m py_compile <files>`. Install the package and verify UI
+behavior in the actual panel. `plasmoidviewer` is unreliable on Wayland and can
+exit on focus loss.
 
-## Provider sources (Linux)
+When completing a feature, update README.md in the same change.
 
-| Provider | `--source` |
-|---|---|
-| `claude` | `oauth` (fallback `cli` on HTTP 429) |
-| `codex` | `oauth` (fallback `cli`) |
-| `zai` | auto (= api) |
-| `openrouter` | auto |
-| `kilo` | auto |
+## Provider contracts
 
-`extraRateWindows` (Claude Design, Daily Routines) only present with `--source oauth`. Cookie/web providers are macOS-only (SweetCookieKit gated by `#if os(macOS)`).
+- Claude and Codex use OAuth, with CLI fallback. z.ai, OpenRouter, and Kilo use automatic source selection.
+- Claude `extraRateWindows` require OAuth.
+- Codex emits one normalized record per account. Legacy tray keys use `codex:<window>`. Account-specific keys use `codex:<encoded-email>:<window>`.
+- Codex Spark windows are intentionally filtered out.
+- Provider order is Claude, Codex, z.ai, OpenRouter, Kilo on every surface.
+- OpenRouter shows balance in the header. It renders a usage bar only when `keyLimit > 0`.
 
-## Agent discovery
+Plasmashell does not inherit API keys from shell startup files.
+`~/.codexbar/config.json` must be mode `0600`; the CLI reads it for provider
+`apiKey` values and additional Codex profile homes. Default Codex and Claude
+authentication remains in `~/.codex/auth.json` and
+`~/.claude/.credentials.json`. See README.md section "Configure provider
+credentials" for setup.
 
-The aggregator (`codexbar_agents.py`) scans `/proc` every tick:
+## Agent contracts
 
-- **Claude Code**: `pgrep claude` → reads `~/.claude/projects/*/sessions/*/transcript.jsonl` for window title + last prompt
-- **Codex CLI**: `pgrep codex` → reads `~/.codex/sessions/*/transcript.jsonl`
-- **OpenCode**: `pgrep opencode` → reads transcript JSONL
-- **pi / omp**: `pgrep -x pi` → reads `~/.pi/agent/sessions/` or `~/.omp/agent/sessions/` JSONL rollouts
+- The aggregator scans `/proc` every tick. Processes without a hook sentinel remain visible as `untracked`.
+- Each session record carries up to eight recent user or assistant turns, capped at 320 characters each. Consecutive tool-only turns collapse into one summary.
+- omp advisor sidecars named `__advisor.*.jsonl` are never session rollouts.
+- Session filtering uses fuzzy subsequence matching within one field. Recent conversation text uses exact case-insensitive substring matching.
+- `codexbar://focus/<sessionId>` dispatches to `codexbar_focus.py`. It walks
+  process ancestors, tries Kitty remote control, then falls back to KWin
+  activation. `install_integration.py` registers the handler.
 
-Sessions without a hook sentinel file appear as "untracked" — still visible with state and cwd, just no task title.
+## Plasma constraints
 
-## Click-to-focus
-
-Clicking an agent row opens `codexbar://focus/<sessionId>`, handled by `codexbar_focus.py`:
-1. Walks `/proc` ancestors from the session PID to find the terminal emulator
-2. For Kitty: uses the remote control socket to focus the right tab/window
-3. Falls back to KWin scripting (`kwin-console`) to activate the window
-
-The `install_integration.py` script registers the URL scheme handler.
-
-## Credentials — `~/.codexbar/config.json` (REQUIRED for plasmoid)
-
-Plasmashell runs in a separate environment from your interactive shell, so `KILO_API_KEY`/`ZAI_API_KEY` exported in `~/.zshrc` are **invisible** to the plasmoid subprocess. The CLI also reads `~/.codexbar/config.json` and injects each provider's `apiKey` as the appropriate env var before fetching. Use this file for tokens the plasmoid needs:
-
-```json
-{
-  "version": 1,
-  "providers": [
-    {"id": "zai",  "enabled": true, "apiKey": "<from https://z.ai/manage-apikey/apikey>"},
-    {"id": "kilo", "enabled": true, "apiKey": "<from app.kilo.ai or KILO_API_KEY env>"}
-  ]
-}
-```
-
-File must be `chmod 600`. Codex/Claude/OpenRouter don't need entries here — they use other auth paths (Codex/Claude OAuth tokens in `~/.codex/auth.json` / `~/.claude/.credentials.json`; OpenRouter via `OPENROUTER_API_KEY` env which the CLI reads).
-
-**Quick proof config.json works**: `env -u ZAI_API_KEY -u KILO_API_KEY codexbar usage --provider zai,kilo --json`.
-
-## Canonical provider order
-
-**Claude → Codex → z.ai → OpenRouter → Kilo**. Applied in compact rep, popup, tooltip, settings — regardless of saved config order.
-
-## Keyboard shortcuts
-
-- `Super+A`: opens popup and switches to Agents tab
-- `↑`/`↓`: navigate agent rows
-- `Enter`: focus the terminal hosting the selected agent session
-- `Esc`: close popup
-
-## Config keys (`main.xml`)
-
-`cliPath`, `refreshSeconds`, `enableClaude/Codex/Zai/OpenRouter/Kilo`, `compactStyle` (0=ring+percent, 1=ring, 2=percent), `trayIndicators` (StringList of `provider:window` combos), `trayIconSize` (14-48px), `showAgents`, `agentBlockedBadge`, `showAgentStateDots`, `agentStateDotsScale` (50-200%), `showAgentPrompts`, `includeUntrackedAgents`, `agentsRefreshSeconds` (2-120), `showAgentTopicInPanel`, `agentTopicMaxWidth` (80-800px), `closePopupOnFocusLoss`.
-
-## Known constraints
-
-- System tray clamps popup height (~280-460px). No API override exists in Plasma 6. Keep popup compact; one row per window.
-- `plasmoidviewer` is unreliable on Wayland (exits on focus loss). Test in actual panel.
-- Claude OAuth fetch can take ~16s — keep helper timeout ≥30s.
-
-## OpenRouter UX
-
-Show balance in header. Render usage bar only when `keyLimit > 0` (per-key allowance set); otherwise no bar.
+- Plasma clamps popup height. Keep usage sections compact.
+- Claude OAuth fetches can take about 16 seconds. Keep the provider helper timeout at least 30 seconds.
+- `plasmashell` runs as a transient service. `systemctl --user restart plasma-plasmashell` does not reload it reliably.
