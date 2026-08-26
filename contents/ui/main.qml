@@ -118,6 +118,11 @@ PlasmoidItem {
             var allowedSlots = root._tooltipSlots[rec.id]
             if (!allowedSlots) continue
             var name = labels[rec.id] || rec.id
+            if (rec.id === "codex" && rec.accountEmail) {
+                var account = String(rec.accountEmail)
+                    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                name += " · " + account
+            }
             if (!rec.ok) {
                 if (anyData) {
                     html += '<tr><td colspan="3" style="font-size: 6px">&nbsp;</td></tr>'

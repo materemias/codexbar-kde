@@ -47,7 +47,7 @@ required.
 | Provider       | Auth                                  | What it shows                                                     |
 | -------------- | ------------------------------------- | ----------------------------------------------------------------- |
 | **Claude**     | OAuth (`~/.claude/.credentials.json`) | 5h / 7d windows, plus Claude Design and Daily Routines quotas     |
-| **Codex**      | OAuth (`~/.codex/auth.json`)          | 5h / weekly windows with reset countdowns                         |
+| **Codex**      | OAuth (`~/.codex/auth.json`)          | Per-account 5h and weekly windows                                 |
 | **z.ai**       | API key (`ZAI_API_KEY`)               | 5h and monthly windows                                            |
 | **OpenRouter** | API key (`OPENROUTER_API_KEY`)        | Remaining balance; per-key allowance bar when a `keyLimit` is set |
 | **Kilo**       | API key (`KILO_API_KEY`)              | Remaining credits balance                                         |
@@ -94,26 +94,34 @@ it's a self-contained snapshot, so the source directory can live anywhere.
 ## Configure provider credentials
 
 Plasmashell runs in its own environment, so API keys exported in `~/.zshrc` or
-`~/.bashrc` are **invisible** to the plasmoid. The `codexbar` CLI reads
-`~/.codexbar/config.json` and injects each provider's `apiKey` as the
-appropriate env var before fetching — use this file for tokens the plasmoid
-needs to see:
+`~/.bashrc` are invisible to the plasmoid. The `codexbar` CLI reads
+`~/.codexbar/config.json` and injects each provider's `apiKey` before fetching.
+The same file can list additional Codex profile homes:
 
 ```json
 {
   "version": 1,
   "providers": [
-    {"id": "zai",  "enabled": true, "apiKey": "<from https://z.ai/manage-apikey/apikey>"},
-    {"id": "kilo", "enabled": true, "apiKey": "<from app.kilo.ai>"}
+    {"id": "codex", "enabled": true, "codexProfileHomePaths": ["~/.codex-pro"]},
+    {"id": "zai",   "enabled": true, "apiKey": "<from https://z.ai/manage-apikey/apikey>"},
+    {"id": "kilo",  "enabled": true, "apiKey": "<from app.kilo.ai>"}
   ]
 }
 ```
 
 Set permissions: `chmod 600 ~/.codexbar/config.json`.
 
-Codex, Claude, and OpenRouter don't need entries here — they use their own
-auth paths (`~/.codex/auth.json`, `~/.claude/.credentials.json`, and
-`OPENROUTER_API_KEY` respectively).
+The default Codex account needs no config entry. It uses `~/.codex/auth.json`.
+To add another subscription, authenticate a separate Codex home and list it in
+`codexProfileHomePaths`:
+
+```sh
+mkdir -p ~/.codex-pro
+CODEX_HOME=~/.codex-pro codex login
+```
+
+Claude and OpenRouter use `~/.claude/.credentials.json` and
+`OPENROUTER_API_KEY` respectively.
 
 ## Update
 
@@ -159,7 +167,8 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 - Toggle individual providers on/off (Claude, Codex, z.ai, OpenRouter, Kilo)
 
 ### Tray
-- Pick which (provider, window) meters to render as tray rings
+- Pick meters per Codex account and per rate window
+- Pick provider and window meters for Claude, z.ai, OpenRouter, and Kilo
 - Indicator style: ring + percent, ring only, or percent only
 - Icon and ring size (14–48px, capped by panel thickness)
 

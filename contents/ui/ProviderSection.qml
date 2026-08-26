@@ -14,18 +14,18 @@ ColumnLayout {
 
     readonly property real labelColumnWidth: Kirigami.Units.gridUnit * 2.6
 
-    // Active rate-window rows only. 0% windows are hidden — they're noise
-    // in a status display. Applies uniformly to primary/secondary/tertiary
-    // slots and extras (Sonnet, Designs, Daily Routines).
+    // A single-account status display hides unused windows. With multiple
+    // Codex accounts, keep 0% rows so an unused account does not look empty.
     readonly property var visibleRows: {
         if (!section.record || section.record.error) return []
         var pid = section.record.id
         var rows = []
+        var hideZero = (section.record.accountCount || 1) < 2
         var slots = ["primary", "secondary", "tertiary"]
         for (var i = 0; i < slots.length; i++) {
             var w = section.record[slots[i]]
             if (!w || w.usedPercent === undefined || w.usedPercent === null) continue
-            if ((w.usedPercent || 0) < 0.01) continue
+            if (hideZero && (w.usedPercent || 0) < 0.01) continue
             rows.push({ rec: w, slot: slots[i], providerId: pid, extraTitle: "" })
         }
         var extras = section.record.extraRateWindows || []
@@ -33,7 +33,7 @@ ColumnLayout {
             var extra = extras[e]
             if (!extra || !extra.window) continue
             if (extra.window.usedPercent === undefined || extra.window.usedPercent === null) continue
-            if ((extra.window.usedPercent || 0) < 0.01) continue
+            if (hideZero && (extra.window.usedPercent || 0) < 0.01) continue
             rows.push({
                 rec: extra.window,
                 slot: extra.id || "extra",
@@ -79,7 +79,12 @@ ColumnLayout {
             text: {
                 var rec = section.record || {}
                 if (rec.error) return ""
-                if (rec.id === "codex" && rec.loginMethod) return "· " + rec.loginMethod
+                if (rec.id === "codex") {
+                    var parts = []
+                    if (rec.accountEmail) parts.push(rec.accountEmail)
+                    if (rec.loginMethod) parts.push(rec.loginMethod)
+                    return parts.length > 0 ? "· " + parts.join(" · ") : ""
+                }
                 if (rec.id === "claude" && rec.loginMethod) return "· " + rec.loginMethod
                 if (rec.accountEmail) return "· " + rec.accountEmail
                 return ""

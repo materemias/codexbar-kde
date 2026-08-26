@@ -30,54 +30,90 @@ Item {
         if (keys.length === 0) return []
         var providers = root.snapshot.providers || []
         var byId = {}
-        for (var i = 0; i < providers.length; i++) byId[providers[i].id] = providers[i]
+        for (var i = 0; i < providers.length; i++) {
+            var providerId = providers[i].id
+            if (!byId[providerId]) byId[providerId] = []
+            byId[providerId].push(providers[i])
+        }
 
-        var groupByPid = {}
-        for (var k = 0; k < keys.length; k++) {
-            var parts = keys[k].split(":")
-            var pid = parts[0]
-            var slot = parts[1] || "primary"
-            if (groupByPid[pid] === undefined) {
-                groupByPid[pid] = { providerId: pid, icon: compact._iconFor(pid), windows: [] }
+        var groupByKey = {}
+        var groupOrder = []
+        function windowFor(record, slot) {
+            if (record[slot]) return record[slot]
+            var extras = record.extraRateWindows || []
+            for (var i = 0; i < extras.length; i++) {
+                if (extras[i].id === slot) return extras[i].window
             }
-            var rec = byId[pid]
+            return null
+        }
+        function addWindow(pid, encodedAccount, slot) {
+            var groupKey = pid + "|" + encodedAccount
+            if (!groupByKey[groupKey]) {
+                groupByKey[groupKey] = {
+                    providerId: pid,
+                    icon: compact._iconFor(pid),
+                    windows: [],
+                    windowKeys: ({})
+                }
+                groupOrder.push(groupKey)
+            }
+            var group = groupByKey[groupKey]
+            if (group.windowKeys[slot]) return
+            group.windowKeys[slot] = true
+
+            var records = byId[pid] || []
             var win = { slot: slot, pct: 0, hasData: false, ok: false }
-            if (rec) {
-                win.ok = !!rec.ok
-                if (rec.ok) {
-                    var w = rec[slot]
-                    // Standard primary/secondary/tertiary live on the record;
-                    // anything else (claude-design, claude-routines, …) is
-                    // resolved against extraRateWindows by id.
-                    if (!w && rec.extraRateWindows) {
-                        for (var xi = 0; xi < rec.extraRateWindows.length; xi++) {
-                            if (rec.extraRateWindows[xi].id === slot) {
-                                w = rec.extraRateWindows[xi].window
-                                break
-                            }
-                        }
-                    }
-                    if (w && w.usedPercent !== undefined && w.usedPercent !== null) {
-                        win.pct = Math.max(0, Math.min(100, w.usedPercent))
-                        win.hasData = true
-                    }
+            for (var ri = 0; ri < records.length; ri++) {
+                var rec = records[ri]
+                var recAccount = rec.accountEmail
+                    ? encodeURIComponent(String(rec.accountEmail)) : ""
+                if (encodedAccount && recAccount !== encodedAccount) continue
+                if (!rec.ok) continue
+                win.ok = true
+                var w = windowFor(rec, slot)
+                if (w && w.usedPercent !== undefined && w.usedPercent !== null) {
+                    var pct = Math.max(0, Math.min(100, w.usedPercent))
+                    if (!win.hasData || pct > win.pct) win.pct = pct
+                    win.hasData = true
                 }
             }
-            groupByPid[pid].windows.push(win)
+            group.windows.push(win)
+        }
+
+        for (var k = 0; k < keys.length; k++) {
+            var parts = String(keys[k]).split(":")
+            var pid = parts[0]
+            if (pid === "codex" && parts.length === 2) {
+                var codexRecords = byId.codex || []
+                var expanded = false
+                for (var ai = 0; ai < codexRecords.length; ai++) {
+                    var email = codexRecords[ai].accountEmail
+                    if (!email) continue
+                    addWindow(pid, encodeURIComponent(String(email)), parts[1])
+                    expanded = true
+                }
+                if (expanded) continue
+            }
+            var account = parts.length > 2 ? parts[1] : ""
+            var slot = parts.length > 2 ? parts.slice(2).join(":") : (parts[1] || "primary")
+            addWindow(pid, account, slot)
         }
 
         var out = []
         var seen = {}
         for (var c = 0; c < compact._canonicalOrder.length; c++) {
             var canonId = compact._canonicalOrder[c]
-            if (groupByPid[canonId]) {
-                out.push(groupByPid[canonId])
-                seen[canonId] = true
+            for (var oi = 0; oi < groupOrder.length; oi++) {
+                var orderedKey = groupOrder[oi]
+                if (groupByKey[orderedKey].providerId === canonId) {
+                    out.push(groupByKey[orderedKey])
+                    seen[orderedKey] = true
+                }
             }
         }
-        // Any providers not in the canonical list go at the end.
-        for (var pid2 in groupByPid) {
-            if (!seen[pid2]) out.push(groupByPid[pid2])
+        for (var gi = 0; gi < groupOrder.length; gi++) {
+            var remainingKey = groupOrder[gi]
+            if (!seen[remainingKey]) out.push(groupByKey[remainingKey])
         }
         return out
     }
@@ -191,10 +227,16 @@ Item {
         Repeater {
             model: compact.groups
             delegate: RowLayout {
+                id: groupItem
+                required property int index
                 required property var modelData
+                readonly property bool repeatedProvider:
+                    index > 0
+                    && compact.groups[index - 1].providerId === modelData.providerId
                 spacing: Kirigami.Units.smallSpacing
 
                 Kirigami.Icon {
+                    visible: !groupItem.repeatedProvider
                     source: modelData.icon
                     implicitWidth: compact.iconSize
                     implicitHeight: compact.iconSize
@@ -202,6 +244,12 @@ Item {
                     Layout.alignment: Qt.AlignVCenter
                 }
 
+                PC3.Label {
+                    visible: groupItem.repeatedProvider
+                    text: "|"
+                    opacity: 0.5
+                    Layout.alignment: Qt.AlignVCenter
+                }
                 Repeater {
                     id: _windowsRepeater
                     model: modelData.windows

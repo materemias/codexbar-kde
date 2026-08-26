@@ -42,88 +42,62 @@ def _expand(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
-def _run_cli(cli: str, provider: str, source: str | None, timeout: float) -> dict:
-    """Invoke `codexbar usage` for one provider. Returns the inner usage record."""
-    cmd = [cli, "usage", "--json", "--provider", provider]
-    if source:
-        cmd += ["--source", source]
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
+def _result_error(provider: str, code: str, message: str, source: str | None = None) -> dict:
+    return {
+        "id": provider,
+        "ok": False,
+        "source": source,
+        "error": {"code": code, "message": message},
+    }
+
+
+def _normalize_record(provider: str, record: dict) -> dict:
+    raw_usage = record.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else {}
+    raw_identity = usage.get("identity")
+    identity = raw_identity if isinstance(raw_identity, dict) else {}
+    raw_email = usage.get("accountEmail") or record.get("account")
+    account_email = raw_email.strip() if isinstance(raw_email, str) else None
+    raw_login_method = usage.get("loginMethod") or identity.get("loginMethod")
+    login_method = raw_login_method.strip() if isinstance(raw_login_method, str) else None
+
+    if record.get("error"):
+        raw_error = record["error"]
+        error = raw_error if isinstance(raw_error, dict) else {}
+        result = _result_error(
+            provider,
+            str(error.get("kind", "provider")),
+            str(error.get("message") or (
+                raw_error if isinstance(raw_error, str) else "unknown error"
+            )),
+            record.get("source"),
         )
-    except FileNotFoundError:
-        return {
-            "id": provider,
-            "ok": False,
-            "error": {"code": "cli_missing", "message": f"CLI not found at {cli}"},
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "id": provider,
-            "ok": False,
-            "error": {"code": "timeout", "message": f"CLI timed out after {timeout}s"},
-        }
-    stdout = (proc.stdout or "").strip()
-    if not stdout:
-        return {
-            "id": provider,
-            "ok": False,
-            "error": {
-                "code": "no_output",
-                "message": (proc.stderr or "empty stdout").strip()[:400],
-            },
-        }
-    try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        return {
-            "id": provider,
-            "ok": False,
-            "error": {"code": "parse", "message": f"{exc}: {stdout[:200]}"},
-        }
-    record = payload[0] if isinstance(payload, list) and payload else payload
-    if not isinstance(record, dict):
-        return {
-            "id": provider,
-            "ok": False,
-            "error": {"code": "shape", "message": "unexpected CLI payload"},
-        }
-    if "error" in record and record.get("error"):
-        err = record["error"]
-        return {
-            "id": provider,
-            "ok": False,
-            "source": record.get("source"),
-            "error": {
-                "code": str(err.get("kind", "provider")),
-                "message": str(err.get("message", "unknown error")),
-            },
-        }
-    usage = record.get("usage") or {}
+        result.update({
+            "identity": identity,
+            "loginMethod": login_method,
+            "accountEmail": account_email,
+        })
+        return result
+
     primary = usage.get("primary")
     or_usage = usage.get("openRouterUsage")
     balance_text: str | None = None
     if provider == "openrouter" and or_usage and isinstance(or_usage, dict):
         # The CodexBar CLI returns primary.usedPercent=100 as a placeholder.
-        # We replace it with a meaningful per-key allowance bar when the user
-        # has set a credit limit on this key; otherwise we drop primary
-        # entirely so the section just shows the balance in its header.
+        # Replace it with the per-key allowance when one exists.
         key_limit = or_usage.get("keyLimit")
         if isinstance(key_limit, (int, float)) and key_limit > 0:
             monthly = or_usage.get("keyUsageMonthly")
             monthly = monthly if isinstance(monthly, (int, float)) else 0.0
-            pct = min(100.0, (monthly / key_limit) * 100.0) if key_limit > 0 else 0.0
             primary = {
-                "usedPercent": pct,
+                "usedPercent": min(100.0, (monthly / key_limit) * 100.0),
                 "resetDescription": f"${monthly:.2f} / ${key_limit:.0f}",
             }
         else:
             primary = None
     elif provider == "kilo" and isinstance(primary, dict):
-        # CLI returns `primary.resetDescription = "6.62/20 credits"`. With
-        # auto-topup off there's no recurring cap — just a prepaid balance —
-        # so mirror the openrouter "no keyLimit" case: drop the bar and surface
-        # remaining credits in the header instead.
+        # Kilo reports used/total credits. With auto-topup off this is a
+        # balance, not a recurring window, so show the amount in the header.
         m = re.match(
             r"^\s*([\d.]+)\s*/\s*([\d.]+)\s*credits?",
             primary.get("resetDescription") or "",
@@ -137,19 +111,27 @@ def _run_cli(cli: str, provider: str, source: str | None, timeout: float) -> dic
             if used is not None and total is not None:
                 balance_text = f"${max(0.0, total - used):.2f} left"
                 primary = None
+    raw_extras = usage.get("extraRateWindows")
+    extra_rate_windows = [
+        extra
+        for extra in (raw_extras if isinstance(raw_extras, list) else [])
+        if isinstance(extra, dict)
+        and not (
+            provider == "codex"
+            and str(extra.get("id", "")).startswith("codex-spark")
+        )
+    ]
     return {
         "id": provider,
         "ok": True,
         "source": record.get("source"),
-        "identity": usage.get("identity") or {},
-        "loginMethod": usage.get("loginMethod"),
-        "accountEmail": usage.get("accountEmail"),
+        "identity": identity,
+        "loginMethod": login_method,
+        "accountEmail": account_email,
         "primary": primary,
         "secondary": usage.get("secondary"),
         "tertiary": usage.get("tertiary"),
-        # Extra named windows like Claude Design + Daily Routines come through
-        # the OAuth source only — CLI fallback leaves this empty.
-        "extraRateWindows": usage.get("extraRateWindows") or [],
+        "extraRateWindows": extra_rate_windows,
         "openRouterUsage": or_usage,
         "balanceText": balance_text,
         "updatedAt": usage.get("updatedAt"),
@@ -157,16 +139,56 @@ def _run_cli(cli: str, provider: str, source: str | None, timeout: float) -> dic
     }
 
 
-def _fetch_provider(cli: str, provider: str, timeout: float) -> dict:
+def _run_cli(cli: str, provider: str, source: str | None, timeout: float) -> list[dict]:
+    """Invoke `codexbar usage` and normalize every returned account."""
+    cmd = [cli, "usage", "--json", "--provider", provider]
+    if provider == "codex":
+        cmd.append("--all-accounts")
+    if source:
+        cmd += ["--source", source]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except FileNotFoundError:
+        return [_result_error(provider, "cli_missing", f"CLI not found at {cli}")]
+    except subprocess.TimeoutExpired:
+        return [_result_error(provider, "timeout", f"CLI timed out after {timeout}s")]
+
+    stdout = (proc.stdout or "").strip()
+    if not stdout:
+        return [
+            _result_error(
+                provider,
+                "no_output",
+                (proc.stderr or "empty stdout").strip()[:400],
+            )
+        ]
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return [_result_error(provider, "parse", f"{exc}: {stdout[:200]}")]
+
+    records = payload if isinstance(payload, list) else [payload]
+    if not records or any(not isinstance(record, dict) for record in records):
+        return [_result_error(provider, "shape", "unexpected CLI payload")]
+    results = [_normalize_record(provider, record) for record in records]
+    account_count = len(results)
+    for result in results:
+        result["accountCount"] = account_count
+    return results
+
+
+def _fetch_provider(cli: str, provider: str, timeout: float) -> list[dict]:
     primary_source = PROVIDER_SOURCE.get(provider)
-    result = _run_cli(cli, provider, primary_source, timeout)
-    if result.get("ok"):
-        return result
+    results = _run_cli(cli, provider, primary_source, timeout)
+    if any(result.get("ok") for result in results):
+        return results
     for fallback in PROVIDER_FALLBACK_SOURCES.get(provider, []):
-        retry = _run_cli(cli, provider, fallback, timeout)
-        if retry.get("ok"):
-            return retry
-    return result
+        retries = _run_cli(cli, provider, fallback, timeout)
+        if any(retry.get("ok") for retry in retries):
+            return retries
+    return results
 
 
 def _highest(records: list[dict]) -> tuple[str | None, float]:
@@ -230,7 +252,7 @@ def main(argv: list[str]) -> int:
             pool.submit(_fetch_provider, cli, p, args.timeout): p for p in providers
         }
         for fut in as_completed(futures):
-            results.append(fut.result())
+            results.extend(fut.result())
 
     # Preserve the requested provider order in output.
     order = {p: i for i, p in enumerate(providers)}
