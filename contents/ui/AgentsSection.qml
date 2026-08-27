@@ -678,53 +678,53 @@ ColumnLayout {
                                 required property var modelData
                                 readonly property bool toolTurn: modelData.kind === "tools"
                                 readonly property bool userTurn: modelData.role === "user"
+                                readonly property color accent: {
+                                    if (toolTurn) return Kirigami.Theme.neutralTextColor
+                                    if (userTurn) return Kirigami.Theme.highlightColor
+                                    return Kirigami.Theme.linkColor
+                                }
 
                                 Layout.fillWidth: true
                                 implicitHeight: turnRow.implicitHeight + 6
                                 radius: 3
-                                color: userTurn
-                                    ? Qt.rgba(
-                                        Kirigami.Theme.highlightColor.r,
-                                        Kirigami.Theme.highlightColor.g,
-                                        Kirigami.Theme.highlightColor.b,
-                                        0.08
-                                    )
-                                    : Qt.rgba(
-                                        Kirigami.Theme.textColor.r,
-                                        Kirigami.Theme.textColor.g,
-                                        Kirigami.Theme.textColor.b,
-                                        0.04
-                                    )
-                                border.color: userTurn
-                                    ? Qt.rgba(
-                                        Kirigami.Theme.highlightColor.r,
-                                        Kirigami.Theme.highlightColor.g,
-                                        Kirigami.Theme.highlightColor.b,
-                                        0.22
-                                    )
-                                    : Qt.rgba(
-                                        Kirigami.Theme.textColor.r,
-                                        Kirigami.Theme.textColor.g,
-                                        Kirigami.Theme.textColor.b,
-                                        0.10
-                                    )
+                                color: Qt.rgba(
+                                    accent.r,
+                                    accent.g,
+                                    accent.b,
+                                    0.14
+                                )
+                                border.color: Qt.rgba(
+                                    accent.r,
+                                    accent.g,
+                                    accent.b,
+                                    0.40
+                                )
                                 border.width: 1
+
+                                Rectangle {
+                                    anchors.left: parent.left
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    anchors.leftMargin: 1
+                                    anchors.topMargin: 1
+                                    anchors.bottomMargin: 1
+                                    width: 3
+                                    color: turnCard.accent
+                                }
 
                                 RowLayout {
                                     id: turnRow
                                     anchors.fill: parent
                                     anchors.margins: 3
+                                    anchors.leftMargin: 8
                                     spacing: Kirigami.Units.smallSpacing
 
                                     PC3.Label {
                                         text: turnCard.toolTurn
-                                            ? "tools"
-                                            : (turnCard.userTurn ? "you" : "ai")
+                                            ? "TOOLS"
+                                            : (turnCard.userTurn ? "YOU" : "AI")
                                         textFormat: Text.PlainText
-                                        color: turnCard.userTurn
-                                            ? Kirigami.Theme.highlightColor
-                                            : Kirigami.Theme.textColor
-                                        opacity: turnCard.toolTurn ? 0.65 : 0.9
+                                        color: turnCard.accent
                                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                                         font.weight: Font.DemiBold
                                         font.italic: turnCard.toolTurn

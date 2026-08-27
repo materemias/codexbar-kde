@@ -30,8 +30,8 @@ your machine, grouped by project folder:
   highlighted badge, so you can see which agent is one switch away. Windows
   pinned to all desktops show "all".
 - **Conversation peek.** Click the arrow on a session row or press `Space` to
-  expand its last eight user and assistant turns. Cards separate each speaker,
-  while tool summaries stay compact.
+  expand its last eight user and assistant turns. Color-coded cards separate
+  user, assistant, and tool turns.
 - **Type-to-filter search.** Start typing on the Agents tab. The filter fuzzy
   matches the session title, last prompt, working directory, and provider.
   Recent conversation text uses exact case-insensitive substring matching.
