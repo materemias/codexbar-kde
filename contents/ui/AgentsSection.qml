@@ -647,48 +647,107 @@ ColumnLayout {
                         anchors.right: parent.right
                         anchors.top: parent.top
                         anchors.margins: 5
-                        spacing: 1
+                        spacing: 3
 
                         PC3.Label {
                             Layout.fillWidth: true
                             text: (rowItem.modelData.cwd || "")
                                 + (rowItem.modelData.host ? "  ·  " + rowItem.modelData.host : "")
+                            textFormat: Text.PlainText
                             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            opacity: 0.85
+                            font.weight: Font.DemiBold
+                            opacity: 0.75
                             elide: Text.ElideMiddle
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 1
+                            color: Qt.rgba(
+                                Kirigami.Theme.textColor.r,
+                                Kirigami.Theme.textColor.g,
+                                Kirigami.Theme.textColor.b,
+                                0.14
+                            )
                         }
 
                         Repeater {
                             model: rowItem.modelData.recent || []
-                            delegate: RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Kirigami.Units.smallSpacing
+                            delegate: Rectangle {
+                                id: turnCard
                                 required property var modelData
+                                readonly property bool toolTurn: modelData.kind === "tools"
+                                readonly property bool userTurn: modelData.role === "user"
 
-                                PC3.Label {
-                                    text: modelData.role === "user" ? "you" : "ai"
-                                    color: modelData.role === "user"
-                                        ? Kirigami.Theme.highlightColor
-                                        : Kirigami.Theme.textColor
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                    font.weight: Font.DemiBold
-                                    Layout.preferredWidth: 22
-                                    Layout.alignment: Qt.AlignTop
-                                    horizontalAlignment: Text.AlignRight
-                                }
+                                Layout.fillWidth: true
+                                implicitHeight: turnRow.implicitHeight + 6
+                                radius: 3
+                                color: userTurn
+                                    ? Qt.rgba(
+                                        Kirigami.Theme.highlightColor.r,
+                                        Kirigami.Theme.highlightColor.g,
+                                        Kirigami.Theme.highlightColor.b,
+                                        0.08
+                                    )
+                                    : Qt.rgba(
+                                        Kirigami.Theme.textColor.r,
+                                        Kirigami.Theme.textColor.g,
+                                        Kirigami.Theme.textColor.b,
+                                        0.04
+                                    )
+                                border.color: userTurn
+                                    ? Qt.rgba(
+                                        Kirigami.Theme.highlightColor.r,
+                                        Kirigami.Theme.highlightColor.g,
+                                        Kirigami.Theme.highlightColor.b,
+                                        0.22
+                                    )
+                                    : Qt.rgba(
+                                        Kirigami.Theme.textColor.r,
+                                        Kirigami.Theme.textColor.g,
+                                        Kirigami.Theme.textColor.b,
+                                        0.10
+                                    )
+                                border.width: 1
 
-                                PC3.Label {
-                                    text: modelData.kind === "tools"
-                                        ? "→ " + (modelData.text || "")
-                                        : (modelData.text || "")
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                    font.italic: modelData.kind === "tools"
-                                    color: Kirigami.Theme.textColor
-                                    opacity: modelData.kind === "tools" ? 0.75 : 1
-                                    wrapMode: modelData.kind === "tools" ? Text.NoWrap : Text.Wrap
-                                    maximumLineCount: modelData.kind === "tools" ? 1 : 4
-                                    elide: Text.ElideRight
-                                    Layout.fillWidth: true
+                                RowLayout {
+                                    id: turnRow
+                                    anchors.fill: parent
+                                    anchors.margins: 3
+                                    spacing: Kirigami.Units.smallSpacing
+
+                                    PC3.Label {
+                                        text: turnCard.toolTurn
+                                            ? "tools"
+                                            : (turnCard.userTurn ? "you" : "ai")
+                                        textFormat: Text.PlainText
+                                        color: turnCard.userTurn
+                                            ? Kirigami.Theme.highlightColor
+                                            : Kirigami.Theme.textColor
+                                        opacity: turnCard.toolTurn ? 0.65 : 0.9
+                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                        font.weight: Font.DemiBold
+                                        font.italic: turnCard.toolTurn
+                                        Layout.preferredWidth: Kirigami.Units.gridUnit * 2
+                                        Layout.minimumWidth: implicitWidth
+                                        Layout.alignment: Qt.AlignTop
+                                        horizontalAlignment: Text.AlignRight
+                                    }
+
+                                    PC3.Label {
+                                        text: turnCard.modelData.text || ""
+                                        textFormat: Text.PlainText
+                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                        font.italic: turnCard.toolTurn
+                                        color: Kirigami.Theme.textColor
+                                        opacity: turnCard.toolTurn ? 0.7 : 1
+                                        wrapMode: turnCard.toolTurn ? Text.NoWrap : Text.Wrap
+                                        maximumLineCount: turnCard.toolTurn ? 1 : 4
+                                        elide: Text.ElideRight
+                                        lineHeight: 1.17
+                                        lineHeightMode: Text.ProportionalHeight
+                                        Layout.fillWidth: true
+                                    }
                                 }
                             }
                         }
@@ -696,6 +755,7 @@ ColumnLayout {
                         PC3.Label {
                             visible: ((rowItem.modelData.recent || []).length === 0)
                             text: "no messages captured yet"
+                            textFormat: Text.PlainText
                             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                             opacity: 0.7
                         }
