@@ -15,9 +15,8 @@ ColumnLayout {
     readonly property bool hasSomething: (counts.total || 0) > 0
     readonly property bool showPrompts: Plasmoid.configuration.showAgentPrompts === true
 
-    // Cluster sessions by cwd. Groups are sorted alphabetically by folder
-    // name so positions stay stable as states change. Within a group,
-    // sessions stay in the order the aggregator emitted (blocked first).
+    // Cluster sessions by cwd. Groups are sorted alphabetically by folder name,
+    // and rows within each group are newest first by stateChangedAt.
     readonly property var groups: {
         var byFolder = {}
         var order = []
@@ -36,6 +35,17 @@ ColumnLayout {
             g.sessions.push(a)
         }
         var arr = order.map(function(f) { return byFolder[f] })
+        for (var j = 0; j < arr.length; j++) {
+            arr[j].sessions.sort(function(a, b) {
+                var aTime = Number(a.stateChangedAt) || 0
+                var bTime = Number(b.stateChangedAt) || 0
+                if (aTime !== bTime) return bTime - aTime
+                var aId = String(a.sessionId || "")
+                var bId = String(b.sessionId || "")
+                return aId < bId ? -1 : aId > bId ? 1 : 0
+            })
+        }
+
         arr.sort(function(a, b) {
             return a.folder.toLowerCase().localeCompare(b.folder.toLowerCase())
         })

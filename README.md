@@ -23,8 +23,8 @@ your machine, grouped by project folder:
 - **One-click focus** — click a session row (or press Enter with keyboard nav)
   and the widget activates the terminal window hosting that session via KWin
   scripting. Works with Kitty, Konsole, and other terminal emulators.
-- **Folder grouping** — sessions clustered by project directory so you can scan
-  at a glance.
+- **Folder grouping** — sessions clustered by project directory, with newest
+  sessions first within each project.
 - **Desktop badges.** Each session row shows the number of the virtual
   desktop its terminal window is on. Sessions on the current desktop get a
   highlighted badge, so you can see which agent is one switch away. Windows
