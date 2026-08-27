@@ -641,15 +641,26 @@ def _rollout_for_sidecar(path: str) -> str:
     return main if os.path.isfile(main) else ""
 
 
+def _root_rollout(path: str) -> str:
+    """Return the top-level rollout that owns a nested OMP session artifact."""
+    root = path
+    while True:
+        parent = os.path.dirname(root) + ".jsonl"
+        if not os.path.isfile(parent):
+            return root
+        root = parent
+
+
 def _newest_jsonl(base: Path) -> str:
     """Newest session rollout anywhere under `base`, or "" if there is none.
-    Advisor sidecars don't count."""
+    Advisor sidecars don't count; nested subagents rank through their root."""
     try:
-        candidates = sorted(
-            (p for p in base.rglob("*.jsonl") if not _is_sidecar_jsonl(str(p))),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        roots = {
+            Path(_root_rollout(str(p)))
+            for p in base.rglob("*.jsonl")
+            if not _is_sidecar_jsonl(str(p))
+        }
+        candidates = sorted(roots, key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return ""
     return str(candidates[0]) if candidates else ""
@@ -759,13 +770,12 @@ def _open_jsonl_under(pid: int, *needles: str) -> str:
     """Return the session rollout the pid holds open whose path contains one
     of the given needles. Returns "" if none.
 
-    A rollout the pid has open itself always wins over one reached through an
+    A root rollout the pid holds directly wins over one reached through an
     advisor sidecar: a process can hold sidecar fds for a session another
     process owns, and picking that would attribute a live session to the wrong
     terminal. Sidecars still count as a fallback, because omp keeps them open
-    for sessions whose own rollout fd it has already closed. Within a tier the
-    newest mtime wins, since a resumed session leaves the earlier rollout open
-    alongside the current one."""
+    for sessions whose own rollout fd it has already closed. Nested subagents
+    normalize to their owning root before each tier is ranked by mtime."""
     fd_dir = f"/proc/{pid}/fd"
     try:
         entries = os.listdir(fd_dir)
@@ -783,11 +793,11 @@ def _open_jsonl_under(pid: int, *needles: str) -> str:
         if not any(n in target for n in needles):
             continue
         if not _is_sidecar_jsonl(target):
-            direct.add(target)
+            direct.add(_root_rollout(target))
             continue
         rollout = _rollout_for_sidecar(target)
         if rollout:
-            via_sidecar.add(rollout)
+            via_sidecar.add(_root_rollout(rollout))
     newest, newest_mtime = "", -1.0
     for path in direct or via_sidecar:
         try:
