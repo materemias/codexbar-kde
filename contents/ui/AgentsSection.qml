@@ -478,7 +478,7 @@ ColumnLayout {
                         Layout.alignment: Qt.AlignVCenter
 
                         // Pulse the state dot's brightness and size for the
-                        // first minute after a session goes idle.
+                        // first five minutes after a session goes idle.
                         SequentialAnimation on pulse {
                             running: rowItem.recentlyIdle
                             loops: Animation.Infinite
@@ -723,14 +723,14 @@ ColumnLayout {
                 && modelData && modelData.sessionId === _curSid
 
             // 1.0 at the moment a session goes idle, linearly down to 0 at
-            // 60s. Drives the "just finished" green background wash.
+            // five minutes. Drives the "just finished" green background wash.
             readonly property real _idleFreshness: {
                 var _ = agents.nowTick
                 if (rowItem.state !== "idle") return 0
                 var since = rowItem.modelData.stateChangedAt || 0
                 if (!since) return 0
                 var age = Date.now() - since
-                return age >= 60000 ? 0 : (60000 - age) / 60000
+                return age >= 300000 ? 0 : (300000 - age) / 300000
             }
 
             // "Just finished" green wash. Sits below the selection/hover
