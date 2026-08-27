@@ -112,14 +112,20 @@ ColumnLayout {
     }
 
 
+    function selectAt(index) {
+        if (flatAgents.length === 0) return
+        var followPeek = peekSid !== ""
+        selectedIndex = index
+        if (followPeek) peekSid = flatAgents[index].sessionId || ""
+    }
     function selectNext() {
         if (flatAgents.length === 0) return
-        selectedIndex = (Math.max(0, selectedIndex) + 1) % flatAgents.length
+        selectAt((Math.max(0, selectedIndex) + 1) % flatAgents.length)
     }
     function selectPrevious() {
         if (flatAgents.length === 0) return
         var n = flatAgents.length
-        selectedIndex = ((selectedIndex < 0 ? 0 : selectedIndex) - 1 + n) % n
+        selectAt(((selectedIndex < 0 ? 0 : selectedIndex) - 1 + n) % n)
     }
     function activateSelected() {
         if (selectedIndex < 0 || selectedIndex >= flatAgents.length) return
@@ -453,21 +459,22 @@ ColumnLayout {
                     spacing: Kirigami.Units.smallSpacing
 
                     Rectangle {
+                        property real pulse: 0
                         width: 10; height: 10; radius: 5
-                        color: rowItem.tint
+                        color: rowItem.recentlyIdle
+                            ? Kirigami.Theme.positiveTextColor : rowItem.tint
+                        opacity: rowItem.recentlyIdle ? 1 - pulse * 0.65 : 1
+                        scale: rowItem.recentlyIdle ? 1 + pulse * 0.35 : 1
                         Layout.alignment: Qt.AlignVCenter
 
-                        // Gently pulse the state dot for the first minute
-                        // after a session goes idle, so freshly-finished
-                        // agents catch the eye. `alwaysRunToEnd` ensures the
-                        // animation lands back at full opacity when the
-                        // minute elapses.
-                        SequentialAnimation on opacity {
+                        // Pulse the state dot's brightness and size for the
+                        // first minute after a session goes idle.
+                        SequentialAnimation on pulse {
                             running: rowItem.recentlyIdle
                             loops: Animation.Infinite
                             alwaysRunToEnd: true
-                            NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
-                            NumberAnimation { to: 1.0;  duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 0; duration: 700; easing.type: Easing.InOutSine }
                         }
                     }
 
@@ -768,16 +775,9 @@ ColumnLayout {
                 return modelData.provider || "agent"
             }
 
-            // "Just finished" highlight: italicize the row while the session
-            // has been idle for under a minute. Touches nowTick so the
-            // binding re-evaluates each second and flips back to normal.
-            readonly property bool recentlyIdle: {
-                var _ = agents.nowTick
-                if (rowItem.state !== "idle") return false
-                var since = rowItem.modelData.stateChangedAt || 0
-                if (!since) return false
-                return (Date.now() - since) < 60000
-            }
+            // "Just finished" highlight: true while the existing freshness
+            // value remains above zero.
+            readonly property bool recentlyIdle: _idleFreshness > 0
 
 
             MouseArea {

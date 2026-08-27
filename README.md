@@ -192,7 +192,7 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 | Shortcut         | Action                                             |
 | ---------------- | -------------------------------------------------- |
 | `Super+A`        | Open popup and switch to Agents tab                |
-| `↑` / `↓`        | Navigate agent rows                                |
+| `↑` / `↓`        | Navigate agent rows; an open preview follows selection |
 | `Enter`          | Focus the terminal hosting the selected session    |
 | `Space`          | Expand or collapse the selected conversation peek  |
 | Printable text   | Filter sessions on the Agents tab                   |
