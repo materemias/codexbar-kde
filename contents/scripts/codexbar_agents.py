@@ -671,8 +671,8 @@ def _pi_info(pid: int) -> dict:
     on an fd (so we can see it via /proc/<pid>/fd); pi closes it between
     writes, so we fall back to the cwd → slug lookup.
 
-    State: working while the rollout JSONL was recently written, idle when
-    it's been quiet for >30s (matches opencode's threshold)."""
+    State follows the last transcript message: a terminal assistant response
+    is idle; a user message, tool request or tool result is still working."""
     info = {"sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "", "state": "working"}
     rollout = _open_jsonl_under(pid, "/.pi/agent/sessions/", "/.omp/agent/sessions/")
     if not rollout:
@@ -685,12 +685,6 @@ def _pi_info(pid: int) -> dict:
         info["cwd"] = _cwd_of(pid)
         return info
 
-    try:
-        mtime_ms = int(os.path.getmtime(rollout) * 1000)
-        if int(time.time() * 1000) - mtime_ms > 30_000:
-            info["state"] = "idle"
-    except OSError:
-        pass
     last_real, last_any = "", ""
     peek: list = []
     try:
@@ -721,6 +715,9 @@ def _pi_info(pid: int) -> dict:
                 msg_obj = rec.get("message") if isinstance(rec.get("message"), dict) else rec
                 role = msg_obj.get("role") or rec.get("role")
                 if role == "assistant":
+                    info["state"] = (
+                        "working" if msg_obj.get("stopReason") == "toolUse" else "idle"
+                    )
                     preview = _content_preview(msg_obj.get("content"))
                     # The "→ " marker here is _content_preview's own output
                     # for tool-only assistant messages, never user input.
@@ -729,6 +726,8 @@ def _pi_info(pid: int) -> dict:
                     else:
                         _peek_add(peek, "assistant", preview, rec.get("timestamp"))
                     continue
+                if role in ("user", "toolResult"):
+                    info["state"] = "working"
                 if role != "user":
                     continue
                 content = msg_obj.get("content")
