@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import org.kde.plasma.plasmoid
 import org.kde.plasma.components as PC3
 import org.kde.kirigami as Kirigami
+import org.kde.taskmanager as TaskManager
 
 ColumnLayout {
     id: agents
@@ -143,6 +144,143 @@ ColumnLayout {
         // touch nowTick so the binding re-evaluates each second
         var _ = agents.nowTick
         return root.ageFrom(ms)
+    }
+
+    // --- Virtual desktop lookup ------------------------------------------
+    // Which desktop a session's terminal window lives on. Plasma's
+    // taskmanager model is the only QML source for window pids and
+    // desktops; its roles carry no role ids we could pass to data(), so
+    // an invisible Repeater harvests them through per-delegate `model.*`
+    // bindings. Every window delegate registers itself in `taskWindows`;
+    // role updates recreate its `info` object, and the chip bindings that
+    // read `info` re-resolve. Lives here rather than main.qml so the model
+    // only exists while the Agents tab does.
+    TaskManager.VirtualDesktopInfo { id: vdInfo }
+
+    property var taskWindows: []
+
+    Repeater {
+        // Grouping collapses same-app windows into one row with a single
+        // pid; we need every window with its own pid to match sessions.
+        model: TaskManager.TasksModel {
+            id: tasksModel
+            groupMode: TaskManager.TasksModel.GroupDisabled
+        }
+        // Repeater demands Item delegates; this one stays invisible and
+        // zero-size, it only exists to bind the roles we need.
+        delegate: Item {
+            id: taskWin
+            visible: false
+            readonly property int pid: model.AppPid !== undefined ? model.AppPid : 0
+            // Plural: a window may live on several desktops at once, and
+            // the role arrives as a nested list.
+            readonly property var desktops: {
+                var outer = agents._roleList(model.VirtualDesktops)
+                var flat = []
+                for (var k = 0; k < outer.length; k++) {
+                    var inner = agents._roleList(outer[k])
+                    for (var m = 0; m < inner.length; m++) flat.push(inner[m])
+                }
+                return flat
+            }
+            readonly property bool all: model.IsOnAllVirtualDesktops === true
+            readonly property string caption: model.display !== undefined ? String(model.display) : ""
+            readonly property var info: ({
+                pid: taskWin.pid,
+                desktops: taskWin.desktops,
+                all: taskWin.all,
+                caption: taskWin.caption
+            })
+            Component.onCompleted: agents.taskWindows = agents.taskWindows.concat([taskWin])
+            Component.onDestruction: agents.taskWindows =
+                agents.taskWindows.filter(function(w) { return w !== taskWin })
+        }
+    }
+
+    // Task roles arrive as QVariant lists that aren't always real JS
+    // arrays; anything object-shaped with a numeric length counts.
+    function _roleList(v) {
+        if (v === undefined || v === null) return []
+        if (Array.isArray(v)) return v
+        if (typeof v === "object" && typeof v.length === "number") {
+            var out = []
+            for (var i = 0; i < v.length; i++) out.push(v[i])
+            return out
+        }
+        return [v]
+    }
+
+    // Cwd basename as a window-caption hint, mirroring
+    // codexbar_focus._caption_hint: last path segment, keeping alnum
+    // plus "-", "_", "." and space, compared case-insensitively.
+    function _captionHint(record) {
+        var parts = ((record && record.cwd) || "").split("/")
+        var base = ""
+        for (var i = parts.length - 1; i >= 0; i--) {
+            if (parts[i]) { base = parts[i]; break }
+        }
+        var out = ""
+        for (var j = 0; j < base.length; j++) {
+            var c = base[j]
+            var keep = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z")
+                || (c >= "0" && c <= "9") || c === "-" || c === "_"
+                || c === "." || c === " "
+            if (keep) out += c
+        }
+        return out.toLowerCase()
+    }
+
+    // Desktop ids are uuid strings on Wayland and 1-based numbers on X11;
+    // normalize either to a position in vdInfo.desktopIds.
+    function _desktopIndexOf(id) {
+        if (id === undefined || id === null) return -1
+        var i = (vdInfo.desktopIds || []).indexOf(id)
+        if (i >= 0) return i
+        return (typeof id === "number" && id >= 1) ? id - 1 : -1
+    }
+
+    // Resolve the desktop chip for a session: the first task window whose
+    // pid appears in the session's ancestor chain. Multi-window hosts (one
+    // kitty or VS Code pid behind many windows) prefer the window whose
+    // caption contains the cwd basename, same disambiguation as
+    // click-to-focus. A window on all desktops shows "all" and counts as
+    // being on the current one. Returns null when nothing resolved.
+    function desktopInfoFor(record) {
+        var chain = (record && record.ancestorPids) || []
+        if (chain.length === 0) return null
+        var byPid = {}
+        for (var i = 0; i < chain.length; i++) byPid[chain[i]] = true
+        var hint = _captionHint(record)
+        var fallback = null
+        var onAll = null
+        for (var j = 0; j < taskWindows.length; j++) {
+            var w = taskWindows[j].info
+            if (!w || !byPid[w.pid]) continue
+            if (w.all) {
+                if (!onAll) onAll = w
+            } else if (!fallback) {
+                fallback = w
+            }
+            if (hint && w.caption && !w.all
+                && w.caption.toLowerCase().indexOf(hint) >= 0) {
+                fallback = w
+                break
+            }
+        }
+        var win = fallback || onAll
+        if (!win) return null
+        if (win.all) return { label: "all", onCurrent: true }
+        var cur = _desktopIndexOf(vdInfo.currentDesktop)
+        var idxs = []
+        for (var d = 0; d < win.desktops.length; d++) {
+            var di = _desktopIndexOf(win.desktops[d])
+            if (di >= 0) idxs.push(di)
+        }
+        if (idxs.length === 0) return null
+        return {
+            label: String(idxs[0] + 1),
+            onCurrent: idxs.indexOf(cur) >= 0
+        }
     }
 
     // Header row: section label + count summary on the right.
@@ -367,6 +505,40 @@ ColumnLayout {
                         Layout.alignment: Qt.AlignVCenter
                     }
 
+                    // Desktop chip: the virtual desktop hosting this
+                    // session's terminal window. Highlighted when that
+                    // desktop (or "all" desktops) is the current one;
+                    // absent when no window resolved. Visibility never
+                    // depends on hover, so the row cannot jump.
+                    Rectangle {
+                        visible: rowItem.desktopInfo !== null
+                        width: desktopChipLabel.implicitWidth + 8
+                        height: desktopChipLabel.implicitHeight + 3
+                        radius: 3
+                        color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
+                            ? Kirigami.Theme.highlightColor : "transparent"
+                        border.width: 1
+                        border.color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
+                            ? Kirigami.Theme.highlightColor
+                            : Qt.rgba(Kirigami.Theme.textColor.r,
+                                Kirigami.Theme.textColor.g,
+                                Kirigami.Theme.textColor.b, 0.3)
+                        Layout.alignment: Qt.AlignVCenter
+
+                        PC3.Label {
+                            id: desktopChipLabel
+                            anchors.centerIn: parent
+                            text: rowItem.desktopInfo ? rowItem.desktopInfo.label : ""
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            font.weight: Font.DemiBold
+                            color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
+                                ? Kirigami.Theme.highlightedTextColor
+                                : Kirigami.Theme.textColor
+                            opacity: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
+                                ? 1 : 0.65
+                        }
+                    }
+
                     PC3.ToolButton {
                         // Keep the button's slot in the layout when its icon is hidden.
                         visible: true
@@ -584,6 +756,9 @@ ColumnLayout {
 
             readonly property string state: modelData.state || "idle"
             readonly property color tint: root.agentStateColor(state)
+            // Desktop badge data for this row, or null when the host
+            // window didn't resolve against Plasma's task list.
+            readonly property var desktopInfo: agents.desktopInfoFor(modelData)
             // Prefer the agent-generated session title. Only fall through
             // to the raw user prompt when the user has opted into showing
             // it (otherwise the row just shows the provider name).

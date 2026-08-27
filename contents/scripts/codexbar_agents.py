@@ -131,26 +131,50 @@ def _argv_of(pid: int) -> list[str]:
         return []
 
 
-def _parent_walk_for_host(start_pid: int) -> tuple[str, int]:
-    """Walk up the proc tree from start_pid, return (host_name, host_pid).
-    Returns ("", 0) if no known terminal emulator found."""
+def _parent_walk_for_host(start_pid: int) -> tuple[str, int, list[int]]:
+    """Walk up the proc tree from start_pid; return (host_name, host_pid,
+    ancestor_chain) where the chain runs [start_pid, ..., host_pid]. The
+    chain mirrors codexbar_focus._ancestor_pids and lets the popup match the
+    session to its KWin window by any pid in the family. Returns ("", 0, [])
+    if no known terminal emulator found."""
     cur = start_pid
+    chain: list[int] = []
     seen: set[int] = set()
     depth = 12
+    host, host_pid = "", 0
     while cur > 1 and cur not in seen and depth > 0:
         seen.add(cur)
+        chain.append(cur)
         depth -= 1
         comm = _comm_of(cur)
         if comm in KNOWN_HOSTS:
-            return comm, cur
+            host, host_pid = comm, cur
+            break
         cmdline = _cmdline_of(cur)
         if "vscode-server" in cmdline or "/code/" in cmdline or "code-insiders" in cmdline:
-            return "code", cur
+            host, host_pid = "code", cur
+            break
         nxt = _ppid_of(cur)
         if not nxt or nxt == cur:
             break
         cur = nxt
-    return "", 0
+    if not host:
+        return "", 0, []
+
+    # Electron hosts run several same-named helper processes (pty host,
+    # extension host); the window-owning main process may sit further up.
+    # Extend the chain through the contiguous run of same-comm hosts so the
+    # window pid is part of the family. Plain terminals stop at systemd or
+    # the shell, so this only ever adds pids for multi-process hosts.
+    while depth > 0:
+        nxt = _ppid_of(host_pid)
+        if nxt <= 1 or nxt in seen or _comm_of(nxt) != host:
+            break
+        seen.add(nxt)
+        chain.append(nxt)
+        host_pid = nxt
+        depth -= 1
+    return host, host_pid, chain
 
 
 # ---------------------------------------------------------------------------
@@ -796,7 +820,7 @@ def _build_records() -> list[dict]:
     now_ms = int(time.time() * 1000)
     for provider, info_fn in _INFO_FN.items():
         for pid in _pids_for(provider):
-            host, host_pid = _parent_walk_for_host(pid)
+            host, host_pid, ancestors = _parent_walk_for_host(pid)
             # No terminal ancestor → a daemon, a detached run or a piped call.
             # Nothing the user can focus, so it isn't a session row.
             if not host:
@@ -812,6 +836,7 @@ def _build_records() -> list[dict]:
                 "cwd": info.get("cwd") or _cwd_of(pid),
                 "pid": pid,
                 "hostPid": host_pid,
+                "ancestorPids": ancestors,
                 "host": host,
                 "tty": "",
                 "state": info.get("state") or "working",

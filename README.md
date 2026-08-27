@@ -25,6 +25,10 @@ your machine, grouped by project folder:
   scripting. Works with Kitty, Konsole, and other terminal emulators.
 - **Folder grouping** — sessions clustered by project directory so you can scan
   at a glance.
+- **Desktop badges.** Each session row shows the number of the virtual
+  desktop its terminal window is on. Sessions on the current desktop get a
+  highlighted badge, so you can see which agent is one switch away. Windows
+  pinned to all desktops show "all".
 - **Conversation peek.** Click the arrow on a session row or press `Space` to
   expand its last eight user and assistant turns. Tool-only turns collapse into
   a short command summary.
