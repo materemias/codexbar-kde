@@ -15,6 +15,17 @@ Linux port of the macOS [CodexBar](https://github.com/steipete/CodexBar) menu-ba
 and reset countdowns. Supports Claude, Codex, z.ai, OpenRouter, and Kilo out of
 the box.
 
+**Codex reset forecast.** The Codex usage section shows an auxiliary forecast
+from [codex-reset.com](https://codex-reset.com). It estimates the next reset
+from the site's recent cadence and common reset window, not an exact timestamp.
+The widget shows the estimate and time remaining in local 24 hour time,
+along with short-horizon probabilities and confidence. When codex-reset.com
+publishes an alert that is newer than the last recorded reset, its summary
+appears on a second line so you can see why the next reset is coming. An alert
+that only announces the reset already recorded stays hidden. The forecast is
+optional and enabled by default. If codex-reset.com is unavailable, usage data
+continues to work. Cached forecast data can be marked stale.
+
 **Agent View tab** — A real-time overview of every active coding-agent session on
 your machine, grouped by project folder:
 
@@ -179,6 +190,8 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 
 ### Providers
 - Toggle individual providers on/off (Claude, Codex, z.ai, OpenRouter, Kilo)
+- In the Providers tab, toggle the Codex reset forecast with
+  `showCodexResetForecast` (enabled by default)
 
 ### Tray
 - Pick meters per Codex account and per rate window

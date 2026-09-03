@@ -30,7 +30,8 @@ PlasmoidItem {
         highestProvider: null,
         highestPercent: 0,
         providers: [],
-        fatal: null
+        fatal: null,
+        forecast: null
     })
     property var agentSnapshot: ({
         updatedAt: "",
@@ -63,6 +64,9 @@ PlasmoidItem {
     readonly property int agentsRefreshMs: Math.max(2, Plasmoid.configuration.agentsRefreshSeconds || 5) * 1000
     readonly property bool agentsEnabled: Plasmoid.configuration.showAgents !== false
     readonly property string cliPath: Plasmoid.configuration.cliPath || "~/.local/bin/codexbar"
+    readonly property bool codexForecastEnabled:
+        Plasmoid.configuration.enableCodex !== false
+        && Plasmoid.configuration.showCodexResetForecast !== false
     readonly property int refreshMs: Math.max(10, Plasmoid.configuration.refreshSeconds || 30) * 1000
     readonly property var enabledProviders: {
         // Display order: Claude → Codex → z.ai → OpenRouter → Kilo
@@ -423,7 +427,8 @@ PlasmoidItem {
                 highestProvider: null,
                 highestPercent: 0,
                 providers: [],
-                fatal: null
+                fatal: null,
+                forecast: null
             }
             return
         }
@@ -432,6 +437,9 @@ PlasmoidItem {
         var cmd = "python3 \"" + root.scriptPath + "\""
             + " --cli-path \"" + root.cliPath + "\""
             + " --providers " + root.enabledProviders.join(",")
+        if (root.codexForecastEnabled) {
+            cmd += " --forecast-url https://codex-reset.com/api/forecast"
+        }
         runner.connectSource(cmd)
     }
 
@@ -514,15 +522,75 @@ PlasmoidItem {
     }
 
     function pad2(n) { return (n < 10 ? "0" : "") + n }
+    function _time24(when) {
+        return pad2(when.getHours()) + ":" + pad2(when.getMinutes())
+    }
 
     function _absoluteTime(when) {
         var now = new Date()
         var sameDay = now.toDateString() === when.toDateString()
-        var hhmm = pad2(when.getHours()) + ":" + pad2(when.getMinutes())
+        var hhmm = _time24(when)
         if (sameDay) return hhmm
         var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         return months[when.getMonth()] + " " + when.getDate() + ", " + hhmm
+    }
+
+    function _forecastTimeLeft(when) {
+        var diff = when.getTime() - Date.now()
+        if (diff <= 0) return "soon"
+        if (diff < 60 * 60 * 1000) {
+            return Math.ceil(diff / (60 * 1000)) + "m"
+        }
+        if (diff < 24 * 60 * 60 * 1000) {
+            return Math.ceil(diff / (60 * 60 * 1000)) + "h"
+        }
+        return relativeMs(diff).replace(/^in /, "").replace(/ 0h$/, "")
+    }
+
+    function formatCodexForecast(forecast) {
+        if (!forecast || typeof forecast !== "object" || forecast.ok !== true) return ""
+
+        var expectedText = typeof forecast.expectedAt === "string"
+            ? forecast.expectedAt.trim() : ""
+        if (expectedText.length === 0) return ""
+
+        var expected = new Date(expectedText)
+        if (isNaN(expected.getTime())) return ""
+
+        var details = [
+            "Next reset estimate: ~ " + _absoluteTime(expected)
+                + " (" + _forecastTimeLeft(expected) + ")"
+        ]
+        if (forecast.stale === true) details[0] += " (cached)"
+
+        var probabilities = []
+        var p24 = Number(forecast.prob24h)
+        if (forecast.prob24h !== undefined && forecast.prob24h !== null
+                && isFinite(p24) && p24 >= 0 && p24 <= 100) {
+            probabilities.push("24h " + Math.round(p24) + "%")
+        }
+        var p48 = Number(forecast.prob48h)
+        if (forecast.prob48h !== undefined && forecast.prob48h !== null
+                && isFinite(p48) && p48 >= 0 && p48 <= 100) {
+            probabilities.push("48h " + Math.round(p48) + "%")
+        }
+        if (probabilities.length > 0) details.push(probabilities.join(" · "))
+
+        if (typeof forecast.confidence === "string"
+                && forecast.confidence.trim().length > 0) {
+            details.push(forecast.confidence.trim() + " confidence")
+        }
+        return details.join(" · ")
+    }
+
+    function firstCodexIndex() {
+        var records = root.snapshot && Array.isArray(root.snapshot.providers)
+            ? root.snapshot.providers : []
+        for (var i = 0; i < records.length; i++) {
+            if (records[i] && records[i].id === "codex") return i
+        }
+        return -1
     }
 
     // Returns "16:00 (2h 28m)" / "May 19, 21:56 (3d 8h)" / "" depending on data.

@@ -176,6 +176,10 @@ Item {
                         ProviderSection {
                             Layout.fillWidth: true
                             record: parent.modelData
+                            forecast: showForecast ? root.snapshot.forecast : null
+                            showForecast: root.codexForecastEnabled
+                                && parent.modelData.id === "codex"
+                                && index === root.firstCodexIndex()
                         }
 
                         Kirigami.Separator {

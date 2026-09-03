@@ -8,6 +8,7 @@ Kirigami.FormLayout {
 
     property bool cfg_enableClaude: true
     property bool cfg_enableCodex: true
+    property bool cfg_showCodexResetForecast: true
     property bool cfg_enableZai: true
     property bool cfg_enableOpenRouter: true
     property bool cfg_enableKilo: true
@@ -23,6 +24,12 @@ Kirigami.FormLayout {
         text: "OAuth / CLI"
         checked: cfg_enableCodex
         onToggled: cfg_enableCodex = checked
+    }
+    QQC2.CheckBox {
+        Kirigami.FormData.label: "Codex forecast:"
+        text: "Show reset forecast"
+        checked: cfg_showCodexResetForecast
+        onToggled: cfg_showCodexResetForecast = checked
     }
     QQC2.CheckBox {
         Kirigami.FormData.label: "z.ai:"

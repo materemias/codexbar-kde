@@ -7,17 +7,23 @@ document on stdout. The QML widget calls this once per polling tick.
 
 Usage:
   codexbar_fetch.py --cli-path PATH --providers codex,claude,openrouter,kilo
+
+With --forecast-url it also attaches a `forecast` object describing when the next
+OpenAI usage-limit reset is expected (data from codex-reset.com).
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Per-provider source flag. None = let the CLI auto-pick.
@@ -218,6 +224,213 @@ def _highest(records: list[dict]) -> tuple[str | None, float]:
     return best_id, max(best_pct, 0.0)
 
 
+# codex-reset.com publishes a probabilistic forecast for the next OpenAI
+# usage-limit reset. It exposes no point estimate, only per-horizon
+# probabilities plus the observed cadence, so the ETA below is derived:
+# last confirmed reset + recent median cadence, snapped into the hour window
+# resets historically land in.
+FORECAST_TIMEOUT = 8.0
+# Resets happen every few days and the model refreshes slowly, so a short
+# cache keeps a 30-second poll tick from hammering a third-party endpoint.
+FORECAST_CACHE_TTL = 900.0
+FORECAST_CACHE_PATH = "~/.codexbar/forecast_cache.json"
+FORECAST_MAX_MEDIAN_DAYS = 365.0
+
+
+def _as_float(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _as_hour(value) -> int | None:
+    parsed = _as_float(value)
+    if parsed is None or not parsed.is_integer() or not 0 <= parsed <= 23:
+        return None
+    return int(parsed)
+
+
+def _parse_iso(value) -> _dt.datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _forecast_eta(
+    last_reset: _dt.datetime | None,
+    median_days: float | None,
+    start_hour: int | None,
+    end_hour: int | None,
+    now: _dt.datetime,
+) -> _dt.datetime | None:
+    """Project the next reset from the last one plus the observed cadence."""
+    if last_reset is None or median_days is None or median_days <= 0:
+        return None
+    projected = last_reset + _dt.timedelta(days=median_days)
+    eta = projected
+    if start_hour is not None and end_hour is not None:
+        start_at = projected.replace(
+            hour=start_hour, minute=0, second=0, microsecond=0
+        )
+        end_at = start_at.replace(
+            hour=end_hour, minute=0, second=0, microsecond=0
+        )
+        if end_hour <= start_hour:
+            end_at += _dt.timedelta(days=1)
+        if projected < start_at:
+            eta = start_at
+        elif projected >= end_at:
+            eta = start_at + _dt.timedelta(days=1)
+    # Keep the displayed instant in the future by rolling it forward one day
+    # at a time when the projection has already elapsed.
+    guard = 0
+    while eta <= now and guard < 400:
+        eta += _dt.timedelta(days=1)
+        guard += 1
+    return eta
+
+
+def _forecast_cache_read(max_age: float | None) -> dict | None:
+    try:
+        with open(_expand(FORECAST_CACHE_PATH), "r", encoding="utf-8") as fh:
+            cached = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cached, dict):
+        return None
+    payload = cached.get("forecast")
+    if not isinstance(payload, dict):
+        return None
+    cached_at = _as_float(cached.get("cachedAt")) or 0.0
+    if max_age is not None and (time.time() - cached_at) > max_age:
+        return None
+    return payload
+
+
+def _forecast_cache_write(payload: dict) -> None:
+    path = _expand(FORECAST_CACHE_PATH)
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"cachedAt": time.time(), "forecast": payload}, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _normalize_forecast(data: dict) -> dict:
+    def _obj(key: str) -> dict:
+        value = data.get(key)
+        return value if isinstance(value, dict) else {}
+
+    probs = _obj("probabilities")
+    window = _obj("time_window")
+    cadence = _obj("cadence")
+
+    def _percent(rounded_key: str, raw_key: str) -> float | None:
+        rounded = _as_float(probs.get(rounded_key))
+        if rounded is not None:
+            return rounded
+        raw = _as_float(probs.get(raw_key))
+        return raw * 100.0 if raw is not None else None
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    last_reset = _parse_iso(data.get("last_reset_at"))
+    median_days = _as_float(cadence.get("recent_median_days"))
+    if (
+        last_reset is None
+        or median_days is None
+        or median_days <= 0
+        or median_days > FORECAST_MAX_MEDIAN_DAYS
+    ):
+        raise ValueError("forecast missing a valid reset cadence")
+    window_start_hour = _as_hour(window.get("start_hour"))
+    window_end_hour = _as_hour(window.get("end_hour"))
+    eta = _forecast_eta(
+        last_reset, median_days, window_start_hour, window_end_hour, now
+    )
+    # The latest alert only explains the *next* reset when it postdates the last
+    # one; otherwise it is just the announcement of the reset already recorded.
+    alert = data.get("latest_alert")
+    alert_summary = None
+    if isinstance(alert, dict):
+        alert_at = _parse_iso(alert.get("source_at"))
+        summary = alert.get("summary")
+        if (
+            alert_at is not None
+            and alert_at > last_reset
+            and isinstance(summary, str)
+            and summary.strip()
+        ):
+            alert_summary = summary.strip()
+    teased = data.get("teased_window")
+    return {
+        "ok": True,
+        "stale": False,
+        "source": "codex-reset.com",
+        "fetchedAt": now.isoformat(),
+        "modelUpdatedAt": (_parse_iso(data.get("updated_at")) or now).isoformat(),
+        "expectedAt": eta.isoformat() if eta is not None else None,
+        "windowLabel": str(window.get("label") or ""),
+        "windowTimezone": str(window.get("timezone") or ""),
+        "windowStartHour": window_start_hour,
+        "windowEndHour": window_end_hour,
+        "teasedWindow": teased if isinstance(teased, str) and teased.strip() else None,
+        "prob24h": _percent("rounded_24h", "raw_24h"),
+        "prob48h": _percent("rounded_48h", "raw_48h"),
+        "confidence": str(data.get("confidence") or ""),
+        "lastResetAt": last_reset.isoformat() if last_reset is not None else None,
+        "alertSummary": alert_summary,
+        "medianDays": median_days,
+        "error": None,
+    }
+
+
+def _fetch_forecast(url: str, timeout: float) -> dict:
+    """Fetch and normalize the reset forecast without raising."""
+    fresh = _forecast_cache_read(FORECAST_CACHE_TTL)
+    if fresh is not None:
+        return fresh
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "codexbar-kde", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", "replace").strip()
+        if not body:
+            raise ValueError("empty response body")
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise ValueError("unexpected response shape")
+        payload = _normalize_forecast(data)
+    except Exception as exc:  # noqa: BLE001 - the endpoint cannot break usage
+        stale = _forecast_cache_read(None)
+        if stale is not None and stale.get("ok") is True:
+            return dict(stale, stale=True)
+        return {
+            "ok": False,
+            "stale": False,
+            "source": "codex-reset.com",
+            "expectedAt": None,
+            "error": {"code": "forecast_unavailable", "message": str(exc)},
+        }
+    _forecast_cache_write(payload)
+    return payload
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli-path", required=True)
@@ -227,6 +440,11 @@ def main(argv: list[str]) -> int:
         help="Comma-separated provider ids to query.",
     )
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--forecast-url",
+        default=None,
+        help="Fetch the Codex reset forecast from this URL.",
+    )
     args = parser.parse_args(argv)
 
     cli = _expand(args.cli_path)
@@ -240,6 +458,7 @@ def main(argv: list[str]) -> int:
             "providers": [],
             "highestProvider": None,
             "highestPercent": 0,
+            "forecast": None,
         }
         json.dump(out, sys.stdout)
         sys.stdout.write("\n")
@@ -247,10 +466,17 @@ def main(argv: list[str]) -> int:
 
     providers = [p.strip() for p in args.providers.split(",") if p.strip()]
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
+    forecast_future = None
+    with ThreadPoolExecutor(
+        max_workers=max(1, len(providers) + int(bool(args.forecast_url)))
+    ) as pool:
         futures = {
             pool.submit(_fetch_provider, cli, p, args.timeout): p for p in providers
         }
+        if args.forecast_url:
+            forecast_future = pool.submit(
+                _fetch_forecast, args.forecast_url, FORECAST_TIMEOUT
+            )
         for fut in as_completed(futures):
             results.extend(fut.result())
 
@@ -265,6 +491,7 @@ def main(argv: list[str]) -> int:
         "highestPercent": best_pct,
         "providers": results,
         "fatal": None,
+        "forecast": forecast_future.result() if forecast_future is not None else None,
     }
     json.dump(out, sys.stdout)
     sys.stdout.write("\n")

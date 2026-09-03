@@ -6,6 +6,8 @@ import org.kde.kirigami as Kirigami
 ColumnLayout {
     id: section
     property var record: ({})
+    property var forecast: null
+    property bool showForecast: false
     spacing: 4
 
     readonly property string iconSource: record && record.id
@@ -192,4 +194,43 @@ ColumnLayout {
         }
     }
 
+    Rectangle {
+        id: forecastCard
+        readonly property string forecastText: root.formatCodexForecast(section.forecast)
+        visible: section.showForecast && forecastText.length > 0
+        Layout.fillWidth: true
+        Layout.topMargin: Kirigami.Units.smallSpacing / 2
+        implicitHeight: forecastContent.implicitHeight
+            + Kirigami.Units.smallSpacing * 2
+        radius: 5
+        color: Kirigami.Theme.alternateBackgroundColor
+        border.width: 1
+        border.color: Qt.rgba(
+            Kirigami.Theme.textColor.r,
+            Kirigami.Theme.textColor.g,
+            Kirigami.Theme.textColor.b,
+            0.22
+        )
+
+        ColumnLayout {
+            id: forecastContent
+            anchors.fill: parent
+            anchors.margins: Kirigami.Units.smallSpacing
+            spacing: 1
+
+            PC3.Label {
+                text: "Codex reset forecast"
+                font.weight: Font.DemiBold
+                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            }
+
+            PC3.Label {
+                Layout.fillWidth: true
+                text: forecastCard.forecastText
+                wrapMode: Text.WordWrap
+                font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                opacity: 0.72
+            }
+        }
+    }
 }

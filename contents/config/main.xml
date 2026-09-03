@@ -21,6 +21,10 @@
         <entry name="enableClaude" type="Bool">
             <default>true</default>
         </entry>
+        <entry name="showCodexResetForecast" type="Bool">
+            <label>Show the Codex reset forecast</label>
+            <default>true</default>
+        </entry>
         <entry name="enableOpenRouter" type="Bool">
             <default>true</default>
         </entry>
