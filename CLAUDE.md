@@ -24,8 +24,18 @@ kpackagetool6 -t Plasma/Applet -u .
 kpackagetool6 -t Plasma/Applet -r org.codexbar.plasmoid
 kpackagetool6 -t Plasma/Applet -i .
 
-# Reload the real panel
+# Reload the real panel from the user's session shell
 kquitapp6 plasmashell && kstart plasmashell
+```
+
+Manual `plasmashell` restarts inherit the locale of the launching shell. Run
+the restart from the user's session shell. For Hungarian 24 hour formatting,
+use:
+
+```sh
+kquitapp6 plasmashell \
+  && env LANG=hu_HU.utf8 LC_ALL=hu_HU.utf8 LC_TIME=hu_HU.utf8 \
+       kstart plasmashell
 ```
 
 For changed QML, run `qmllint`. For changed Python, run
