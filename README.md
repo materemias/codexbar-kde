@@ -76,8 +76,8 @@ until the matching provider session becomes live again.
 | **Claude**     | OAuth (`~/.claude/.credentials.json`) | 5h / 7d windows, plus Claude Design and Daily Routines quotas     |
 | **Codex**      | OAuth (`~/.codex/auth.json`)          | Per-account 5h and weekly windows, plus Reserve 7d |
 | **z.ai**       | API key (`ZAI_API_KEY`)               | 5h and monthly windows                                            |
-| **OpenRouter** | API key (`OPENROUTER_API_KEY`)        | Remaining balance; per-key allowance bar when a `keyLimit` is set |
-| **Kilo**       | API key (`KILO_API_KEY`)              | Remaining credits balance                                         |
+| **OpenRouter** | `apiKey` in `~/.codexbar/config.json`, else `OPENROUTER_API_KEY` | Remaining balance; per-key allowance bar when a `keyLimit` is set |
+| **Kilo**       | `apiKey` in `~/.codexbar/config.json`, else `KILO_API_KEY` | Remaining credits balance                                         |
 
 The Reserve 7d row is the separate weekly quota that the Codex CLI reports
 for GPT models.
@@ -138,7 +138,8 @@ The same file can list additional Codex profile homes:
   "providers": [
     {"id": "codex", "enabled": true, "codexProfileHomePaths": ["~/.codex-pro"]},
     {"id": "zai",   "enabled": true, "apiKey": "<from https://z.ai/manage-apikey/apikey>"},
-    {"id": "kilo",  "enabled": true, "apiKey": "<from app.kilo.ai>"}
+    {"id": "kilo",  "enabled": true, "apiKey": "<from app.kilo.ai>"},
+    {"id": "openrouter", "enabled": true, "apiKey": "<management key from https://openrouter.ai/settings/keys>"}
   ]
 }
 ```
@@ -154,12 +155,34 @@ mkdir -p ~/.codex-pro
 CODEX_HOME=~/.codex-pro codex login
 ```
 
-Claude and OpenRouter use `~/.claude/.credentials.json` and
-`OPENROUTER_API_KEY` respectively.
+Claude uses `~/.claude/.credentials.json`.
+
+OpenRouter reads `apiKey` from the config file, falling back to the
+`OPENROUTER_API_KEY` environment variable. The key must be a management key,
+because `GET /api/v1/credits` rejects a plain inference key with HTTP 403
+("Only management keys can fetch credits for an account"). The optional 30 day
+spend row needs `OPENROUTER_MANAGEMENT_API_KEY` in the environment, which the
+config file cannot supply.
 
 The balance in the row header is the remaining credit from the CLI's credits
 output, so it appears whenever the key can read credits. A usage bar appears
 only when the key has a per-key spend limit set on OpenRouter.
+
+## Troubleshooting
+
+### "Kilo CLI session file is invalid ... run `kilo login`"
+
+Running `kilo login` does not fix this one. The message is the CodexBar CLI
+falling back to the Kilo session file after finding no API key, and the two
+tools disagree about that file's shape: `kilo` writes the token as
+`kilo.key` in `~/.local/share/kilo/auth.json`, while CodexBar looks for
+`kilo.access`. A fresh login rewrites `kilo.key` and changes nothing.
+
+Do not hand-edit `~/.local/share/kilo/auth.json`. Add a `kilo` provider
+`apiKey` to `~/.codexbar/config.json` as shown above. This keeps CodexBar on
+the API path. With the key present the provider reports `source: "api"`;
+without it, and with `KILO_API_KEY` unset, the same misleading session-file
+error comes back.
 
 ## Update
 
