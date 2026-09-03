@@ -584,6 +584,14 @@ PlasmoidItem {
         return details.join(" · ")
     }
 
+    // Why the next reset is coming, when codex-reset.com has an alert that
+    // postdates the last recorded reset. Kept separate from the summary line.
+    function formatCodexForecastAlert(forecast) {
+        if (!forecast || typeof forecast !== "object" || forecast.ok !== true) return ""
+        if (typeof forecast.alertSummary !== "string") return ""
+        return forecast.alertSummary.trim()
+    }
+
     function firstCodexIndex() {
         var records = root.snapshot && Array.isArray(root.snapshot.providers)
             ? root.snapshot.providers : []

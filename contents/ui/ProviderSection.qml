@@ -197,6 +197,7 @@ ColumnLayout {
     Rectangle {
         id: forecastCard
         readonly property string forecastText: root.formatCodexForecast(section.forecast)
+        readonly property string alertText: root.formatCodexForecastAlert(section.forecast)
         visible: section.showForecast && forecastText.length > 0
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.smallSpacing / 2
@@ -230,6 +231,16 @@ ColumnLayout {
                 wrapMode: Text.WordWrap
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
                 opacity: 0.72
+            }
+            PC3.Label {
+                Layout.fillWidth: true
+                text: forecastCard.alertText
+                visible: text.length > 0
+                wrapMode: Text.WordWrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+                font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                opacity: 0.6
             }
         }
     }
