@@ -58,10 +58,13 @@ until the matching provider session becomes live again.
 | Provider       | Auth                                  | What it shows                                                     |
 | -------------- | ------------------------------------- | ----------------------------------------------------------------- |
 | **Claude**     | OAuth (`~/.claude/.credentials.json`) | 5h / 7d windows, plus Claude Design and Daily Routines quotas     |
-| **Codex**      | OAuth (`~/.codex/auth.json`)          | Per-account 5h and weekly windows                                 |
+| **Codex**      | OAuth (`~/.codex/auth.json`)          | Per-account 5h and weekly windows, plus Reserve 7d |
 | **z.ai**       | API key (`ZAI_API_KEY`)               | 5h and monthly windows                                            |
 | **OpenRouter** | API key (`OPENROUTER_API_KEY`)        | Remaining balance; per-key allowance bar when a `keyLimit` is set |
 | **Kilo**       | API key (`KILO_API_KEY`)              | Remaining credits balance                                         |
+
+The Reserve 7d row is the separate weekly quota that the Codex CLI reports
+for GPT models.
 
 ## Supported agent sessions
 

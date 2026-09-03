@@ -35,6 +35,13 @@ Item {
         cfg_trayIndicators = current
     }
 
+    function _codexWindowLabel(id, fallback) {
+        if (id === "codex-base-model-inference" || id === "gpt-reserve") {
+            return "Reserve 7d"
+        }
+        return fallback || id
+    }
+
     function _codexWindows(account) {
         var rows = []
         var slots = [
@@ -51,7 +58,7 @@ Item {
         var extras = account.extraRateWindows || []
         for (var e = 0; e < extras.length; e++) {
             if (!extras[e] || !extras[e].id || !extras[e].window) continue
-            rows.push({ id: extras[e].id, text: extras[e].title || extras[e].id })
+            rows.push({ id: extras[e].id, text: _codexWindowLabel(extras[e].id, extras[e].title) })
         }
         return rows
     }
@@ -77,7 +84,7 @@ Item {
             if (!slot || seen[slot]) continue
             rows.push({
                 id: slot,
-                text: slot === "tertiary" ? "Additional limit" : slot
+                text: _codexWindowLabel(slot, slot)
             })
             seen[slot] = true
         }

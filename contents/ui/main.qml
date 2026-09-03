@@ -544,6 +544,13 @@ PlasmoidItem {
     }
 
     function windowLabel(providerId, slot, rec, extraTitle) {
+        // Codex exposes this separate weekly GPT quota as "gpt-reserve".
+        if (providerId === "codex"
+                && (slot === "codex-base-model-inference"
+                    || slot === "gpt-reserve"
+                    || extraTitle === "gpt-reserve")) {
+            return "Reserve 7d"
+        }
         if (extraTitle && extraTitle.length > 0) return extraTitle
         if (slot === "claude-design") return "Design"
         if (slot === "claude-routines") return "Routines"
