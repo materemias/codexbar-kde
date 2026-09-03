@@ -97,8 +97,12 @@ with state and cwd, just no task title.
 ## Requirements
 
 - KDE Plasma **6**
-- The [`codexbar`](https://github.com/steipete/CodexBar) CLI installed and on
-  your `PATH` (defaults to `~/.local/bin/codexbar`)
+- The [`codexbar`](https://github.com/steipete/CodexBar) CLI installed. The
+  default path is `/usr/bin/codexbar`, the entry point the `codexbar-cli`
+  package installs, chosen over the `~/.local/bin/codexbar` symlink. It is a
+  small `sh` wrapper that forwards to `/usr/lib/codexbar-cli/codexbar` and
+  survives CLI upgrades, so leave the setting on it unless your install lives
+  elsewhere.
 - Python 3 (already present on every Plasma 6 system)
 - `kpackagetool6` (ships with Plasma 6)
 
@@ -194,7 +198,7 @@ kquitapp6 plasmashell && kstart plasmashell
 Right-click the widget → **Configure CodexBar**. Four tabs:
 
 ### Backend
-- Path to the `codexbar` CLI binary
+- Path to the `codexbar` CLI binary (default `/usr/bin/codexbar`)
 - Usage polling interval (10s–15min)
 
 ### Providers

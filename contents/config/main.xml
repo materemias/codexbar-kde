@@ -7,7 +7,7 @@
     <group name="General">
         <entry name="cliPath" type="String">
             <label>Path to the codexbar CLI binary</label>
-            <default>~/.local/bin/codexbar</default>
+            <default>/usr/bin/codexbar</default>
         </entry>
         <entry name="refreshSeconds" type="Int">
             <label>Polling interval in seconds</label>

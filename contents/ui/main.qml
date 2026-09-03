@@ -64,7 +64,7 @@ PlasmoidItem {
     }
     readonly property int agentsRefreshMs: Math.max(2, Plasmoid.configuration.agentsRefreshSeconds || 5) * 1000
     readonly property bool agentsEnabled: Plasmoid.configuration.showAgents !== false
-    readonly property string cliPath: Plasmoid.configuration.cliPath || "~/.local/bin/codexbar"
+    readonly property string cliPath: Plasmoid.configuration.cliPath || "/usr/bin/codexbar"
     readonly property bool codexForecastEnabled:
         Plasmoid.configuration.enableCodex !== false
         && Plasmoid.configuration.showCodexResetForecast !== false

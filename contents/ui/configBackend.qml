@@ -6,14 +6,14 @@ import org.kde.kirigami as Kirigami
 Kirigami.FormLayout {
     id: form
 
-    property string cfg_cliPath: "~/.local/bin/codexbar"
+    property string cfg_cliPath: "/usr/bin/codexbar"
     property int    cfg_refreshSeconds: 30
 
     QQC2.TextField {
         Kirigami.FormData.label: "codexbar CLI:"
         text: cfg_cliPath
         onTextChanged: cfg_cliPath = text
-        placeholderText: "~/.local/bin/codexbar"
+        placeholderText: "/usr/bin/codexbar"
         Layout.fillWidth: true
     }
 

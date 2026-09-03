@@ -10,7 +10,7 @@ Item {
     property var cfg_trayIndicators: []
     property int cfg_compactStyle: 0
     property int cfg_trayIconSize: 22
-    property string cfg_cliPath: "~/.local/bin/codexbar"
+    property string cfg_cliPath: "/usr/bin/codexbar"
 
     property var codexAccounts: []
     property bool codexLoading: true
