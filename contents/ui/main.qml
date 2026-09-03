@@ -532,6 +532,7 @@ PlasmoidItem {
         var now = new Date()
         var sameDay = now.toDateString() === when.toDateString()
         var hhmm = _time24(when)
+
         if (sameDay) return hhmm
         var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
