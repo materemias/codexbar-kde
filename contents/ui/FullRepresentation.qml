@@ -53,6 +53,12 @@ Item {
                 Layout.fillWidth: true
             }
             PC3.Label {
+                // codexbar CLI version, not the applet package version.
+                text: {
+                    var v = root.snapshot ? root.snapshot.cliVersion : null
+                    return typeof v === "string" && v.length > 0 ? "v" + v : ""
+                }
+                visible: text.length > 0
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                 opacity: 0.7
                 text: {

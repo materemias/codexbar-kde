@@ -15,6 +15,11 @@ Linux port of the macOS [CodexBar](https://github.com/steipete/CodexBar) menu-ba
 and reset countdowns. Supports Claude, Codex, z.ai, OpenRouter, and Kilo out of
 the box.
 
+The popup header shows the version of the CodexBar CLI next to the title, read
+from `codexbar --version` during the same fetch that collects usage. If the CLI
+is missing or too old to report a version, the label hides and usage data is
+unaffected.
+
 **Codex reset forecast.** The Codex usage section shows an auxiliary forecast
 from [codex-reset.com](https://codex-reset.com). It estimates the next reset
 from the site's recent cadence and common reset window, not an exact timestamp.
@@ -230,7 +235,7 @@ contents/
   config/config.qml             # Settings tab definitions
   ui/main.qml                   # PlasmoidItem root, timers, helpers
   ui/CompactRepresentation.qml  # Tray: rings, state dots, topic label
-  ui/FullRepresentation.qml     # Popup: tab bar (Usage / Agents)
+  ui/FullRepresentation.qml     # Popup: header (title, CLI version), tab bar
   ui/ProviderSection.qml        # Per-provider usage section (Usage tab)
   ui/AgentsSection.qml          # Agent list with folder groups (Agents tab)
   ui/configBackend.qml          # Settings → Backend tab

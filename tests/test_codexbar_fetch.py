@@ -198,3 +198,44 @@ class ForecastTests(unittest.TestCase):
         self.assertTrue(result["stale"])
         self.assertIsNone(result["expectedAt"])
 
+
+class CliVersionTests(unittest.TestCase):
+    def _run(self, **kwargs) -> str | None:
+        completed = mock.MagicMock()
+        completed.returncode = kwargs.get("returncode", 0)
+        completed.stdout = kwargs.get("stdout", "")
+        with mock.patch.object(
+            fetch.subprocess,
+            "run",
+            side_effect=kwargs.get("side_effect"),
+            return_value=completed,
+        ):
+            return fetch._cli_version("/bin/codexbar")
+
+    def test_parses_version_from_cli_banner(self) -> None:
+        self.assertEqual(self._run(stdout="CodexBar 0.56.3\n"), "0.56.3")
+
+    def test_nonzero_exit_yields_none(self) -> None:
+        self.assertIsNone(self._run(returncode=64, stdout="Unknown flag '--version'"))
+
+    def test_unparseable_output_yields_none(self) -> None:
+        self.assertIsNone(self._run(stdout="CodexBar\n"))
+
+    def test_missing_binary_yields_none(self) -> None:
+        self.assertIsNone(self._run(side_effect=FileNotFoundError("no cli")))
+
+    def test_snapshot_carries_cli_version(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(fetch, "_cli_version", return_value="0.56.3"),
+            mock.patch("sys.stdout", output),
+        ):
+            exit_code = fetch.main(["--cli-path", "/bin/true", "--providers", ""])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["cliVersion"], "0.56.3")
+
+
+if __name__ == "__main__":
+    unittest.main()

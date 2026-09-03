@@ -197,6 +197,28 @@ def _fetch_provider(cli: str, provider: str, timeout: float) -> list[dict]:
     return results
 
 
+def _cli_version(cli: str, timeout: float = 5.0) -> str | None:
+    """Return the codexbar CLI version, or None when it cannot be determined.
+
+    `codexbar --version` prints e.g. "CodexBar 0.56.3". Any failure (missing
+    binary, non-zero exit, old CLI without the flag, unexpected text) is
+    silent: the widget simply hides the version label.
+    """
+    try:
+        proc = subprocess.run(
+            [cli, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    match = re.search(r"\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.]+)?", proc.stdout or "")
+    return match.group(0) if match else None
+
 def _highest(records: list[dict]) -> tuple[str | None, float]:
     best_id: str | None = None
     best_pct = -1.0
@@ -459,6 +481,7 @@ def main(argv: list[str]) -> int:
             "highestProvider": None,
             "highestPercent": 0,
             "forecast": None,
+            "cliVersion": None,
         }
         json.dump(out, sys.stdout)
         sys.stdout.write("\n")
@@ -492,6 +515,7 @@ def main(argv: list[str]) -> int:
         "providers": results,
         "fatal": None,
         "forecast": forecast_future.result() if forecast_future is not None else None,
+        "cliVersion": _cli_version(cli),
     }
     json.dump(out, sys.stdout)
     sys.stdout.write("\n")

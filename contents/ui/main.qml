@@ -31,7 +31,8 @@ PlasmoidItem {
         highestPercent: 0,
         providers: [],
         fatal: null,
-        forecast: null
+        forecast: null,
+        cliVersion: null
     })
     property var agentSnapshot: ({
         updatedAt: "",
@@ -428,7 +429,8 @@ PlasmoidItem {
                 highestPercent: 0,
                 providers: [],
                 fatal: null,
-                forecast: null
+                forecast: null,
+                cliVersion: null
             }
             return
         }
