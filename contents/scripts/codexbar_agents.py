@@ -80,10 +80,12 @@ _PROMPT_SKIP_PREFIXES = (
 # the plasmoid re-reads every poll tick.
 _PEEK_MSGS = 8
 _PEEK_CHARS = 320
+_MODEL_MAX_CHARS = 160
 
 # In-process cache so we don't re-parse the same transcript every tick when
-# nothing has changed. Keyed by absolute path → (mtime, (title, prompt)).
-_TRANSCRIPT_CACHE: dict[str, tuple[float, tuple[str, str]]] = {}
+# nothing has changed. Keyed by absolute path → (mtime, (title, prompt,
+# recent_messages, model)).
+_TRANSCRIPT_CACHE: dict[str, tuple[float, tuple[str, str, list, str]]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +275,43 @@ def _ts_ms(ts) -> int:
     return 0
 
 
+def _model_text(value) -> str:
+    """Return a bounded model identifier from an untrusted transcript value."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:_MODEL_MAX_CHARS]
+
+
+def _record_model(record: dict, payload: dict | None = None) -> str:
+    """Extract a model identifier from the provider record shapes we read."""
+    message = record.get("message")
+    message = message if isinstance(message, dict) else {}
+    for value in (
+        message.get("model"),
+        message.get("modelId"),
+        message.get("modelID"),
+        record.get("model"),
+        record.get("modelId"),
+        record.get("modelID"),
+        payload.get("model") if isinstance(payload, dict) else None,
+        payload.get("modelId") if isinstance(payload, dict) else None,
+        payload.get("modelID") if isinstance(payload, dict) else None,
+    ):
+        model = _model_text(value)
+        if model:
+            return model
+    return ""
+
+
+def _opencode_model(message: dict) -> str:
+    """Extract OpenCode's model ID from an assistant message payload."""
+    for field in ("model_id", "modelID", "modelId", "model"):
+        model = _model_text(message.get(field))
+        if model:
+            return model
+    return ""
+
+
 def _peek_squash(text: str) -> str:
     return " ".join(text.split())[:_PEEK_CHARS]
 
@@ -349,15 +388,15 @@ def _is_real_user_prompt(text: str) -> bool:
 
 
 
-def _tail_claude_transcript(path: str) -> tuple[str, str, list]:
-    """Returns (ai_title, last_user_prompt, recent_messages) for a Claude
-    transcript. Cached by mtime so re-reads are free when nothing changed."""
+def _tail_claude_transcript(path: str) -> tuple[str, str, list, str]:
+    """Returns (ai_title, last_user_prompt, recent_messages, model) for a
+    Claude transcript. Cached by mtime so re-reads are free when unchanged."""
     if not path or not os.path.isfile(path):
-        return "", "", []
+        return "", "", [], ""
     try:
         mtime = os.path.getmtime(path)
     except OSError:
-        return "", "", []
+        return "", "", [], ""
     cached = _TRANSCRIPT_CACHE.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
@@ -365,6 +404,7 @@ def _tail_claude_transcript(path: str) -> tuple[str, str, list]:
     title = ""
     last_real, last_any = "", ""
     peek: list = []
+    model = ""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for raw in f:
@@ -406,6 +446,10 @@ def _tail_claude_transcript(path: str) -> tuple[str, str, list]:
                         text = tool
                         is_tool = True
                 role = t if t in ("user", "assistant") else rec.get("role")
+                if role == "assistant":
+                    candidate = _record_model(rec)
+                    if candidate:
+                        model = candidate
                 if text and not rec.get("isSidechain"):
                     _peek_add(peek, role, text, rec.get("timestamp"),
                               "tools" if is_tool else "text")
@@ -415,10 +459,10 @@ def _tail_claude_transcript(path: str) -> tuple[str, str, list]:
                 if _is_real_user_prompt(text):
                     last_real = text
     except OSError:
-        return "", "", []
+        return "", "", [], ""
     chosen = last_real or last_any
     prompt = " ".join(chosen.split())[:200]
-    result = (title, prompt, _peek_finalize(peek))
+    result = (title, prompt, _peek_finalize(peek), model)
     _TRANSCRIPT_CACHE[path] = (mtime, result)
     return result
 
@@ -434,7 +478,7 @@ def _claude_slug(cwd: str) -> str:
 def _claude_info(pid: int) -> dict:
     info = {
         "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
-        "state": "working", "identityExact": False,
+        "state": "working", "identityExact": False, "model": "",
     }
     state_file = Path.home() / ".claude" / "sessions" / f"{pid}.json"
     if not state_file.is_file():
@@ -460,11 +504,13 @@ def _claude_info(pid: int) -> dict:
 
     if sid and cwd:
         transcript = Path.home() / ".claude" / "projects" / _claude_slug(cwd) / f"{sid}.jsonl"
-        title, prompt, recent = _tail_claude_transcript(str(transcript))
+        title, prompt, recent, model = _tail_claude_transcript(str(transcript))
         if title:
             info["windowTitle"] = title
         if prompt:
             info["lastPrompt"] = prompt
+        if model:
+            info["model"] = model
         if recent:
             info["recent"] = recent
     return info
@@ -473,7 +519,7 @@ def _claude_info(pid: int) -> dict:
 def _codex_info(pid: int) -> dict:
     info = {
         "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
-        "state": "working", "identityExact": False,
+        "state": "working", "identityExact": False, "model": "",
     }
     rollout, direct = _open_jsonl_under(pid, "/.codex/sessions/")
     if not rollout:
@@ -489,6 +535,10 @@ def _codex_info(pid: int) -> dict:
                     continue
                 t = rec.get("type")
                 p = rec.get("payload") or {}
+                if t in ("session_meta", "turn_context"):
+                    candidate = _record_model(rec, p)
+                    if candidate:
+                        info["model"] = candidate
                 if t == "session_meta":
                     info["sessionId"] = p.get("id") or info["sessionId"]
                     info["cwd"] = p.get("cwd") or info["cwd"]
@@ -530,7 +580,7 @@ def _codex_info(pid: int) -> dict:
 def _opencode_info(pid: int) -> dict:
     info = {
         "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
-        "state": "working", "identityExact": False,
+        "state": "working", "identityExact": False, "model": "",
     }
     db = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
     if not db.is_file():
@@ -568,14 +618,22 @@ def _opencode_info(pid: int) -> dict:
                 joined: dict[str, list] = {}
                 order: list[str] = []
                 for mid, mdata, pdata, mtime in cur:
+                    message = {}
+                    try:
+                        message = json.loads(mdata) or {}
+                    except (TypeError, json.JSONDecodeError):
+                        pass
+                    if (
+                        isinstance(message, dict)
+                        and message.get("role") == "assistant"
+                    ):
+                        candidate = _opencode_model(message)
+                        if candidate:
+                            info["model"] = candidate
                     entry = joined.get(mid)
                     if entry is None:
-                        role = ""
-                        try:
-                            role = (json.loads(mdata) or {}).get("role") or ""
-                        except (TypeError, json.JSONDecodeError):
-                            pass
-                        entry = joined[mid] = [role, "", mtime]
+                        role = message.get("role") if isinstance(message, dict) else ""
+                        entry = joined[mid] = [role or "", "", mtime]
                         order.append(mid)
                     if not pdata:
                         continue
@@ -705,7 +763,7 @@ def _pi_info(pid: int) -> dict:
     is idle; a user message, tool request or tool result is still working."""
     info = {
         "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
-        "state": "working", "identityExact": False,
+        "state": "working", "identityExact": False, "model": "",
     }
     rollout, direct = _open_jsonl_under(pid, "/.pi/agent/sessions/", "/.omp/agent/sessions/")
     if not rollout:
@@ -729,6 +787,11 @@ def _pi_info(pid: int) -> dict:
                 except json.JSONDecodeError:
                     continue
                 t = rec.get("type")
+                if t == "model_change":
+                    candidate = _record_model(rec)
+                    if candidate:
+                        info["model"] = candidate
+                    continue
                 if t in ("title", "title_change"):
                     # omp renames a session mid-run and appends the new name
                     # as its own record; the header keeps whatever the name
@@ -752,6 +815,9 @@ def _pi_info(pid: int) -> dict:
                     info["state"] = (
                         "working" if msg_obj.get("stopReason") == "toolUse" else "idle"
                     )
+                    candidate = _record_model(rec)
+                    if candidate:
+                        info["model"] = candidate
                     preview = _content_preview(msg_obj.get("content"))
                     # The "→ " marker here is _content_preview's own output
                     # for tool-only assistant messages, never user input.
@@ -907,6 +973,7 @@ def _build_records() -> list[dict]:
                 "host": host,
                 "tty": "",
                 "state": info.get("state") or "working",
+                "model": _model_text(info.get("model")),
                 "lastPrompt": info.get("lastPrompt") or "",
                 "recent": info.get("recent") or [],
                 "windowTitle": info.get("windowTitle") or "",
@@ -1062,6 +1129,7 @@ def _recovery_record(record: dict, active: bool) -> dict:
         "desktop": desktop if _valid_desktop(desktop) else "",
         "lastState": text("state" if active else "lastState"),
         "lastSeenAt": timestamp,
+        "model": _model_text(record.get("model")),
         "resumeCommand": command,
     }
 
@@ -1106,6 +1174,10 @@ def _merge_snapshot(
             and _valid_desktop(old.get("desktop"))
         ):
             record["desktop"] = old["desktop"]
+        if old is not None and same_boot and not record.get("model"):
+            model = _model_text(old.get("model"))
+            if model:
+                record["model"] = model
         identity_exact = record.get("identityExact") is True
         record["identityExact"] = identity_exact
         record["resumeCommand"] = _resume_command(

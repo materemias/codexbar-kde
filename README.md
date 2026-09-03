@@ -94,6 +94,10 @@ for GPT models.
 Sessions without a hook sentinel file are shown as "untracked" — still visible
 with state and cwd, just no task title.
 
+When a session source records the selected model, the short model name appears
+beside the task title in an accent color. Rows without model metadata keep the
+existing layout.
+
 ## Requirements
 
 - KDE Plasma **6**

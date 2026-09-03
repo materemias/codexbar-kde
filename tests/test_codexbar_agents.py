@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shlex
+import sqlite3
 import stat
 import tempfile
 import unittest
@@ -33,6 +34,7 @@ RECOVERY_FIELDS = {
     "desktop",
     "lastState",
     "lastSeenAt",
+    "model",
     "resumeCommand",
 }
 
@@ -46,6 +48,7 @@ def active(provider: str, session_id: str, **changes: object) -> dict:
         "lastPrompt": "Fix the state",
         "host": "kitty",
         "desktop": "4",
+        "model": "provider/model",
         "state": "idle",
         "updatedAt": 100,
         "startedAt": 50,
@@ -70,12 +73,141 @@ def recovery(provider: str, session_id: str, **changes: object) -> dict:
         "lastPrompt": "Fix the state",
         "host": "kitty",
         "desktop": "4",
+        "model": "provider/model",
         "lastState": "idle",
         "lastSeenAt": 100,
         "resumeCommand": f"{provider} resume {session_id}",
     }
     record.update(changes)
     return record
+
+
+class ModelExtractionTests(unittest.TestCase):
+    def test_model_text_is_bounded_and_whitespace_normalized(self) -> None:
+        self.assertEqual(agents._model_text("  provider/model\n"), "provider/model")
+        self.assertEqual(agents._model_text("x" * 200), "x" * 160)
+        self.assertEqual(agents._model_text({"model": "bad"}), "")
+
+    def test_claude_uses_latest_assistant_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "claude.jsonl"
+            rows = [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "model": "anthropic/claude-sonnet-4",
+                        "content": "first",
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "model": "anthropic/claude-opus-5",
+                        "content": "latest",
+                    },
+                },
+            ]
+            path.write_text("\n".join(
+                json.dumps(row, separators=(",", ":")) for row in rows
+            ) + "\n")
+
+            *_, model = agents._tail_claude_transcript(str(path))
+
+        self.assertEqual(model, "anthropic/claude-opus-5")
+
+    def test_codex_reads_model_from_turn_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "codex.jsonl"
+            path.write_text("\n".join([
+                json.dumps({
+                    "type": "session_meta",
+                    "payload": {"id": "codex-id", "cwd": "/work"},
+                }),
+                json.dumps({
+                    "type": "turn_context",
+                    "payload": {"model": "openai-codex/gpt-5.6-sol"},
+                }),
+            ]) + "\n")
+            with mock.patch.object(
+                agents, "_open_jsonl_under", return_value=(str(path), True)
+            ):
+                info = agents._codex_info(42)
+
+        self.assertEqual(info["model"], "openai-codex/gpt-5.6-sol")
+
+    def test_pi_uses_latest_model_change_or_assistant_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pi.jsonl"
+            path.write_text("\n".join([
+                json.dumps({
+                    "type": "session", "id": "pi-id", "cwd": "/work"
+                }),
+                json.dumps({
+                    "type": "model_change", "model": "zai/glm-5.3-flash"
+                }),
+                json.dumps({
+                    "type": "message",
+                    "message": {
+                        "role": "assistant",
+                        "model": "anthropic/claude-opus-5",
+                        "content": "done",
+                    },
+                }),
+            ]) + "\n")
+            with mock.patch.object(
+                agents, "_open_jsonl_under", return_value=(str(path), True)
+            ):
+                info = agents._pi_info(42)
+
+        self.assertEqual(info["model"], "anthropic/claude-opus-5")
+
+    def test_opencode_reads_latest_assistant_model_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            db_path = home / ".local" / "share" / "opencode" / "opencode.db"
+            db_path.parent.mkdir(parents=True)
+            con = sqlite3.connect(db_path)
+            try:
+                con.executescript("""
+                    CREATE TABLE session (
+                        id TEXT, directory TEXT, title TEXT, time_updated INTEGER
+                    );
+                    CREATE TABLE message (
+                        id TEXT, session_id TEXT, time_created INTEGER, data TEXT
+                    );
+                    CREATE TABLE part (
+                        message_id TEXT, time_created INTEGER, data TEXT
+                    );
+                """)
+                con.execute(
+                    "INSERT INTO session VALUES (?, ?, ?, ?)",
+                    ("session-id", "/work", "OpenCode", 1),
+                )
+                con.execute(
+                    "INSERT INTO message VALUES (?, ?, ?, ?)",
+                    (
+                        "message-id",
+                        "session-id",
+                        1,
+                        json.dumps({
+                            "role": "assistant",
+                            "model_id": "openai/gpt-5.6",
+                        }),
+                    ),
+                )
+                con.commit()
+            finally:
+                con.close()
+
+            with (
+                mock.patch.object(agents.Path, "home", return_value=home),
+                mock.patch.object(agents, "_cwd_of", return_value="/work"),
+            ):
+                info = agents._opencode_info(42)
+
+        self.assertEqual(info["model"], "openai/gpt-5.6")
 
 
 class SnapshotMergeTests(unittest.TestCase):
@@ -222,7 +354,7 @@ class SnapshotMergeTests(unittest.TestCase):
             "omp", "carry", desktop="6", startedAt=10, stateChangedAt=20
         )
         current = active(
-            "omp", "carry", desktop=None, startedAt=0, stateChangedAt=100
+            "omp", "carry", desktop=None, model="", startedAt=0, stateChangedAt=100
         )
         current.pop("desktop")
         previous = {"bootId": "boot-a", "agents": [old], "recovery": []}
@@ -231,6 +363,7 @@ class SnapshotMergeTests(unittest.TestCase):
         self.assertEqual(same["agents"][0]["desktop"], "6")
         self.assertEqual(same["agents"][0]["startedAt"], 10)
         self.assertEqual(same["agents"][0]["stateChangedAt"], 20)
+        self.assertEqual(same["agents"][0]["model"], "provider/model")
 
         changed = agents._merge_snapshot([current], previous, "boot-b", 200)
         self.assertNotIn("desktop", changed["agents"][0])

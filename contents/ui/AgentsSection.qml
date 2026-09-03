@@ -108,7 +108,7 @@ ColumnLayout {
         var q = filterText.toLowerCase()
         if (!q) return true
 
-        var fields = [a.windowTitle, a.lastPrompt, a.cwd, a.provider]
+        var fields = [a.windowTitle, a.lastPrompt, a.cwd, a.provider, a.model]
         for (var i = 0; i < fields.length; i++) {
             if (_fuzzyMatches(fields[i], q)) return true
         }
@@ -129,6 +129,14 @@ ColumnLayout {
             omp: "omp"
         }
         return names[provider] || provider || "Agent"
+    }
+
+    function _modelName(model) {
+        if (typeof model !== "string") return ""
+        var value = model.trim()
+        if (!value) return ""
+        var slash = value.lastIndexOf("/")
+        return slash >= 0 ? value.slice(slash + 1) : value
     }
 
     function togglePeek() {
@@ -275,6 +283,17 @@ ColumnLayout {
                             text: agents._providerName(recoveryRow.modelData.provider)
                             font.weight: Font.DemiBold
                             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        PC3.Label {
+                            text: agents._modelName(recoveryRow.modelData.model)
+                            visible: text.length > 0
+                            color: Kirigami.Theme.linkColor
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            font.weight: Font.DemiBold
+                            elide: Text.ElideMiddle
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 9
                             Layout.alignment: Qt.AlignVCenter
                         }
 
@@ -630,6 +649,17 @@ ColumnLayout {
                         text: rowItem.taskLabel
                         elide: Text.ElideRight
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+
+                    PC3.Label {
+                        text: agents._modelName(rowItem.modelData.model)
+                        visible: text.length > 0
+                        color: Kirigami.Theme.linkColor
+                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                        font.weight: Font.DemiBold
+                        elide: Text.ElideMiddle
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 9
                         Layout.alignment: Qt.AlignVCenter
                     }
 
