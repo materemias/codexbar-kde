@@ -237,5 +237,117 @@ class CliVersionTests(unittest.TestCase):
         self.assertEqual(payload["cliVersion"], "0.56.3")
 
 
+class OpenRouterBalanceTests(unittest.TestCase):
+    CREDITS_DETAILS = [
+        {
+            "title": "Credits",
+            "rows": [
+                {"label": "Remaining", "value": "$6.17"},
+                {"label": "Used", "value": "$126.83"},
+            ],
+        }
+    ]
+
+    def _normalize(self, usage: dict) -> dict:
+        return fetch._normalize_record(
+            "openrouter", {"provider": "openrouter", "source": "api", "usage": usage}
+        )
+
+    def test_details_row_supplies_balance_without_openrouter_usage(self) -> None:
+        # CLI 0.56.3 shape: no openRouterUsage at all.
+        record = self._normalize(
+            {
+                "primary": {"usedPercent": 100.0, "resetDescription": "placeholder"},
+                "loginMethod": "Balance: $6.17",
+                "details": self.CREDITS_DETAILS,
+            }
+        )
+
+        self.assertEqual(record["balanceText"], "$6.17 left")
+        self.assertIsNone(record["primary"])
+
+    def test_login_method_supplies_balance_without_details(self) -> None:
+        record = self._normalize(
+            {"primary": {"usedPercent": 100.0}, "loginMethod": "Balance: $6.17"}
+        )
+
+        self.assertEqual(record["balanceText"], "$6.17 left")
+        self.assertIsNone(record["primary"])
+
+    def test_zero_key_limit_still_shows_balance(self) -> None:
+        record = self._normalize(
+            {
+                "primary": {"usedPercent": 100.0},
+                "openRouterUsage": {"keyLimit": 0},
+                "details": self.CREDITS_DETAILS,
+            }
+        )
+
+        self.assertEqual(record["balanceText"], "$6.17 left")
+        self.assertIsNone(record["primary"])
+
+    def test_openrouter_usage_without_key_limit_still_shows_balance(self) -> None:
+        record = self._normalize(
+            {
+                "primary": {"usedPercent": 100.0},
+                "openRouterUsage": {"balance": 6.17},
+                "details": self.CREDITS_DETAILS,
+            }
+        )
+
+        self.assertEqual(record["balanceText"], "$6.17 left")
+        self.assertIsNone(record["primary"])
+
+    def test_key_limit_renders_bar_and_no_balance_text(self) -> None:
+        record = self._normalize(
+            {
+                "primary": {"usedPercent": 100.0},
+                "openRouterUsage": {"keyLimit": 20, "keyUsageMonthly": 5.0},
+                "details": self.CREDITS_DETAILS,
+            }
+        )
+
+        self.assertIsNone(record["balanceText"])
+        self.assertEqual(record["primary"]["usedPercent"], 25.0)
+        self.assertEqual(record["primary"]["resetDescription"], "$5.00 / $20")
+
+    def test_thousands_separator_parses(self) -> None:
+        record = self._normalize(
+            {
+                "details": [
+                    {
+                        "title": "Credits",
+                        "rows": [{"label": "Remaining", "value": "$1,234.50"}],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(record["balanceText"], "$1234.50 left")
+
+    def test_unparseable_balance_yields_none(self) -> None:
+        record = self._normalize(
+            {
+                "primary": {"usedPercent": 100.0},
+                "loginMethod": "Balance: unavailable",
+                "details": [
+                    {
+                        "title": "Credits",
+                        "rows": [{"label": "Remaining", "value": "Unavailable"}],
+                    }
+                ],
+            }
+        )
+
+        self.assertIsNone(record["balanceText"])
+        self.assertIsNone(record["primary"])
+
+    def test_missing_usage_yields_none(self) -> None:
+        record = self._normalize({})
+
+        self.assertIsNone(record["balanceText"])
+        self.assertIsNone(record["primary"])
+
+
 if __name__ == "__main__":
     unittest.main()

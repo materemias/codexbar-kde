@@ -57,6 +57,37 @@ def _result_error(provider: str, code: str, message: str, source: str | None = N
     }
 
 
+# Money as the OpenRouter details rows format it, e.g. "$6.17" or "$1,234.50".
+_OR_MONEY_RE = re.compile(r"^\s*\$?([\d,]+(?:\.\d+)?)\s*$")
+# Identity line the CLI builds when it has a credit balance, e.g. "Balance: $6.17".
+_OR_BALANCE_RE = re.compile(r"^\s*Balance:\s*\$?([\d,]+(?:\.\d+)?)\s*$")
+
+
+def _openrouter_balance_text(usage: dict) -> str | None:
+    """Remaining OpenRouter credit as "$6.17 left".
+
+    CLI 0.56.3 stopped emitting `openRouterUsage`, so the remaining credit is
+    only in the "Credits" / "Remaining" details row, with the identity line
+    ("Balance: $6.17") as the last resort. Neither carries a numeric field.
+    Returns None when no amount parses.
+    """
+    details = usage.get("details")
+    for section in details if isinstance(details, list) else []:
+        if not isinstance(section, dict) or section.get("title") != "Credits":
+            continue
+        rows = section.get("rows")
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or row.get("label") != "Remaining":
+                continue
+            m = _OR_MONEY_RE.match(str(row.get("value") or ""))
+            if m:
+                return f"${float(m.group(1).replace(',', '')):.2f} left"
+    m = _OR_BALANCE_RE.match(str(usage.get("loginMethod") or ""))
+    if m:
+        return f"${float(m.group(1).replace(',', '')):.2f} left"
+    return None
+
+
 def _normalize_record(provider: str, record: dict) -> dict:
     raw_usage = record.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -88,19 +119,21 @@ def _normalize_record(provider: str, record: dict) -> dict:
     primary = usage.get("primary")
     or_usage = usage.get("openRouterUsage")
     balance_text: str | None = None
-    if provider == "openrouter" and or_usage and isinstance(or_usage, dict):
+    if provider == "openrouter":
         # The CodexBar CLI returns primary.usedPercent=100 as a placeholder.
-        # Replace it with the per-key allowance when one exists.
-        key_limit = or_usage.get("keyLimit")
-        if isinstance(key_limit, (int, float)) and key_limit > 0:
-            monthly = or_usage.get("keyUsageMonthly")
-            monthly = monthly if isinstance(monthly, (int, float)) else 0.0
-            primary = {
-                "usedPercent": min(100.0, (monthly / key_limit) * 100.0),
-                "resetDescription": f"${monthly:.2f} / ${key_limit:.0f}",
-            }
-        else:
-            primary = None
+        # Only a real per-key allowance replaces it; otherwise no bar renders.
+        primary = None
+        if isinstance(or_usage, dict):
+            key_limit = or_usage.get("keyLimit")
+            if isinstance(key_limit, (int, float)) and key_limit > 0:
+                monthly = or_usage.get("keyUsageMonthly")
+                monthly = monthly if isinstance(monthly, (int, float)) else 0.0
+                primary = {
+                    "usedPercent": min(100.0, (monthly / key_limit) * 100.0),
+                    "resetDescription": f"${monthly:.2f} / ${key_limit:.0f}",
+                }
+        if primary is None:
+            balance_text = _openrouter_balance_text(usage)
     elif provider == "kilo" and isinstance(primary, dict):
         # Kilo reports used/total credits. With auto-topup off this is a
         # balance, not a recurring window, so show the amount in the header.

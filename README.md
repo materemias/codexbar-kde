@@ -153,6 +153,10 @@ CODEX_HOME=~/.codex-pro codex login
 Claude and OpenRouter use `~/.claude/.credentials.json` and
 `OPENROUTER_API_KEY` respectively.
 
+The balance in the row header is the remaining credit from the CLI's credits
+output, so it appears whenever the key can read credits. A usage bar appears
+only when the key has a per-key spend limit set on OpenRouter.
+
 ## Update
 
 ```sh
