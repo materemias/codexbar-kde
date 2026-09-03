@@ -28,6 +28,10 @@ Item {
         if (!s || !s.counts) return 0
         return (s.counts.total || 0) + (s.counts.untracked || 0)
     }
+    readonly property int recoveryCount: {
+        var s = root.agentSnapshot
+        return s && Array.isArray(s.recovery) ? s.recovery.length : 0
+    }
 
     // Header sits outside the tab area so it stays pinned.
     ColumnLayout {
@@ -75,7 +79,7 @@ Item {
             visible: full.agentsTabVisible
             currentIndex: root.requestedTab === "agents" ? 1
                 : root.requestedTab === "usage" ? 0
-                : (full.blockedCount > 0 ? 1 : 0)
+                : (full.blockedCount > 0 || full.recoveryCount > 0 ? 1 : 0)
 
             // A manual user click on a TabButton breaks the binding above.
             // Re-establish it explicitly whenever requestedTab changes (e.g.
@@ -93,9 +97,18 @@ Item {
                 width: implicitWidth
             }
             QQC2.TabButton {
-                text: full.agentTotalCount > 0
-                    ? "Agents (" + full.agentTotalCount + ")"
-                    : "Agents"
+                text: {
+                    if (full.recoveryCount === 0) {
+                        return full.agentTotalCount > 0
+                            ? "Agents (" + full.agentTotalCount + ")"
+                            : "Agents"
+                    }
+                    if (full.agentTotalCount === 0) {
+                        return "Agents (" + full.recoveryCount + " restore)"
+                    }
+                    return "Agents (" + full.agentTotalCount + " live, "
+                        + full.recoveryCount + " restore)"
+                }
                 width: implicitWidth
             }
         }

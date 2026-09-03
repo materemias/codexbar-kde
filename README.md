@@ -29,14 +29,19 @@ your machine, grouped by project folder:
   desktop its terminal window is on. Sessions on the current desktop get a
   highlighted badge, so you can see which agent is one switch away. Windows
   pinned to all desktops show "all".
+- **Restart recovery.** After a Linux boot change, unresolved sessions from
+  the last sample appear in a separate restore list with their project,
+  desktop, host, identifying text, and last-seen time. CodexBar shows a
+  copyable resume command only when it can prove the exact provider session.
+  It never launches recovery commands.
 - **Conversation peek.** Click the arrow on a session row or press `Space` to
   expand its last eight user and assistant turns. Color-coded cards separate
   user, assistant, and tool turns.
 - **Type-to-filter search.** Start typing on the Agents tab. The filter fuzzy
   matches the session title, last prompt, working directory, and provider.
   Recent conversation text uses exact case-insensitive substring matching.
-- **Auto-tab** — the popup opens directly to Agents when `Super+A` is pressed,
-  or when any agent is blocked.
+- **Auto-tab.** The popup opens directly to Agents when `Super+A` is pressed,
+  an agent is blocked, or restore records exist.
 - **Tray presence** — colored count dots (working/blocked/idle) beside the
   usage rings, optional featured-task label, and a red badge when agents need
   attention.
@@ -45,6 +50,8 @@ The aggregator scans `/proc` to discover running agent processes, reads their
 session transcripts for window titles and last prompts, and writes a single
 `~/.codexbar/agents.json` that the widget polls via XHR — no background daemon
 required.
+At boot boundaries, the same file carries unresolved recovery records forward
+until the matching provider session becomes live again.
 
 ## Supported providers
 

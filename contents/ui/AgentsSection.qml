@@ -1,9 +1,9 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls as QQC2
 import org.kde.plasma.plasmoid
 import org.kde.plasma.components as PC3
 import org.kde.kirigami as Kirigami
-import org.kde.taskmanager as TaskManager
 
 ColumnLayout {
     id: agents
@@ -11,9 +11,27 @@ ColumnLayout {
 
     readonly property var snap: root.agentSnapshot
     readonly property var counts: snap && snap.counts ? snap.counts : ({})
-    readonly property var list: snap && snap.agents ? snap.agents : []
+    readonly property var list: snap && Array.isArray(snap.agents) ? snap.agents : []
+    readonly property var recoveryList: snap && Array.isArray(snap.recovery)
+        ? snap.recovery : []
     readonly property bool hasSomething: (counts.total || 0) > 0
     readonly property bool showPrompts: Plasmoid.configuration.showAgentPrompts === true
+    readonly property var filteredRecovery: {
+        var out = []
+        for (var i = 0; i < agents.recoveryList.length; i++) {
+            var record = agents.recoveryList[i]
+            if (record && agents._matchesFilter(record)) out.push(record)
+        }
+        out.sort(function(a, b) {
+            var aTime = Number(a.lastSeenAt) || 0
+            var bTime = Number(b.lastSeenAt) || 0
+            if (aTime !== bTime) return bTime - aTime
+            var aKey = String(a.provider || "") + "\n" + String(a.sessionId || "")
+            var bKey = String(b.provider || "") + "\n" + String(b.sessionId || "")
+            return aKey < bKey ? -1 : aKey > bKey ? 1 : 0
+        })
+        return out
+    }
 
     // Cluster sessions by cwd. Groups are sorted alphabetically by folder name,
     // and rows within each group are newest first by stateChangedAt.
@@ -102,6 +120,17 @@ ColumnLayout {
         return false
     }
 
+    function _providerName(provider) {
+        var names = {
+            claude: "Claude",
+            codex: "Codex",
+            opencode: "OpenCode",
+            pi: "pi",
+            omp: "omp"
+        }
+        return names[provider] || provider || "Agent"
+    }
+
     function togglePeek() {
         if (selectedIndex < 0 || selectedIndex >= flatAgents.length) return
         var a = flatAgents[selectedIndex]
@@ -162,140 +191,237 @@ ColumnLayout {
         return root.ageFrom(ms)
     }
 
-    // --- Virtual desktop lookup ------------------------------------------
-    // Which desktop a session's terminal window lives on. Plasma's
-    // taskmanager model is the only QML source for window pids and
-    // desktops; its roles carry no role ids we could pass to data(), so
-    // an invisible Repeater harvests them through per-delegate `model.*`
-    // bindings. Every window delegate registers itself in `taskWindows`;
-    // role updates recreate its `info` object, and the chip bindings that
-    // read `info` re-resolve. Lives here rather than main.qml so the model
-    // only exists while the Agents tab does.
-    TaskManager.VirtualDesktopInfo { id: vdInfo }
+    // Recovery records are separate from all live grouping, selection,
+    // keyboard activation, peeking, desktop lookup, and focus behavior.
+    ColumnLayout {
+        visible: agents.recoveryList.length > 0
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.smallSpacing
 
-    property var taskWindows: []
-
-    Repeater {
-        // Grouping collapses same-app windows into one row with a single
-        // pid; we need every window with its own pid to match sessions.
-        model: TaskManager.TasksModel {
-            id: tasksModel
-            groupMode: TaskManager.TasksModel.GroupDisabled
+        PC3.Label {
+            text: "Restore after restart"
+            font.weight: Font.Bold
+            font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
+            Layout.fillWidth: true
         }
-        // Repeater demands Item delegates; this one stays invisible and
-        // zero-size, it only exists to bind the roles we need.
-        delegate: Item {
-            id: taskWin
-            visible: false
-            readonly property int pid: model.AppPid !== undefined ? model.AppPid : 0
-            // Plural: a window may live on several desktops at once, and
-            // the role arrives as a nested list.
-            readonly property var desktops: {
-                var outer = agents._roleList(model.VirtualDesktops)
-                var flat = []
-                for (var k = 0; k < outer.length; k++) {
-                    var inner = agents._roleList(outer[k])
-                    for (var m = 0; m < inner.length; m++) flat.push(inner[m])
+
+        PC3.Label {
+            text: "These rows came from the last sample before this boot. CodexBar will not launch them."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            opacity: 0.7
+            Layout.fillWidth: true
+        }
+
+        PC3.Label {
+            visible: agents.filterText.length > 0
+                && agents.filteredRecovery.length === 0
+            text: "No restore records match this filter."
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            opacity: 0.65
+            Layout.fillWidth: true
+        }
+
+        Repeater {
+            model: agents.filteredRecovery
+            delegate: Rectangle {
+                id: recoveryRow
+                required property var modelData
+                Layout.fillWidth: true
+                implicitHeight: recoveryCol.implicitHeight + 10
+                radius: 4
+                color: Kirigami.Theme.alternateBackgroundColor
+                border.width: 1
+                border.color: Qt.rgba(
+                    Kirigami.Theme.textColor.r,
+                    Kirigami.Theme.textColor.g,
+                    Kirigami.Theme.textColor.b,
+                    0.14
+                )
+
+                readonly property string lastSeenText: {
+                    var value = Number(modelData.lastSeenAt) || 0
+                    if (!value) return "last seen unknown"
+                    return "last seen " + new Date(value).toLocaleString(
+                        Qt.locale(), Locale.ShortFormat)
                 }
-                return flat
+
+                ColumnLayout {
+                    id: recoveryCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 5
+                    spacing: 3
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+
+                        Kirigami.Icon {
+                            source: recoveryRow.modelData.provider
+                                ? Qt.resolvedUrl("../icons/"
+                                    + recoveryRow.modelData.provider + ".svg")
+                                : ""
+                            implicitWidth: Kirigami.Units.iconSizes.small
+                            implicitHeight: Kirigami.Units.iconSizes.small
+                            smooth: true
+                            visible: source.toString().length > 0
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        PC3.Label {
+                            text: agents._providerName(recoveryRow.modelData.provider)
+                            font.weight: Font.DemiBold
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        PC3.Label {
+                            text: recoveryRow.modelData.windowTitle
+                                || recoveryRow.modelData.sessionId
+                                || "session"
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        PC3.Label {
+                            text: recoveryRow.lastSeenText
+                            textFormat: Text.PlainText
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            opacity: 0.6
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+
+                        PC3.Label {
+                            text: recoveryRow.modelData.cwd || "cwd unknown"
+                            textFormat: Text.PlainText
+                            elide: Text.ElideMiddle
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            opacity: 0.75
+                            Layout.fillWidth: true
+                        }
+
+                        PC3.Label {
+                            text: recoveryRow.modelData.host
+                                ? "host " + recoveryRow.modelData.host
+                                : "host unknown"
+                            textFormat: Text.PlainText
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            opacity: 0.65
+                        }
+
+                        Rectangle {
+                            width: recoveryDesktopLabel.implicitWidth + 8
+                            height: recoveryDesktopLabel.implicitHeight + 3
+                            radius: 3
+                            color: "transparent"
+                            border.width: 1
+                            border.color: Qt.rgba(
+                                Kirigami.Theme.textColor.r,
+                                Kirigami.Theme.textColor.g,
+                                Kirigami.Theme.textColor.b,
+                                0.3
+                            )
+                            Layout.alignment: Qt.AlignVCenter
+
+                            PC3.Label {
+                                id: recoveryDesktopLabel
+                                anchors.centerIn: parent
+                                text: recoveryRow.modelData.desktop
+                                    ? "desktop " + recoveryRow.modelData.desktop
+                                    : "desktop unknown"
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                font.weight: Font.DemiBold
+                                opacity: 0.65
+                            }
+                        }
+                    }
+
+                    PC3.Label {
+                        visible: text.length > 0
+                        text: recoveryRow.modelData.lastPrompt || ""
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
+                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                        opacity: 0.8
+                        Layout.fillWidth: true
+                    }
+
+                    RowLayout {
+                        visible: (recoveryRow.modelData.resumeCommand || "").length > 0
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: resumeText.contentHeight + 8
+                            radius: 3
+                            color: Kirigami.Theme.backgroundColor
+                            border.width: 1
+                            border.color: Qt.rgba(
+                                Kirigami.Theme.textColor.r,
+                                Kirigami.Theme.textColor.g,
+                                Kirigami.Theme.textColor.b,
+                                0.2
+                            )
+
+                            TextEdit {
+                                id: resumeText
+                                anchors.fill: parent
+                                anchors.margins: 4
+                                text: recoveryRow.modelData.resumeCommand || ""
+                                textFormat: TextEdit.PlainText
+                                readOnly: true
+                                selectByMouse: true
+                                wrapMode: TextEdit.NoWrap
+                                clip: true
+                                color: Kirigami.Theme.textColor
+                                selectionColor: Kirigami.Theme.highlightColor
+                                selectedTextColor: Kirigami.Theme.highlightedTextColor
+                                font.family: "monospace"
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            }
+                        }
+
+                        PC3.ToolButton {
+                            text: "Copy resume command"
+                            icon.name: "edit-copy"
+                            display: QQC2.AbstractButton.TextBesideIcon
+                            onClicked: {
+                                resumeText.selectAll()
+                                resumeText.copy()
+                            }
+                        }
+                    }
+
+                    PC3.Label {
+                        visible: (recoveryRow.modelData.resumeCommand || "").length === 0
+                        text: "Resume command unavailable for this record."
+                        textFormat: Text.PlainText
+                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                        opacity: 0.65
+                        Layout.fillWidth: true
+                    }
+                }
             }
-            readonly property bool all: model.IsOnAllVirtualDesktops === true
-            readonly property string caption: model.display !== undefined ? String(model.display) : ""
-            readonly property var info: ({
-                pid: taskWin.pid,
-                desktops: taskWin.desktops,
-                all: taskWin.all,
-                caption: taskWin.caption
-            })
-            Component.onCompleted: agents.taskWindows = agents.taskWindows.concat([taskWin])
-            Component.onDestruction: agents.taskWindows =
-                agents.taskWindows.filter(function(w) { return w !== taskWin })
         }
-    }
 
-    // Task roles arrive as QVariant lists that aren't always real JS
-    // arrays; anything object-shaped with a numeric length counts.
-    function _roleList(v) {
-        if (v === undefined || v === null) return []
-        if (Array.isArray(v)) return v
-        if (typeof v === "object" && typeof v.length === "number") {
-            var out = []
-            for (var i = 0; i < v.length; i++) out.push(v[i])
-            return out
-        }
-        return [v]
-    }
-
-    // Cwd basename as a window-caption hint, mirroring
-    // codexbar_focus._caption_hint: last path segment, keeping alnum
-    // plus "-", "_", "." and space, compared case-insensitively.
-    function _captionHint(record) {
-        var parts = ((record && record.cwd) || "").split("/")
-        var base = ""
-        for (var i = parts.length - 1; i >= 0; i--) {
-            if (parts[i]) { base = parts[i]; break }
-        }
-        var out = ""
-        for (var j = 0; j < base.length; j++) {
-            var c = base[j]
-            var keep = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z")
-                || (c >= "0" && c <= "9") || c === "-" || c === "_"
-                || c === "." || c === " "
-            if (keep) out += c
-        }
-        return out.toLowerCase()
-    }
-
-    // Desktop ids are uuid strings on Wayland and 1-based numbers on X11;
-    // normalize either to a position in vdInfo.desktopIds.
-    function _desktopIndexOf(id) {
-        if (id === undefined || id === null) return -1
-        var i = (vdInfo.desktopIds || []).indexOf(id)
-        if (i >= 0) return i
-        return (typeof id === "number" && id >= 1) ? id - 1 : -1
-    }
-
-    // Resolve the desktop chip for a session: the first task window whose
-    // pid appears in the session's ancestor chain. Multi-window hosts (one
-    // kitty or VS Code pid behind many windows) prefer the window whose
-    // caption contains the cwd basename, same disambiguation as
-    // click-to-focus. A window on all desktops shows "all" and counts as
-    // being on the current one. Returns null when nothing resolved.
-    function desktopInfoFor(record) {
-        var chain = (record && record.ancestorPids) || []
-        if (chain.length === 0) return null
-        var byPid = {}
-        for (var i = 0; i < chain.length; i++) byPid[chain[i]] = true
-        var hint = _captionHint(record)
-        var fallback = null
-        var onAll = null
-        for (var j = 0; j < taskWindows.length; j++) {
-            var w = taskWindows[j].info
-            if (!w || !byPid[w.pid]) continue
-            if (w.all) {
-                if (!onAll) onAll = w
-            } else if (!fallback) {
-                fallback = w
-            }
-            if (hint && w.caption && !w.all
-                && w.caption.toLowerCase().indexOf(hint) >= 0) {
-                fallback = w
-                break
-            }
-        }
-        var win = fallback || onAll
-        if (!win) return null
-        if (win.all) return { label: "all", onCurrent: true }
-        var cur = _desktopIndexOf(vdInfo.currentDesktop)
-        var idxs = []
-        for (var d = 0; d < win.desktops.length; d++) {
-            var di = _desktopIndexOf(win.desktops[d])
-            if (di >= 0) idxs.push(di)
-        }
-        if (idxs.length === 0) return null
-        return {
-            label: String(idxs[0] + 1),
-            onCurrent: idxs.indexOf(cur) >= 0
+        Kirigami.Separator {
+            Layout.fillWidth: true
+            Layout.topMargin: Kirigami.Units.smallSpacing
+            Layout.bottomMargin: Kirigami.Units.smallSpacing
+            opacity: 0.4
         }
     }
 
@@ -305,7 +431,7 @@ ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
 
         PC3.Label {
-            text: "AGENTS"
+            text: "ACTIVE AGENTS"
             font.weight: Font.Bold
             font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
             font.letterSpacing: 0.4
@@ -366,8 +492,9 @@ ColumnLayout {
             Layout.fillWidth: true
         }
         PC3.Label {
-            text: agents.flatAgents.length + (agents.flatAgents.length === 1 ? " match" : " matches")
-                + " · Esc clears"
+            text: (agents.flatAgents.length + agents.filteredRecovery.length)
+                + ((agents.flatAgents.length + agents.filteredRecovery.length) === 1
+                    ? " match" : " matches") + " · Esc clears"
             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
             opacity: 0.6
         }
@@ -835,7 +962,7 @@ ColumnLayout {
             readonly property color tint: root.agentStateColor(state)
             // Desktop badge data for this row, or null when the host
             // window didn't resolve against Plasma's task list.
-            readonly property var desktopInfo: agents.desktopInfoFor(modelData)
+            readonly property var desktopInfo: root.desktopInfoFor(modelData)
             // Prefer the agent-generated session title. Only fall through
             // to the raw user prompt when the user has opted into showing
             // it (otherwise the row just shows the provider name).

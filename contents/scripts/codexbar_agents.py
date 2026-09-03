@@ -21,15 +21,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
+import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 AGGREGATE_PATH = Path.home() / ".codexbar" / "agents.json"
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+LOCK_PATH = AGGREGATE_PATH.with_suffix(".lock")
 
 # Hosts we treat as terminal emulators when walking the proc tree.
 KNOWN_HOSTS = {
@@ -426,7 +432,10 @@ def _claude_slug(cwd: str) -> str:
 
 
 def _claude_info(pid: int) -> dict:
-    info = {"sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "", "state": "working"}
+    info = {
+        "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
+        "state": "working", "identityExact": False,
+    }
     state_file = Path.home() / ".claude" / "sessions" / f"{pid}.json"
     if not state_file.is_file():
         return info
@@ -437,6 +446,7 @@ def _claude_info(pid: int) -> dict:
     sid = rec.get("sessionId") or ""
     cwd = rec.get("cwd") or _cwd_of(pid)
     info["sessionId"] = sid
+    info["identityExact"] = isinstance(sid, str) and bool(sid)
     info["cwd"] = cwd
 
     status = (rec.get("status") or "").lower()
@@ -461,8 +471,11 @@ def _claude_info(pid: int) -> dict:
 
 
 def _codex_info(pid: int) -> dict:
-    info = {"sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "", "state": "working"}
-    rollout = _open_jsonl_under(pid, "/.codex/sessions/")
+    info = {
+        "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
+        "state": "working", "identityExact": False,
+    }
+    rollout, direct = _open_jsonl_under(pid, "/.codex/sessions/")
     if not rollout:
         return info
     last_real, last_any, last_event = "", "", ""
@@ -499,6 +512,9 @@ def _codex_info(pid: int) -> dict:
                         last_event = sub
     except OSError:
         return info
+    info["identityExact"] = (
+        direct and isinstance(info["sessionId"], str) and bool(info["sessionId"])
+    )
     if last_event == "task_complete":
         info["state"] = "idle"
     elif last_event in ("task_started", "user_message"):
@@ -512,7 +528,10 @@ def _codex_info(pid: int) -> dict:
 
 
 def _opencode_info(pid: int) -> dict:
-    info = {"sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "", "state": "working"}
+    info = {
+        "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
+        "state": "working", "identityExact": False,
+    }
     db = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
     if not db.is_file():
         return info
@@ -684,14 +703,18 @@ def _pi_info(pid: int) -> dict:
 
     State follows the last transcript message: a terminal assistant response
     is idle; a user message, tool request or tool result is still working."""
-    info = {"sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "", "state": "working"}
-    rollout = _open_jsonl_under(pid, "/.pi/agent/sessions/", "/.omp/agent/sessions/")
+    info = {
+        "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
+        "state": "working", "identityExact": False,
+    }
+    rollout, direct = _open_jsonl_under(pid, "/.pi/agent/sessions/", "/.omp/agent/sessions/")
     if not rollout:
         # A run started with an explicit --session-dir doesn't live under the
         # cwd slug, and the slug lookup would hand it a *different* session's
         # rollout — duplicating that session's row under a wrong pid.
         sess_dir = _session_dir_of(pid)
         rollout = _newest_jsonl(Path(sess_dir)) if sess_dir else _find_pi_rollout(_cwd_of(pid))
+        direct = False
     if not rollout:
         info["cwd"] = _cwd_of(pid)
         return info
@@ -758,6 +781,9 @@ def _pi_info(pid: int) -> dict:
                         last_real = text
     except OSError:
         return info
+    info["identityExact"] = (
+        direct and isinstance(info["sessionId"], str) and bool(info["sessionId"])
+    )
     if not info["cwd"]:
         info["cwd"] = _cwd_of(pid)
     chosen = last_real or last_any
@@ -766,9 +792,10 @@ def _pi_info(pid: int) -> dict:
     return info
 
 
-def _open_jsonl_under(pid: int, *needles: str) -> str:
-    """Return the session rollout the pid holds open whose path contains one
-    of the given needles. Returns "" if none.
+def _open_jsonl_under(pid: int, *needles: str) -> tuple[str, bool]:
+    """Return the selected rollout and whether the process holds it directly.
+
+    Returns ("", False) when no rollout can be selected.
 
     A root rollout the pid holds directly wins over one reached through an
     advisor sidecar: a process can hold sidecar fds for a session another
@@ -780,7 +807,7 @@ def _open_jsonl_under(pid: int, *needles: str) -> str:
     try:
         entries = os.listdir(fd_dir)
     except OSError:
-        return ""
+        return "", False
     direct: set[str] = set()
     via_sidecar: set[str] = set()
     for entry in entries:
@@ -806,7 +833,7 @@ def _open_jsonl_under(pid: int, *needles: str) -> str:
             continue
         if mtime > newest_mtime:
             newest, newest_mtime = path, mtime
-    return newest
+    return newest, bool(newest and direct)
 
 
 _INFO_FN = {
@@ -817,10 +844,40 @@ _INFO_FN = {
     "omp": _pi_info,
 }
 
+_RESUME_PREFIXES = {
+    "claude": ("claude", "--resume"),
+    "codex": ("codex", "resume"),
+    "opencode": ("opencode", "--session"),
+    "pi": ("pi", "--session"),
+    "omp": ("omp", "--resume"),
+}
+
 
 # ---------------------------------------------------------------------------
 # Aggregate
 # ---------------------------------------------------------------------------
+
+def _resume_command(
+    provider: str, session_id: str, cwd: str, identity_exact: bool
+) -> str:
+    """Build a copyable provider resume command for a proven identity."""
+    if (
+        identity_exact is not True
+        or not isinstance(provider, str)
+        or provider not in _RESUME_PREFIXES
+        or not isinstance(session_id, str)
+        or not session_id
+        or len(session_id) > 256
+        or "\0" in session_id
+        or not isinstance(cwd, str)
+        or "\0" in cwd
+    ):
+        return ""
+    command = shlex.join([*_RESUME_PREFIXES[provider], session_id])
+    if cwd:
+        command = f"{shlex.join(['cd', '--', cwd])} && {command}"
+    return command
+
 
 def _build_records() -> list[dict]:
     """Sweep all known providers, return the per-session records."""
@@ -830,8 +887,7 @@ def _build_records() -> list[dict]:
     for provider, info_fn in _INFO_FN.items():
         for pid in _pids_for(provider):
             host, host_pid, ancestors = _parent_walk_for_host(pid)
-            # No terminal ancestor → a daemon, a detached run or a piped call.
-            # Nothing the user can focus, so it isn't a session row.
+            # No terminal ancestor means there is no focusable session row.
             if not host:
                 continue
             info = info_fn(pid) or {}
@@ -839,10 +895,12 @@ def _build_records() -> list[dict]:
             if sid in seen_sids:
                 continue
             seen_sids.add(sid)
+            cwd = info.get("cwd") or _cwd_of(pid)
+            identity_exact = info.get("identityExact") is True
             records.append({
                 "provider": provider,
                 "sessionId": sid,
-                "cwd": info.get("cwd") or _cwd_of(pid),
+                "cwd": cwd,
                 "pid": pid,
                 "hostPid": host_pid,
                 "ancestorPids": ancestors,
@@ -856,75 +914,374 @@ def _build_records() -> list[dict]:
                 "startedAt": 0,
                 "stateChangedAt": now_ms,
                 "updatedAt": now_ms,
+                "identityExact": identity_exact,
+                "resumeCommand": _resume_command(
+                    provider, sid, cwd, identity_exact
+                ),
             })
     return records
 
 
-def _load_previous() -> dict[str, dict]:
-    """Read the last-written aggregate so we can carry forward stateChangedAt
-    / startedAt across sweeps. Without this, every 5s tick would reset the
-    "blocked 12s" age label back to 0."""
-    if not AGGREGATE_PATH.is_file():
+def _read_boot_id() -> str:
+    try:
+        return BOOT_ID_PATH.read_text().strip()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _load_payload(path: Path = AGGREGATE_PATH) -> dict:
+    """Load a saved snapshot and narrow its two record collections."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    else:
+        payload = dict(payload)
+    for field in ("agents", "recovery"):
+        value = payload.get(field)
+        payload[field] = (
+            [record for record in value if isinstance(record, dict)]
+            if isinstance(value, list)
+            else []
+        )
+    return payload
+
+
+def _record_key(record: dict) -> tuple[str, str] | None:
+    provider = record.get("provider")
+    session_id = record.get("sessionId")
+    if (
+        not isinstance(provider, str)
+        or not provider
+        or not isinstance(session_id, str)
+        or not session_id
+    ):
+        return None
+    return provider, session_id
+
+
+def _valid_desktop(value: object) -> bool:
+    return (
+        value == "all"
+        or (
+            isinstance(value, str)
+            and len(value) <= 9
+            and value.isascii()
+            and value.isdecimal()
+            and bool(value.strip("0"))
+        )
+    )
+
+
+def _parse_desktop_map(value: str | None) -> dict[tuple[str, str], str]:
+    if not isinstance(value, str) or not value or len(value) > 64 * 1024:
         return {}
     try:
-        prev = json.loads(AGGREGATE_PATH.read_text())
-    except (OSError, json.JSONDecodeError):
+        records = json.loads(unquote(value))
+    except (TypeError, json.JSONDecodeError):
         return {}
-    out: dict[str, dict] = {}
-    for r in (prev.get("agents") or []):
-        sid = r.get("sessionId")
-        if sid:
-            out[sid] = r
-    return out
-
-
-def _aggregate() -> dict:
-    records = _build_records()
-    prev_by_id = _load_previous()
-    for r in records:
-        prev = prev_by_id.get(r.get("sessionId"))
-        if not prev:
+    if not isinstance(records, list):
+        return {}
+    desktop_map: dict[tuple[str, str], str] = {}
+    for record in records:
+        if not isinstance(record, dict):
             continue
-        # Preserve when we first saw the session, regardless of state changes.
-        if prev.get("startedAt"):
-            r["startedAt"] = prev["startedAt"]
-        # Only roll forward stateChangedAt when state is unchanged. A real
-        # transition (working → blocked, blocked → idle, etc.) resets the
-        # timer so the popup shows "blocked just now".
-        if prev.get("state") == r.get("state") and prev.get("stateChangedAt"):
-            r["stateChangedAt"] = prev["stateChangedAt"]
+        provider = record.get("provider")
+        session_id = record.get("sessionId")
+        desktop = record.get("desktop")
+        if (
+            not isinstance(provider, str)
+            or provider not in _INFO_FN
+            or not isinstance(session_id, str)
+            or not session_id
+            or len(session_id) > 256
+            or not _valid_desktop(desktop)
+        ):
+            continue
+        desktop_map[(provider, session_id)] = desktop
+    return desktop_map
 
-    counts = {"working": 0, "blocked": 0, "idle": 0, "untracked": 0, "total": 0}
-    for r in records:
-        st = r.get("state") or "idle"
-        if st not in counts:
-            st = "idle"
-        counts[st] += 1
-    counts["total"] = counts["working"] + counts["blocked"] + counts["idle"] + counts["untracked"]
 
-    bucket = {"blocked": 0, "working": 1, "idle": 2, "untracked": 3}
-    records.sort(key=lambda r: (bucket.get(r.get("state"), 9), r.get("cwd") or ""))
+def _parse_requested_at(value: str | None) -> int | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 20
+        or not value.isascii()
+        or not value.isdecimal()
+    ):
+        return None
+    return int(value)
 
+
+def _apply_desktop_map(
+    records: list[dict], desktop_map: dict[tuple[str, str], str]
+) -> list[dict]:
+    mapped: list[dict] = []
+    for source in records:
+        record = dict(source)
+        key = _record_key(record)
+        if key in desktop_map:
+            record["desktop"] = desktop_map[key]
+        mapped.append(record)
+    return mapped
+
+
+def _recovery_record(record: dict, active: bool) -> dict:
+    key = _record_key(record)
+    if key is None:
+        return {}
+    provider, session_id = key
+
+    def text(field: str) -> str:
+        value = record.get(field)
+        return value if isinstance(value, str) else ""
+
+    timestamp = record.get("updatedAt" if active else "lastSeenAt")
+    if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+        timestamp = 0
+    cwd = text("cwd")
+    expected_command = _resume_command(provider, session_id, cwd, True)
+    if active:
+        command = (
+            expected_command if record.get("identityExact") is True else ""
+        )
+    else:
+        saved_command = text("resumeCommand")
+        command = saved_command if saved_command == expected_command else ""
+    desktop = record.get("desktop")
     return {
-        "updatedAt": int(time.time() * 1000),
-        "counts": counts,
-        "agents": records,
+        "provider": provider,
+        "sessionId": session_id,
+        "cwd": cwd,
+        "windowTitle": text("windowTitle"),
+        "lastPrompt": text("lastPrompt"),
+        "host": text("host"),
+        "desktop": desktop if _valid_desktop(desktop) else "",
+        "lastState": text("state" if active else "lastState"),
+        "lastSeenAt": timestamp,
+        "resumeCommand": command,
     }
 
 
-def _write_aggregate(payload: dict) -> None:
-    AGGREGATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = AGGREGATE_PATH.with_suffix(AGGREGATE_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, separators=(",", ":")))
-    tmp.replace(AGGREGATE_PATH)
+def _merge_snapshot(
+    records: list[dict], previous: dict, boot_id: str, now_ms: int
+) -> dict:
+    """Reduce one live scan and one saved snapshot into the next snapshot."""
+    previous = previous if isinstance(previous, dict) else {}
+    current = [dict(record) for record in records if isinstance(record, dict)]
+    saved_boot_id = previous.get("bootId")
+    saved_boot_id = saved_boot_id if isinstance(saved_boot_id, str) else ""
+    boot_id = boot_id if isinstance(boot_id, str) else ""
+    boot_changed = bool(saved_boot_id and boot_id and saved_boot_id != boot_id)
+    same_boot = bool(saved_boot_id and boot_id and saved_boot_id == boot_id)
+
+    previous_agents = previous.get("agents")
+    if not isinstance(previous_agents, list):
+        previous_agents = []
+    previous_by_key: dict[tuple[str, str], dict] = {}
+    for record in previous_agents:
+        if not isinstance(record, dict):
+            continue
+        key = _record_key(record)
+        if key is not None:
+            previous_by_key[key] = record
+    for record in current:
+        key = _record_key(record)
+        old = previous_by_key.get(key) if key is not None else None
+        if old is not None and not boot_changed:
+            if old.get("startedAt"):
+                record["startedAt"] = old["startedAt"]
+            if (
+                old.get("state") == record.get("state")
+                and old.get("stateChangedAt")
+            ):
+                record["stateChangedAt"] = old["stateChangedAt"]
+        if (
+            old is not None
+            and same_boot
+            and "desktop" not in record
+            and _valid_desktop(old.get("desktop"))
+        ):
+            record["desktop"] = old["desktop"]
+        identity_exact = record.get("identityExact") is True
+        record["identityExact"] = identity_exact
+        record["resumeCommand"] = _resume_command(
+            record.get("provider"),
+            record.get("sessionId"),
+            record.get("cwd") if isinstance(record.get("cwd"), str) else "",
+            identity_exact,
+        )
+
+    recovery_by_key: dict[tuple[str, str], dict] = {}
+    previous_recovery = previous.get("recovery", [])
+    if isinstance(previous_recovery, list):
+        for record in previous_recovery:
+            if not isinstance(record, dict):
+                continue
+            key = _record_key(record)
+            if key is not None:
+                recovery_by_key[key] = _recovery_record(record, active=False)
+    if boot_changed:
+        previous_agents = previous.get("agents", [])
+        if isinstance(previous_agents, list):
+            for record in previous_agents:
+                if not isinstance(record, dict):
+                    continue
+                key = _record_key(record)
+                if key is not None:
+                    recovery_by_key[key] = _recovery_record(record, active=True)
+    for record in current:
+        key = _record_key(record)
+        if key is not None:
+            recovery_by_key.pop(key, None)
+
+    counts = {
+        "working": 0, "blocked": 0, "idle": 0, "untracked": 0, "total": 0
+    }
+    for record in current:
+        state = record.get("state") or "idle"
+        if state not in counts:
+            state = "idle"
+        counts[state] += 1
+    counts["total"] = sum(counts[state] for state in (
+        "working", "blocked", "idle", "untracked"
+    ))
+
+    bucket = {"blocked": 0, "working": 1, "idle": 2, "untracked": 3}
+    current.sort(key=lambda record: (
+        bucket.get(record.get("state"), 9), str(record.get("cwd") or "")
+    ))
+    return {
+        "bootId": boot_id or saved_boot_id,
+        "updatedAt": now_ms,
+        "counts": counts,
+        "agents": current,
+        "recovery": list(recovery_by_key.values()),
+    }
 
 
-def _watch(interval: float) -> int:
-    """Run forever, sweeping at the requested interval. Robust to errors —
-    we never want to crash the systemd service over a parse glitch."""
+def _aggregate(
+    desktop_map: dict[tuple[str, str], str] | None = None,
+    path: Path = AGGREGATE_PATH,
+) -> dict:
+    previous = _load_payload(path)
+    boot_id = _read_boot_id()
+    records = _build_records()
+    if not _confirmed_boot_change(previous, boot_id):
+        records = _apply_desktop_map(records, desktop_map or {})
+    return _merge_snapshot(
+        records, previous, boot_id, int(time.time() * 1000)
+    )
+
+
+def _write_aggregate(payload: dict, path: Path = AGGREGATE_PATH) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            os.fchmod(output.fileno(), 0o600)
+            json.dump(payload, output, separators=(",", ":"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(
+            path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _confirmed_boot_change(previous: dict, boot_id: str) -> bool:
+    saved_boot_id = previous.get("bootId")
+    return bool(
+        isinstance(saved_boot_id, str)
+        and saved_boot_id
+        and boot_id
+        and saved_boot_id != boot_id
+    )
+
+
+def _saved_write_is_newer(
+    previous: dict, boot_id: str, requested_at: int | None, now_ms: int
+) -> bool:
+    updated_at = previous.get("updatedAt")
+    return (
+        requested_at is not None
+        and bool(boot_id)
+        and previous.get("bootId") == boot_id
+        and isinstance(updated_at, (int, float))
+        and not isinstance(updated_at, bool)
+        and updated_at <= now_ms
+        and updated_at > requested_at
+    )
+
+
+def _locked_sweep(
+    desktop_map: dict[tuple[str, str], str] | None = None,
+    requested_at: int | None = None,
+    aggregate_path: Path = AGGREGATE_PATH,
+    lock_path: Path | None = None,
+) -> tuple[dict, bool]:
+    aggregate_path = Path(aggregate_path)
+    if lock_path is None:
+        lock_path = (
+            LOCK_PATH
+            if aggregate_path == AGGREGATE_PATH
+            else aggregate_path.with_suffix(".lock")
+        )
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        lock_file = os.fdopen(lock_fd, "a+")
+    except Exception:
+        os.close(lock_fd)
+        raise
+    with lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        boot_id = _read_boot_id()
+        previous = _load_payload(aggregate_path)
+        now_ms = int(time.time() * 1000)
+        if _saved_write_is_newer(previous, boot_id, requested_at, now_ms):
+            return previous, False
+        records = _build_records()
+        if not _confirmed_boot_change(previous, boot_id):
+            records = _apply_desktop_map(records, desktop_map or {})
+        payload = _merge_snapshot(records, previous, boot_id, now_ms)
+        _write_aggregate(payload, aggregate_path)
+        return payload, True
+
+
+def _watch(
+    interval: float,
+    desktop_map: dict[tuple[str, str], str] | None = None,
+    requested_at: int | None = None,
+) -> int:
+    """Run forever and retain the prior complete snapshot after failures."""
     while True:
         try:
-            _write_aggregate(_aggregate())
+            _locked_sweep(desktop_map, requested_at)
         except Exception as exc:
             sys.stderr.write(f"codexbar_agents: sweep failed: {exc}\n")
         time.sleep(interval)
@@ -932,18 +1289,28 @@ def _watch(interval: float) -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--watch", action="store_true", help="Run forever, sweeping every --interval seconds.")
+    parser.add_argument(
+        "--watch", action="store_true",
+        help="Run forever, sweeping every --interval seconds.",
+    )
     parser.add_argument("-i", "--interval", type=float, default=5.0)
-    parser.add_argument("--once", action="store_true", help="Sweep once and write the aggregate file.")
+    parser.add_argument(
+        "--once", action="store_true",
+        help="Sweep once and write the aggregate file.",
+    )
+    parser.add_argument("--desktop-map")
+    parser.add_argument("--requested-at")
     args = parser.parse_args(argv)
+    desktop_map = _parse_desktop_map(args.desktop_map)
+    requested_at = _parse_requested_at(args.requested_at)
 
     if args.watch:
-        return _watch(args.interval)
-
-    payload = _aggregate()
+        return _watch(args.interval, desktop_map, requested_at)
     if args.once:
-        _write_aggregate(payload)
+        _locked_sweep(desktop_map, requested_at)
         return 0
+
+    payload = _aggregate(desktop_map)
     json.dump(payload, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")
     return 0

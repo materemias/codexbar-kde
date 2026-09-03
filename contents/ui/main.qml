@@ -4,6 +4,7 @@ import QtQuick.Window
 import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.plasma5support as P5Support
+import org.kde.taskmanager as TaskManager
 
 PlasmoidItem {
     id: root
@@ -34,7 +35,8 @@ PlasmoidItem {
     property var agentSnapshot: ({
         updatedAt: "",
         counts: { working: 0, blocked: 0, idle: 0, untracked: 0, total: 0 },
-        agents: []
+        agents: [],
+        recovery: []
     })
     property bool loading: false
     property bool agentsLoading: false
@@ -208,9 +210,144 @@ PlasmoidItem {
         var url = Qt.resolvedUrl("../scripts/codexbar_agents.py").toString()
         return url.replace(/^file:\/\//, "")
     }
+
+    // Plasma's task model supplies the live window PID and desktop roles.
+    // Keep it at the root so desktop data remains available while another
+    // popup tab is active and can be saved on every aggregator request.
+    TaskManager.VirtualDesktopInfo { id: vdInfo }
+
+    property var taskWindows: []
+
+    Repeater {
+        model: TaskManager.TasksModel {
+            id: tasksModel
+            groupMode: TaskManager.TasksModel.GroupDisabled
+        }
+        delegate: Item {
+            id: taskWin
+            visible: false
+            readonly property int pid: model.AppPid !== undefined ? model.AppPid : 0
+            readonly property var desktops: {
+                var outer = root._roleList(model.VirtualDesktops)
+                var flat = []
+                for (var k = 0; k < outer.length; k++) {
+                    var inner = root._roleList(outer[k])
+                    for (var m = 0; m < inner.length; m++) flat.push(inner[m])
+                }
+                return flat
+            }
+            readonly property bool all: model.IsOnAllVirtualDesktops === true
+            readonly property string caption: model.display !== undefined
+                ? String(model.display) : ""
+            readonly property var info: ({
+                pid: taskWin.pid,
+                desktops: taskWin.desktops,
+                all: taskWin.all,
+                caption: taskWin.caption
+            })
+            Component.onCompleted: root.taskWindows = root.taskWindows.concat([taskWin])
+            Component.onDestruction: root.taskWindows =
+                root.taskWindows.filter(function(w) { return w !== taskWin })
+        }
+    }
+
+    function _roleList(v) {
+        if (v === undefined || v === null) return []
+        if (Array.isArray(v)) return v
+        if (typeof v === "object" && typeof v.length === "number") {
+            var out = []
+            for (var i = 0; i < v.length; i++) out.push(v[i])
+            return out
+        }
+        return [v]
+    }
+
+    function _captionHint(record) {
+        var parts = ((record && record.cwd) || "").split("/")
+        var base = ""
+        for (var i = parts.length - 1; i >= 0; i--) {
+            if (parts[i]) { base = parts[i]; break }
+        }
+        var out = ""
+        for (var j = 0; j < base.length; j++) {
+            var c = base[j]
+            var keep = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z")
+                || (c >= "0" && c <= "9") || c === "-" || c === "_"
+                || c === "." || c === " "
+            if (keep) out += c
+        }
+        return out.toLowerCase()
+    }
+
+    function _desktopIndexOf(id) {
+        if (id === undefined || id === null) return -1
+        var i = (vdInfo.desktopIds || []).indexOf(id)
+        if (i >= 0) return i
+        return (typeof id === "number" && id >= 1) ? id - 1 : -1
+    }
+
+    function desktopInfoFor(record) {
+        var chain = (record && record.ancestorPids) || []
+        if (chain.length === 0) return null
+        var byPid = {}
+        for (var i = 0; i < chain.length; i++) byPid[chain[i]] = true
+        var hint = _captionHint(record)
+        var fallback = null
+        var onAll = null
+        for (var j = 0; j < taskWindows.length; j++) {
+            var w = taskWindows[j].info
+            if (!w || !byPid[w.pid]) continue
+            if (w.all) {
+                if (!onAll) onAll = w
+            } else if (!fallback) {
+                fallback = w
+            }
+            if (hint && w.caption && !w.all
+                    && w.caption.toLowerCase().indexOf(hint) >= 0) {
+                fallback = w
+                break
+            }
+        }
+        var win = fallback || onAll
+        if (!win) return null
+        if (win.all) return { label: "all", onCurrent: true }
+        var cur = _desktopIndexOf(vdInfo.currentDesktop)
+        var idxs = []
+        for (var d = 0; d < win.desktops.length; d++) {
+            var di = _desktopIndexOf(win.desktops[d])
+            if (di >= 0) idxs.push(di)
+        }
+        if (idxs.length === 0) return null
+        return {
+            label: String(idxs[0] + 1),
+            onCurrent: idxs.indexOf(cur) >= 0
+        }
+    }
+
+    function desktopSnapshot() {
+        var out = []
+        var records = (root.agentSnapshot && root.agentSnapshot.agents) || []
+        for (var i = 0; i < records.length; i++) {
+            var record = records[i]
+            if (!record || !record.provider || !record.sessionId) continue
+            var desktop = root.desktopInfoFor(record)
+            if (!desktop) continue
+            out.push({
+                provider: record.provider,
+                sessionId: record.sessionId,
+                desktop: desktop.label
+            })
+        }
+        return out
+    }
     function runAggregator() {
         if (!root.agentsEnabled) return
-        var cmd = "python3 \"" + root.aggregatorScriptPath + "\" --once # t=" + Date.now()
+        var requestedAt = Date.now()
+        var desktopMap = encodeURIComponent(JSON.stringify(root.desktopSnapshot()))
+        var cmd = "python3 \"" + root.aggregatorScriptPath + "\" --once"
+            + " --desktop-map \"" + desktopMap + "\""
+            + " --requested-at " + requestedAt
+            + " # t=" + requestedAt
         aggregatorRunner.connectSource(cmd)
     }
 
@@ -238,19 +375,29 @@ PlasmoidItem {
                 root.agentSnapshot = {
                     updatedAt: "",
                     counts: { working: 0, blocked: 0, idle: 0, untracked: 0, total: 0 },
-                    agents: []
+                    agents: [],
+                    recovery: []
                 }
                 return
             }
             try {
                 var parsed = JSON.parse(text)
+                if (!Array.isArray(parsed.recovery)) parsed.recovery = []
                 // Drop untracked rows if the user opted out. Recompute the
                 // total so chip counts and the "any agent?" check stay
                 // consistent with what's displayed.
-                if (Plasmoid.configuration.includeUntrackedAgents === false
-                        && parsed.agents) {
-                    parsed.agents = parsed.agents.filter(function(a) {
-                        return a && a.state !== "untracked"
+                if (Plasmoid.configuration.includeUntrackedAgents === false) {
+                    if (Array.isArray(parsed.agents)) {
+                        parsed.agents = parsed.agents.filter(function(a) {
+                            return a && a.state !== "untracked"
+                        })
+                    }
+                    parsed.recovery = parsed.recovery.filter(function(r) {
+                        if (!r) return false
+                        var sid = String(r.sessionId || "")
+                        var prefix = "untracked-" + String(r.provider || "") + "-"
+                        var suffix = sid.slice(prefix.length)
+                        return sid.indexOf(prefix) !== 0 || !/^\d+$/.test(suffix)
                     })
                     if (parsed.counts) {
                         parsed.counts.untracked = 0
