@@ -16,8 +16,11 @@ ColumnLayout {
 
     readonly property real labelColumnWidth: Kirigami.Units.gridUnit * 2.6
 
-    // A single-account status display hides unused windows. With multiple
-    // Codex accounts, keep 0% rows so an unused account does not look empty.
+    // A single-account status display hides unused *extra* windows (Fable
+    // only, Design, Routines …) to keep the popup within Plasma's clamped
+    // height. The core 5h/7d windows always render: a freshly reset quota at
+    // 0% must not look like a quota that does not exist. With multiple Codex
+    // accounts, keep 0% extras too so an unused account does not look empty.
     readonly property var visibleRows: {
         if (!section.record || section.record.error) return []
         var pid = section.record.id
@@ -27,7 +30,7 @@ ColumnLayout {
         for (var i = 0; i < slots.length; i++) {
             var w = section.record[slots[i]]
             if (!w || w.usedPercent === undefined || w.usedPercent === null) continue
-            if (hideZero && (w.usedPercent || 0) < 0.01) continue
+            if (hideZero && slots[i] === "tertiary" && (w.usedPercent || 0) < 0.01) continue
             rows.push({ rec: w, slot: slots[i], providerId: pid, extraTitle: "" })
         }
         var extras = section.record.extraRateWindows || []
@@ -142,6 +145,57 @@ ColumnLayout {
             readonly property color tint: root.colorFor(pct)
             readonly property string resetText: root.formatReset(rec)
 
+            // Window pace: elapsed share of this usage window, assuming even
+            // consumption. Needs resetsAt + windowMinutes; balance-only rows
+            // (OpenRouter, Kilo) carry neither and render without a tick. A
+            // reset that is past or outside the declared window is treated as
+            // broken data — no tick rather than a confident fake position.
+            readonly property real paceWindowMs: (rec.windowMinutes || 0) * 60000
+            readonly property real paceRemainingMs: rec.resetsAt
+                ? new Date(rec.resetsAt).getTime() - Date.now() : NaN
+            readonly property bool paceValid: !isNaN(paceRemainingMs)
+                && paceWindowMs > 0 && paceRemainingMs > 0
+                && paceRemainingMs <= paceWindowMs
+            readonly property real pacePct: paceValid
+                ? (1 - paceRemainingMs / paceWindowMs) * 100 : -1
+            readonly property real paceElapsedMs: paceValid
+                ? paceWindowMs - paceRemainingMs : 0
+            // Status and projection need a settled window: in the first
+            // minutes elapsed is dominated by noise, so the tick stays
+            // neutral and no "proj" number is emitted yet.
+            readonly property bool paceSettled: pacePct >= 3
+            readonly property bool overPace: paceSettled && pct > pacePct
+            readonly property real projectedPct: paceSettled
+                ? Math.min(999, pct * 100 / pacePct) : 0
+            readonly property string projectionSuffix: !paceSettled ? ""
+                : " · proj " + Math.round(projectedPct) + "%"
+            readonly property string paceTip: {
+                if (!paceValid) return ""
+                var wm = rec.windowMinutes || 0
+                var windowTxt = wm === 300 ? "5h" : wm === 1440 ? "1d"
+                    : wm === 10080 ? "7d"
+                    : root.relativeMs(paceWindowMs).replace(/^in /, "")
+                if (!paceSettled) {
+                    return "Window just started — pace projection shows once "
+                        + "it passes 3% elapsed"
+                }
+                var elapsedTxt = paceElapsedMs >= 60000
+                    ? root.relativeMs(paceElapsedMs).replace(/^in /, "") : "<1m"
+                var line = elapsedTxt + " elapsed of " + windowTxt
+                    + " (" + Math.round(pacePct) + "%)"
+                if (overPace) {
+                    var msToFull = pct > 0
+                        ? paceElapsedMs * (100 - pct) / pct : 0
+                    line += " — over pace: projected "
+                        + Math.round(projectedPct) + "% at reset, hits 100% in ~"
+                        + root.relativeMs(Math.round(msToFull)).replace(/^in /, "")
+                } else {
+                    line += " — on pace: projected "
+                        + Math.round(projectedPct) + "% at reset"
+                }
+                return line
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
@@ -170,6 +224,31 @@ ColumnLayout {
                         width: parent.width * (rowItem.pct / 100)
                         Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                     }
+                    // Pace tick: where even consumption would sit at this
+                    // point of the window. Tick ahead of the fill = budget
+                    // lasts until reset; red tick behind the fill's end =
+                    // current rate runs out before the window closes.
+                    Rectangle {
+                        visible: rowItem.paceValid
+                        x: Math.max(0, Math.min(parent.width - width,
+                            parent.width * rowItem.pacePct / 100 - width / 2))
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 2
+                        height: parent.height + 4
+                        radius: 1
+                        color: rowItem.overPace ? Kirigami.Theme.negativeTextColor
+                                                : Kirigami.Theme.textColor
+                        opacity: rowItem.overPace ? 0.95 : 0.65
+                        Behavior on x { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: rowItem.paceValid
+                        hoverEnabled: enabled
+                        PC3.ToolTip.visible: enabled && containsMouse
+                        PC3.ToolTip.delay: 350
+                        PC3.ToolTip.text: rowItem.paceTip
+                    }
                 }
 
                 PC3.Label {
@@ -185,8 +264,7 @@ ColumnLayout {
                 visible: text.length > 0
                 Layout.fillWidth: true
                 Layout.leftMargin: section.labelColumnWidth + Kirigami.Units.smallSpacing
-                text: rowItem.resetText
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                text: rowItem.resetText + rowItem.projectionSuffix
                 opacity: 0.55
                 horizontalAlignment: Text.AlignLeft
                 elide: Text.ElideRight

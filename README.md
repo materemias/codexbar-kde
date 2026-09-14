@@ -15,6 +15,18 @@ Linux port of the macOS [CodexBar](https://github.com/steipete/CodexBar) menu-ba
 and reset countdowns. Supports Claude, Codex, z.ai, OpenRouter, and Kilo out of
 the box.
 
+Each meter carries a **pace tick**: a small marker showing where even
+consumption would sit at this point in the window. A white tick ahead of the
+fill means the current pace lasts until the reset; a red tick behind the fill's
+end means the window will run out before it resets at this rate. Once a window
+is 3% elapsed, its reset line shows a `proj N%` suffix — the projected usage at
+reset if the current rate holds — and hovering a bar details the elapsed time,
+pace, and when the meter would hit 100%. Before that the tick stays neutral and
+no projection is shown, since the numbers are pure noise in the first minutes.
+A reset timestamp that is past or outside the declared window is treated as
+broken data and renders without a tick. Balance-only meters (OpenRouter limit,
+Kilo credits) have no time window and never show the tick.
+
 The popup header shows the version of the CodexBar CLI next to the title, read
 from `codexbar --version` during the same fetch that collects usage. If the CLI
 is missing or too old to report a version, the label hides and usage data is
