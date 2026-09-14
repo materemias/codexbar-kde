@@ -1,10 +1,12 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Window
+import QtCore
 import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.plasma5support as P5Support
 import org.kde.taskmanager as TaskManager
+import "Command.js" as Command
 
 PlasmoidItem {
     id: root
@@ -18,7 +20,10 @@ PlasmoidItem {
     // activated() signal fires. We just nudge the tab to Agents — the popup
     // is already open by that point.
     property string requestedTab: ""
-    onExpandedChanged: if (!Plasmoid.expanded) root.requestedTab = ""
+    onExpandedChanged: {
+        root.nowMs = Date.now()
+        if (!root.expanded) root.requestedTab = ""
+    }
 
     Connections {
         target: Plasmoid
@@ -27,8 +32,6 @@ PlasmoidItem {
 
     property var snapshot: ({
         updatedAt: "",
-        highestProvider: null,
-        highestPercent: 0,
         providers: [],
         fatal: null,
         forecast: null,
@@ -42,29 +45,26 @@ PlasmoidItem {
     })
     property bool loading: false
     property bool agentsLoading: false
+    property bool aggregatorLoading: false
+    property var agentsRequest: null
     property string lastError: ""
     property string agentsError: ""
 
-    readonly property string scriptPath: {
-        var url = Qt.resolvedUrl("../scripts/codexbar_fetch.py").toString()
-        return url.replace(/^file:\/\//, "")
-    }
-    readonly property string agentsScriptPath: {
-        var url = Qt.resolvedUrl("../scripts/codexbar_agents.py").toString()
-        return url.replace(/^file:\/\//, "")
-    }
-    // Path to the aggregate file the widget reads via XHR. Refreshed every
-    // poll tick by aggregatorRunner. $HOME isn't directly available in QML,
-    // so derive it from this file's install location.
-    readonly property string agentsFileUrl: {
-        var here = Qt.resolvedUrl("./").toString()
-        var m = here.match(/^(file:\/\/\/home\/[^\/]+)\//)
-        var homeUrl = m ? m[1] : "file:///root"
-        return homeUrl + "/.codexbar/agents.json"
-    }
+    readonly property string scriptPath: Command.localPath(
+        Qt.resolvedUrl("../scripts/codexbar_fetch.py"))
+    // QtCore's QML StandardPaths returns a QUrl, not a filesystem string.
+    // Keep its URL escaping intact for XHR.
+    readonly property string agentsFileUrl: StandardPaths.writableLocation(
+        StandardPaths.HomeLocation).toString().replace(/\/$/, "") + "/.codexbar/agents.json"
     readonly property int agentsRefreshMs: Math.max(2, Plasmoid.configuration.agentsRefreshSeconds || 5) * 1000
     readonly property bool agentsEnabled: Plasmoid.configuration.showAgents !== false
-    readonly property string cliPath: Plasmoid.configuration.cliPath || "/usr/bin/codexbar"
+        || Plasmoid.configuration.showAgentStateDots !== false
+        || Plasmoid.configuration.agentBlockedBadge === true
+        || Plasmoid.configuration.showAgentTopicInPanel === true
+    readonly property bool includeUntrackedAgents:
+        Plasmoid.configuration.includeUntrackedAgents !== false
+    onIncludeUntrackedAgentsChanged: root.refreshAgents()
+    readonly property string cliPath: Command.cliPath(Plasmoid.configuration.cliPath)
     readonly property bool codexForecastEnabled:
         Plasmoid.configuration.enableCodex !== false
         && Plasmoid.configuration.showCodexResetForecast !== false
@@ -87,11 +87,25 @@ PlasmoidItem {
     compactRepresentation: CompactRepresentation { }
     fullRepresentation: FullRepresentation { }
 
+    property real nowMs: Date.now()
+    readonly property bool tooltipHovered: root.compactRepresentationItem
+        ? root.compactRepresentationItem.tooltipHovered === true : false
+    readonly property bool uiClockActive: root.expanded || root.tooltipHovered
+        || (Plasmoid.formFactor === PlasmaCore.Types.Planar && root.visible)
+    onTooltipHoveredChanged: if (root.tooltipHovered) root.nowMs = Date.now()
+    onUiClockActiveChanged: if (root.uiClockActive) root.nowMs = Date.now()
+    Timer {
+        interval: 1000
+        running: root.uiClockActive
+        repeat: true
+        onTriggered: root.nowMs = Date.now()
+    }
+
     // The KDE System Tray container reads these instead of any ToolTipArea
     // inside the compact representation. Keep them in sync with the widget data.
-    function _resetTimeLeft(rec) {
+    function _resetTimeLeft(rec, now) {
         if (!rec || !rec.resetsAt) return ""
-        var diff = new Date(rec.resetsAt).getTime() - Date.now()
+        var diff = new Date(rec.resetsAt).getTime() - now
         if (diff <= 0) return "soon"
         return relativeMs(diff).replace(/^in /, "")
     }
@@ -144,7 +158,7 @@ PlasmoidItem {
                 if (!w || w.usedPercent === undefined || w.usedPercent === null) continue
                 var wl = windowLabel(rec.id, allowedSlots[s], w, "")
                 var pctText = Math.round(w.usedPercent) + "%"
-                var resetText = _resetTimeLeft(w)
+                var resetText = _resetTimeLeft(w, root.nowMs)
                 providerRows += '<tr>'
                     + '<td>' + wl + '</td>'
                     + '<td align="right">' + pctText + '</td>'
@@ -196,11 +210,8 @@ PlasmoidItem {
         }
     }
 
-    // Fire-and-forget runner that re-builds ~/.codexbar/agents.json on each
-    // poll tick. Hooks are no longer needed — the widget drives the refresh
-    // itself by running the aggregator subprocess. Each invocation gets a
-    // unique source name (`# t=…` is a shell comment) so the dataengine
-    // treats every tick as a fresh command rather than caching the previous.
+    // Read the aggregate only after its writer exits successfully. The
+    // unique shell comment makes each invocation a fresh dataengine source.
     P5Support.DataSource {
         id: aggregatorRunner
         engine: "executable"
@@ -208,13 +219,18 @@ PlasmoidItem {
 
         onNewData: function(sourceName, data) {
             disconnectSource(sourceName)
-            // Output ignored — the aggregator's side-effect is the file write.
+            root.aggregatorLoading = false
+            if (!root.agentsEnabled) return
+            if (data["exit code"] !== 0) {
+                root.agentsError = (data["stderr"] || "").trim()
+                    || "agent scan failed (exit " + data["exit code"] + ")"
+                return
+            }
+            root.refreshAgents()
         }
     }
-    readonly property string aggregatorScriptPath: {
-        var url = Qt.resolvedUrl("../scripts/codexbar_agents.py").toString()
-        return url.replace(/^file:\/\//, "")
-    }
+    readonly property string aggregatorScriptPath: Command.localPath(
+        Qt.resolvedUrl("../scripts/codexbar_agents.py"))
 
     // Plasma's task model supplies the live window PID and desktop roles.
     // Keep it at the root so desktop data remains available while another
@@ -346,11 +362,12 @@ PlasmoidItem {
         return out
     }
     function runAggregator() {
-        if (!root.agentsEnabled) return
+        if (!root.agentsEnabled || root.aggregatorLoading || root.agentsLoading) return
+        root.aggregatorLoading = true
         var requestedAt = Date.now()
         var desktopMap = encodeURIComponent(JSON.stringify(root.desktopSnapshot()))
-        var cmd = "python3 \"" + root.aggregatorScriptPath + "\" --once"
-            + " --desktop-map \"" + desktopMap + "\""
+        var cmd = "python3 " + Command.shellQuote(root.aggregatorScriptPath) + " --once"
+            + " --desktop-map " + Command.shellQuote(desktopMap)
             + " --requested-at " + requestedAt
             + " # t=" + requestedAt
         aggregatorRunner.connectSource(cmd)
@@ -358,45 +375,36 @@ PlasmoidItem {
 
     function refreshAgents() {
         if (!root.agentsEnabled) return
-        if (root.agentsLoading) return
+        if (root.agentsLoading || root.aggregatorLoading) return
         root.agentsLoading = true
         // Requires QML_XHR_ALLOW_FILE_READ=1 in plasmashell's env — installed
         // by install_integration.py into ~/.config/plasma-workspace/env/.
         var xhr = new XMLHttpRequest()
+        root.agentsRequest = xhr
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
+            if (root.agentsRequest !== xhr) return
+            root.agentsRequest = null
             root.agentsLoading = false
+            if (!root.agentsEnabled) return
             if (xhr.status !== 0 && xhr.status !== 200) {
-                if (xhr.status === 0 && (xhr.responseText || "").length === 0) {
-                    root.agentsError = ""
-                    return
-                }
                 root.agentsError = "file read failed (status " + xhr.status + ")"
                 return
             }
             var text = (xhr.responseText || "").trim()
             if (text === "") {
                 root.agentsError = ""
-                root.agentSnapshot = {
-                    updatedAt: "",
-                    counts: { working: 0, blocked: 0, idle: 0, untracked: 0, total: 0 },
-                    agents: [],
-                    recovery: []
-                }
+                root.clearAgentSnapshot()
                 return
             }
             try {
                 var parsed = JSON.parse(text)
                 if (!Array.isArray(parsed.recovery)) parsed.recovery = []
-                // Drop untracked rows if the user opted out. Recompute the
-                // total so chip counts and the "any agent?" check stay
-                // consistent with what's displayed.
-                if (Plasmoid.configuration.includeUntrackedAgents === false) {
-                    if (Array.isArray(parsed.agents)) {
-                        parsed.agents = parsed.agents.filter(function(a) {
-                            return a && a.state !== "untracked"
-                        })
-                    }
+                parsed.agents = Array.isArray(parsed.agents) ? parsed.agents : []
+                parsed.agents = parsed.agents.filter(function(a) {
+                    return a && (root.includeUntrackedAgents || a.state !== "untracked")
+                })
+                if (!root.includeUntrackedAgents) {
                     parsed.recovery = parsed.recovery.filter(function(r) {
                         if (!r) return false
                         var sid = String(r.sessionId || "")
@@ -404,11 +412,14 @@ PlasmoidItem {
                         var suffix = sid.slice(prefix.length)
                         return sid.indexOf(prefix) !== 0 || !/^\d+$/.test(suffix)
                     })
-                    if (parsed.counts) {
-                        parsed.counts.untracked = 0
-                        parsed.counts.total = (parsed.counts.working || 0)
-                            + (parsed.counts.blocked || 0)
-                            + (parsed.counts.idle || 0)
+                }
+                parsed.counts = { working: 0, blocked: 0, idle: 0, untracked: 0,
+                    total: parsed.agents.length }
+                for (var i = 0; i < parsed.agents.length; i++) {
+                    var state = parsed.agents[i].state
+                    if (state === "working" || state === "blocked"
+                            || state === "idle" || state === "untracked") {
+                        parsed.counts[state]++
                     }
                 }
                 root.agentSnapshot = parsed
@@ -421,12 +432,19 @@ PlasmoidItem {
         xhr.send()
     }
 
+    function clearAgentSnapshot() {
+        root.agentSnapshot = {
+            updatedAt: "",
+            counts: { working: 0, blocked: 0, idle: 0, untracked: 0, total: 0 },
+            agents: [],
+            recovery: []
+        }
+    }
+
     function refresh() {
         if (root.enabledProviders.length === 0) {
             root.snapshot = {
                 updatedAt: new Date().toISOString(),
-                highestProvider: null,
-                highestPercent: 0,
                 providers: [],
                 fatal: null,
                 forecast: null,
@@ -436,8 +454,8 @@ PlasmoidItem {
         }
         if (root.loading) return
         root.loading = true
-        var cmd = "python3 \"" + root.scriptPath + "\""
-            + " --cli-path \"" + root.cliPath + "\""
+        var cmd = "python3 " + Command.shellQuote(root.scriptPath)
+            + " --cli-path " + Command.shellQuote(root.cliPath)
             + " --providers " + root.enabledProviders.join(",")
         if (root.codexForecastEnabled) {
             cmd += " --forecast-url https://codex-reset.com/api/forecast"
@@ -453,8 +471,7 @@ PlasmoidItem {
     }
     onRefreshMsChanged: { poll.interval = root.refreshMs; poll.restart() }
 
-    // Two timers — the aggregator runs slightly before the XHR read so the
-    // file is fresh when we read it. Both use the same interval otherwise.
+    // One scan timer; completion triggers the file read.
     Timer {
         id: agentsAggregator
         interval: root.agentsRefreshMs
@@ -463,31 +480,14 @@ PlasmoidItem {
         triggeredOnStart: true
         onTriggered: root.runAggregator()
     }
-    Timer {
-        id: agentsPoll
-        // Lag the XHR by ~half the interval so the aggregator's most recent
-        // write lands first. The reader is cheap; running both back-to-back
-        // would just race the writer.
-        interval: root.agentsRefreshMs
-        running: root.agentsEnabled
-        repeat: true
-        onTriggered: root.refreshAgents()
-    }
-    onAgentsRefreshMsChanged: {
-        agentsAggregator.interval = root.agentsRefreshMs
-        agentsPoll.interval = root.agentsRefreshMs
-        agentsAggregator.restart()
-        agentsPoll.restart()
-    }
     onAgentsEnabledChanged: {
-        if (root.agentsEnabled) {
-            agentsAggregator.start()
-            agentsPoll.start()
-            root.runAggregator()
-            root.refreshAgents()
-        } else {
-            agentsAggregator.stop()
-            agentsPoll.stop()
+        if (!root.agentsEnabled) {
+            var xhr = root.agentsRequest
+            root.agentsRequest = null
+            root.agentsLoading = false
+            if (xhr) xhr.abort()
+            root.clearAgentSnapshot()
+            root.agentsError = ""
         }
     }
 
@@ -497,10 +497,6 @@ PlasmoidItem {
         // the popup via Plasma's default `activated` handler.
         Plasmoid.globalShortcut = "Meta+A"
         root.refresh()
-        if (root.agentsEnabled) {
-            root.runAggregator()
-            root.refreshAgents()
-        }
     }
 
     function colorFor(pct) {
@@ -528,8 +524,8 @@ PlasmoidItem {
         return pad2(when.getHours()) + ":" + pad2(when.getMinutes())
     }
 
-    function _absoluteTime(when) {
-        var now = new Date()
+    function _absoluteTime(when, nowMs) {
+        var now = new Date(nowMs)
         var sameDay = now.toDateString() === when.toDateString()
         var hhmm = _time24(when)
 
@@ -539,8 +535,8 @@ PlasmoidItem {
         return months[when.getMonth()] + " " + when.getDate() + ", " + hhmm
     }
 
-    function _forecastTimeLeft(when) {
-        var diff = when.getTime() - Date.now()
+    function _forecastTimeLeft(when, now) {
+        var diff = when.getTime() - now
         if (diff <= 0) return "soon"
         if (diff < 60 * 60 * 1000) {
             return Math.ceil(diff / (60 * 1000)) + "m"
@@ -551,7 +547,7 @@ PlasmoidItem {
         return relativeMs(diff).replace(/^in /, "").replace(/ 0h$/, "")
     }
 
-    function formatCodexForecast(forecast) {
+    function formatCodexForecast(forecast, now) {
         if (!forecast || typeof forecast !== "object" || forecast.ok !== true) return ""
 
         var expectedText = typeof forecast.expectedAt === "string"
@@ -562,8 +558,8 @@ PlasmoidItem {
         if (isNaN(expected.getTime())) return ""
 
         var details = [
-            "Next reset estimate: ~ " + _absoluteTime(expected)
-                + " (" + _forecastTimeLeft(expected) + ")"
+            "Next reset estimate: ~ " + _absoluteTime(expected, now)
+                + " (" + _forecastTimeLeft(expected, now) + ")"
         ]
         if (forecast.stale === true) details[0] += " (cached)"
 
@@ -605,13 +601,13 @@ PlasmoidItem {
     }
 
     // Returns "16:00 (2h 28m)" / "May 19, 21:56 (3d 8h)" / "" depending on data.
-    function formatReset(rec) {
+    function formatReset(rec, now) {
         if (!rec) return ""
         if (rec.resetsAt) {
             var when = new Date(rec.resetsAt)
-            var diff = when.getTime() - Date.now()
+            var diff = when.getTime() - now
             if (diff <= 0) return "soon"
-            return _absoluteTime(when) + " (" + relativeMs(diff).replace(/^in /, "") + ")"
+            return _absoluteTime(when, now) + " (" + relativeMs(diff).replace(/^in /, "") + ")"
         }
         var desc = rec.resetDescription ? rec.resetDescription.toString().trim() : ""
         if (desc.length > 0) {
@@ -704,9 +700,9 @@ PlasmoidItem {
     }
 
     // Compact age string from a unix-ms timestamp. "2m", "15s", "1h 5m".
-    function ageFrom(ms) {
+    function ageFrom(ms, now) {
         if (!ms) return ""
-        var diff = Math.max(0, Date.now() - ms)
+        var diff = Math.max(0, now - ms)
         var secs = Math.floor(diff / 1000)
         if (secs < 60) return secs + "s"
         var mins = Math.floor(secs / 60)

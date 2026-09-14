@@ -21,6 +21,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import math
 import fcntl
 import json
 import os
@@ -82,10 +84,10 @@ _PEEK_MSGS = 8
 _PEEK_CHARS = 320
 _MODEL_MAX_CHARS = 160
 
-# In-process cache so we don't re-parse the same transcript every tick when
-# nothing has changed. Keyed by absolute path → (mtime, (title, prompt,
-# recent_messages, model)).
-_TRANSCRIPT_CACHE: dict[str, tuple[float, tuple[str, str, list, str]]] = {}
+# Loaded and saved only while the aggregate writer owns its flock.
+_TRANSCRIPT_CACHE: dict = {}
+_CACHE_ACTIVE: set[str] | None = None
+_CACHE_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +127,6 @@ def _cmdline_of(pid: int) -> str:
         return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
     except OSError:
         return ""
-
-
-def _pid_alive(pid: int) -> bool:
-    return pid > 0 and Path(f"/proc/{pid}").is_dir()
 
 
 def _argv_of(pid: int) -> list[str]:
@@ -225,39 +223,6 @@ def _pgrep(name: str) -> list[int]:
     return out
 
 
-def _scan_cmdline(needle: str, comm_must_be: str | None = None) -> list[int]:
-    """Find pids whose cmdline contains `needle`. Set `comm_must_be` to limit
-    to a specific binary comm (avoids matching arbitrary shells/editors that
-    happen to mention the path on their command line)."""
-    out: list[int] = []
-    try:
-        names = os.listdir("/proc")
-    except OSError:
-        return out
-    for name in names:
-        if not name.isdigit():
-            continue
-        pid = int(name)
-        if comm_must_be and _comm_of(pid) != comm_must_be:
-            continue
-        if needle in _cmdline_of(pid):
-            out.append(pid)
-    return out
-
-
-def _pids_for(provider: str) -> list[int]:
-    # pi sets its proctitle to "pi" via @oh-my-pi/pi-utils' procmgr — `pgrep
-    # -x pi` finds it. The bun wrapper script is only visible during the
-    # brief startup before the rename, so we don't bother scanning cmdlines.
-    if provider == "pi":
-        return _pgrep(provider)
-    # omp sets its proctitle to "omp" via procmgr (same as pi). Older versions
-    # ran as comm="bun" with the script path in cmdline, but that's obsolete.
-    if provider == "omp":
-        return _pgrep(provider)
-    return _pgrep(provider)
-
-
 # ---------------------------------------------------------------------------
 # Transcript parsing (Claude + pi/omp use JSONL)
 # ---------------------------------------------------------------------------
@@ -265,12 +230,12 @@ def _pids_for(provider: str) -> list[int]:
 def _ts_ms(ts) -> int:
     """Best-effort epoch-ms from whatever timestamp shape a transcript uses
     (ISO string, ms int, or seconds float). 0 when unusable."""
-    if isinstance(ts, (int, float)) and ts > 0:
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool) and 0 < ts < 1e18 and math.isfinite(ts):
         return int(ts if ts > 1e12 else ts * 1000)
     if isinstance(ts, str) and ts:
         try:
             return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000)
-        except ValueError:
+        except (ValueError, OverflowError, OSError):
             pass
     return 0
 
@@ -328,9 +293,9 @@ def _content_preview(content) -> str:
     for c in content:
         if not isinstance(c, dict):
             continue
-        if c.get("type") == "text" and c.get("text"):
+        if c.get("type") == "text" and isinstance(c.get("text"), str):
             texts.append(c["text"])
-        elif not tool and c.get("name"):
+        elif not tool and isinstance(c.get("name"), str):
             tool = c.get("name")
     if texts:
         return " ".join(texts)
@@ -338,46 +303,34 @@ def _content_preview(content) -> str:
 
 
 def _peek_add(buf: list, role: str, text: str, ts, kind: str = "text") -> None:
-    """kind "tools" marks a tool-only turn emitted by the provider walks
-    (name only, no arrow prefix). Tagging here — rather than sniffing a "→ "
-    prefix later — keeps a user prompt that literally starts with an arrow
-    from being merged into a tool run."""
-    if role in ("user", "assistant") and text:
-        buf.append((role, kind if kind in ("text", "tools") else "text", _peek_squash(text), _ts_ms(ts)))
+    if role not in ("user", "assistant") or not isinstance(text, str) or not text:
+        return
+    text = _peek_squash(text)
+    if not text or (role == "user" and not _is_real_user_prompt(text)):
+        return
+    kind = kind if kind == "tools" else "text"
+    timestamp = _ts_ms(ts)
+    if kind == "tools" and buf and buf[-1]["kind"] == "tools":
+        entry = buf[-1]
+        entry["count"] += 1
+        if len(entry["names"]) < 10:
+            entry["names"].append(text)
+        entry["ts"] = timestamp
+    else:
+        buf.append({"role": role, "kind": kind, "text": text, "ts": timestamp,
+                    "names": [text] if kind == "tools" else [], "count": 1})
+        del buf[:-_PEEK_MSGS]
 
 
 def _peek_finalize(buf: list) -> list[dict]:
-    """Turn the collected (role, kind, text, ts) tuples into the per-session
-    peek list. User entries go through the same injected-noise filter as
-    lastPrompt, so harness blocks like <system-reminder> never surface.
-
-    Runs of consecutive tool-only turns collapse into one `kind:"tools"`
-    entry ("write, edit, bash +2 more") so the panel stays a conversation
-    summary instead of a wall of one-word lines."""
-    kept = []
-    for role, kind, text, ts in buf:
-        if not text:
-            continue
-        if role == "user" and not _is_real_user_prompt(text):
-            continue
-        kept.append((role, kind, text, ts))
-    collapsed: list = []  # [role, kind, payload(list), ts]
-    for role, kind, text, ts in kept:
-        if kind == "tools" and collapsed and collapsed[-1][1] == "tools":
-            collapsed[-1][2].append(text)
-            collapsed[-1][3] = ts
-        else:
-            collapsed.append([role, kind, [text], ts])
     out = []
-    for role, kind, payload, ts in collapsed:
-        if kind != "tools":
-            out.append({"role": role, "kind": "text", "text": payload[0], "ts": ts})
-            continue
-        shown = payload[:10]
-        more = len(payload) - len(shown)
-        label = ", ".join(shown) + (f" +{more} more" if more > 0 else "")
-        out.append({"role": role, "kind": "tools", "text": label, "ts": ts})
-    return out[-_PEEK_MSGS:]
+    for entry in buf:
+        text = entry["text"]
+        if entry["kind"] == "tools":
+            more = entry["count"] - len(entry["names"])
+            text = (", ".join(entry["names"]) + (f" +{more} more" if more else ""))[:_PEEK_CHARS]
+        out.append({key: entry[key] for key in ("role", "kind", "ts")} | {"text": text})
+    return out
 
 
 def _is_real_user_prompt(text: str) -> bool:
@@ -388,83 +341,209 @@ def _is_real_user_prompt(text: str) -> bool:
 
 
 
-def _tail_claude_transcript(path: str) -> tuple[str, str, list, str]:
-    """Returns (ai_title, last_user_prompt, recent_messages, model) for a
-    Claude transcript. Cached by mtime so re-reads are free when unchanged."""
-    if not path or not os.path.isfile(path):
-        return "", "", [], ""
-    try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        return "", "", [], ""
-    cached = _TRANSCRIPT_CACHE.get(path)
-    if cached and cached[0] == mtime:
-        return cached[1]
+def _text(value) -> str:
+    return value if isinstance(value, str) else ""
 
-    title = ""
-    last_real, last_any = "", ""
-    peek: list = []
-    model = ""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for raw in f:
-                # Cheap filter so we don't json-parse every long assistant
-                # row: only rows that can contribute survive.
-                if '"ai-title"' not in raw and '"role":"user"' not in raw \
-                        and '"type":"user"' not in raw \
-                        and '"role":"assistant"' not in raw \
-                        and '"type":"assistant"' not in raw:
+
+def _session_id(value) -> str:
+    value = _text(value)
+    return value if value and len(value) <= 256 and "\0" not in value else ""
+
+
+def _parser_state() -> dict:
+    return {"sessionId": "", "cwd": "", "windowTitle": "", "model": "",
+            "state": "working", "last_real": "", "last_any": "", "peek": []}
+
+
+def _parse_record(provider: str, state: dict, rec: dict) -> None:
+    t = rec.get("type")
+    payload = rec.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    inner = rec.get("message")
+    inner = inner if isinstance(inner, dict) else rec
+    role, text, tool = "", "", ""
+    if provider == "claude":
+        if t == "ai-title":
+            state["windowTitle"] = _text(rec.get("aiTitle")).strip()[:4096] or state["windowTitle"]
+            return
+        role = t if t in ("user", "assistant") else rec.get("role")
+        if role not in ("user", "assistant"):
+            return
+        content = inner.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
                     continue
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                t = rec.get("type")
-                if t == "ai-title":
-                    tt = (rec.get("aiTitle") or "").strip()
-                    if tt:
-                        title = tt
-                    continue
-                if t not in ("user", "assistant") and rec.get("role") not in ("user", "assistant"):
-                    continue
-                inner = rec.get("message") if isinstance(rec.get("message"), dict) else rec
-                content = inner.get("content") if isinstance(inner, dict) else None
-                text = ""
-                is_tool = False
+                if part.get("type") == "text":
+                    text = _text(part.get("text")) or text
+                elif part.get("type") == "tool_use":
+                    tool = tool or _text(part.get("name"))
+        if role == "assistant":
+            state["model"] = _record_model(rec) or state["model"]
+    elif provider == "codex":
+        if t in ("session_meta", "turn_context"):
+            state["model"] = _record_model(rec, payload) or state["model"]
+        if t == "session_meta":
+            state["sessionId"] = _session_id(payload.get("id")) or state["sessionId"]
+            state["cwd"] = _text(payload.get("cwd"))[:4096] or state["cwd"]
+        elif t == "event_msg":
+            event = payload.get("type")
+            if event in ("task_started", "user_message", "task_complete"):
+                state["state"] = "idle" if event == "task_complete" else "working"
+        elif t == "response_item":
+            if payload.get("type") == "message":
+                role = payload.get("role")
+                content = payload.get("content")
+                for part in content if isinstance(content, list) else []:
+                    if isinstance(part, dict) and part.get("type") in ("input_text", "output_text"):
+                        text = _text(part.get("text")) or text
+            elif payload.get("type") == "function_call":
+                role, tool = "assistant", _text(payload.get("name"))
+    else:  # pi and omp share a transcript format.
+        if t == "model_change":
+            state["model"] = _record_model(rec) or state["model"]
+            return
+        if t in ("title", "title_change", "session", "session-meta", "session-start", "meta"):
+            state["windowTitle"] = _text(rec.get("title")).strip()[:4096] or state["windowTitle"]
+            if t not in ("title", "title_change"):
+                state["sessionId"] = _session_id(rec.get("id")) or state["sessionId"]
+                state["cwd"] = _text(rec.get("cwd"))[:4096] or state["cwd"]
+            return
+        role = inner.get("role") or rec.get("role")
+        content = inner.get("content")
+        if role == "assistant":
+            state["state"] = "working" if inner.get("stopReason") == "toolUse" else "idle"
+            state["model"] = _record_model(rec) or state["model"]
+            preview = _content_preview(content)
+            if preview.startswith("→ "):
+                tool = preview[2:]
+            else:
+                text = preview
+        elif role in ("user", "toolResult"):
+            state["state"] = "working"
+            if role == "user":
                 if isinstance(content, str):
                     text = content
                 elif isinstance(content, list):
-                    tool = ""
-                    for c in content:
-                        if not isinstance(c, dict):
-                            continue
-                        if c.get("type") == "text" and c.get("text"):
-                            text = c.get("text") or text
-                        elif c.get("type") == "tool_use" and c.get("name") and not tool:
-                            tool = c["name"]
-                    if not text and tool:
-                        text = tool
-                        is_tool = True
-                role = t if t in ("user", "assistant") else rec.get("role")
-                if role == "assistant":
-                    candidate = _record_model(rec)
-                    if candidate:
-                        model = candidate
-                if text and not rec.get("isSidechain"):
-                    _peek_add(peek, role, text, rec.get("timestamp"),
-                              "tools" if is_tool else "text")
-                if role != "user" or not text:
+                    for part in content:
+                        if isinstance(part, dict):
+                            text = _text(part.get("text")) or text
+    if not (provider == "claude" and rec.get("isSidechain")):
+        _peek_add(state["peek"], role, text or tool, rec.get("timestamp"),
+                  "text" if text else "tools")
+    if role == "user" and (text or tool):
+        prompt = text or tool
+        state["last_any"] = " ".join(prompt.split())[:200]
+        if _is_real_user_prompt(prompt):
+            state["last_real"] = state["last_any"]
+
+
+def _valid_parser_state(state) -> bool:
+    if not isinstance(state, dict):
+        return False
+    if any(not isinstance(state.get(key), str) or len(state[key]) > 4096
+           for key in _parser_state() if key != "peek"):
+        return False
+    peek = state.get("peek")
+    if not isinstance(peek, list) or len(peek) > _PEEK_MSGS:
+        return False
+    for entry in peek:
+        if not isinstance(entry, dict):
+            return False
+        names = entry.get("names")
+        if (entry.get("role") not in ("user", "assistant")
+                or entry.get("kind") not in ("text", "tools")
+                or not isinstance(entry.get("text"), str)
+                or len(entry["text"]) > _PEEK_CHARS
+                or type(entry.get("ts")) is not int
+                or type(entry.get("count")) is not int or entry["count"] < 1
+                or not isinstance(names, list) or len(names) > 10
+                or any(not isinstance(name, str) or len(name) > _PEEK_CHARS for name in names)
+                or entry["count"] < len(names)):
+            return False
+    return True
+
+
+def _read_transcript(path: str, provider: str) -> dict:
+    """Resume at the last complete line; retain normalized state, never rows.
+
+    A prefix digest detects even an in-place rewrite in the middle of a file.
+    Prefix verification streams bytes without decoding or parsing old JSON.
+    This deliberately favors rewrite correctness over sampled fingerprints.
+    """
+    key = str(Path(path).absolute())
+    if _CACHE_ACTIVE is not None:
+        _CACHE_ACTIVE.add(key)
+    cached = _TRANSCRIPT_CACHE.get(key, {})
+    cached = cached if isinstance(cached, dict) else {}
+    state = _parser_state()
+    try:
+        with open(path, "rb") as source:
+            stat = os.fstat(source.fileno())
+            identity = [stat.st_dev, stat.st_ino]
+            signature = [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+            if (cached.get("provider") == provider and cached.get("identity") == identity
+                    and cached.get("signature") == signature
+                    and _valid_parser_state(cached.get("state"))):
+                return cached["state"]
+            offset = cached.get("offset", 0)
+            digest = hashlib.sha256()
+            valid = (cached.get("provider") == provider and cached.get("identity") == identity
+                     and type(offset) is int and 0 <= offset <= stat.st_size)
+            if valid:
+                remaining = offset
+                while remaining:
+                    chunk = source.read(min(remaining, 1024 * 1024))
+                    if not chunk:
+                        valid = False
+                        break
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                valid = valid and digest.hexdigest() == cached.get("digest")
+            if valid:
+                saved_state = cached.get("state")
+                valid = _valid_parser_state(saved_state)
+            if valid:
+                state = json.loads(json.dumps(saved_state))
+            else:
+                offset = 0
+                source.seek(0)
+                digest = hashlib.sha256()
+            while source.tell() < stat.st_size:
+                raw = source.readline(stat.st_size - source.tell())
+                if not raw.endswith(b"\n"):
+                    break
+                offset += len(raw)
+                digest.update(raw)
+                try:
+                    rec = json.loads(raw)
+                except (ValueError, UnicodeError):
                     continue
-                last_any = text
-                if _is_real_user_prompt(text):
-                    last_real = text
-    except OSError:
-        return "", "", [], ""
-    chosen = last_real or last_any
-    prompt = " ".join(chosen.split())[:200]
-    result = (title, prompt, _peek_finalize(peek), model)
-    _TRANSCRIPT_CACHE[path] = (mtime, result)
-    return result
+                if isinstance(rec, dict):
+                    _parse_record(provider, state, rec)
+            _TRANSCRIPT_CACHE[key] = {
+                "provider": provider, "identity": identity, "signature": signature, "offset": offset,
+                "digest": digest.hexdigest(), "state": state,
+            }
+    except (OSError, ValueError, TypeError, KeyError):
+        _TRANSCRIPT_CACHE.pop(key, None)
+        return _parser_state()
+    return state
+
+
+def _transcript_info(path: str, provider: str) -> dict:
+    state = _read_transcript(path, provider)
+    return {key: state[key] for key in ("sessionId", "cwd", "windowTitle", "model", "state")} | {
+        "lastPrompt": state["last_real"] or state["last_any"],
+        "recent": _peek_finalize(state["peek"]), "identityExact": False,
+    }
+
+
+def _tail_claude_transcript(path: str) -> tuple[str, str, list, str]:
+    info = _transcript_info(path, "claude")
+    return info["windowTitle"], info["lastPrompt"], info["recent"], info["model"]
 
 
 # ---------------------------------------------------------------------------
@@ -485,16 +564,18 @@ def _claude_info(pid: int) -> dict:
         return info
     try:
         rec = json.loads(state_file.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return info
-    sid = rec.get("sessionId") or ""
-    cwd = rec.get("cwd") or _cwd_of(pid)
+    if not isinstance(rec, dict):
+        return info
+    sid = _session_id(rec.get("sessionId"))
+    cwd = _text(rec.get("cwd")) or _cwd_of(pid)
     info["sessionId"] = sid
     info["identityExact"] = isinstance(sid, str) and bool(sid)
     info["cwd"] = cwd
 
-    status = (rec.get("status") or "").lower()
-    waiting = (rec.get("waitingFor") or "").strip()
+    status = _text(rec.get("status")).lower()
+    waiting = _text(rec.get("waitingFor")).strip()
     if status == "waiting" and waiting:
         info["state"] = "blocked"
     elif status == "busy":
@@ -524,56 +605,9 @@ def _codex_info(pid: int) -> dict:
     rollout, direct = _open_jsonl_under(pid, "/.codex/sessions/")
     if not rollout:
         return info
-    last_real, last_any, last_event = "", "", ""
-    peek: list = []
-    try:
-        with open(rollout, "r", encoding="utf-8", errors="replace") as f:
-            for raw in f:
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                t = rec.get("type")
-                p = rec.get("payload") or {}
-                if t in ("session_meta", "turn_context"):
-                    candidate = _record_model(rec, p)
-                    if candidate:
-                        info["model"] = candidate
-                if t == "session_meta":
-                    info["sessionId"] = p.get("id") or info["sessionId"]
-                    info["cwd"] = p.get("cwd") or info["cwd"]
-                elif t == "response_item":
-                    if p.get("type") == "message":
-                        role = p.get("role")
-                        text = ""
-                        for c in (p.get("content") or []):
-                            if isinstance(c, dict) and c.get("type") in ("input_text", "output_text"):
-                                text = c.get("text") or text
-                        _peek_add(peek, role, text, rec.get("timestamp"))
-                        if role == "user" and text:
-                            last_any = text
-                            if _is_real_user_prompt(text):
-                                last_real = text
-                    elif p.get("type") == "function_call" and p.get("name"):
-                        _peek_add(peek, "assistant", p["name"], rec.get("timestamp"), "tools")
-                elif t == "event_msg":
-                    sub = p.get("type")
-                    if sub in ("task_started", "user_message", "task_complete"):
-                        last_event = sub
-    except OSError:
-        return info
-    info["identityExact"] = (
-        direct and isinstance(info["sessionId"], str) and bool(info["sessionId"])
-    )
-    if last_event == "task_complete":
-        info["state"] = "idle"
-    elif last_event in ("task_started", "user_message"):
-        info["state"] = "working"
-    if not info["cwd"]:
-        info["cwd"] = _cwd_of(pid)
-    chosen = last_real or last_any
-    info["lastPrompt"] = " ".join(chosen.split())[:200]
-    info["recent"] = _peek_finalize(peek)
+    info = _transcript_info(rollout, "codex")
+    info["identityExact"] = direct and bool(info["sessionId"])
+    info["cwd"] = info["cwd"] or _cwd_of(pid)
     return info
 
 
@@ -641,7 +675,7 @@ def _opencode_info(pid: int) -> dict:
                         pd = json.loads(pdata) or {}
                     except (TypeError, json.JSONDecodeError):
                         continue
-                    if pd.get("type") == "text" and pd.get("text"):
+                    if isinstance(pd, dict) and pd.get("type") == "text" and isinstance(pd.get("text"), str):
                         entry[1] = (entry[1] + " " + pd["text"]).strip()
                 for mid in order:
                     role, text, mtime = joined[mid]
@@ -777,84 +811,9 @@ def _pi_info(pid: int) -> dict:
         info["cwd"] = _cwd_of(pid)
         return info
 
-    last_real, last_any = "", ""
-    peek: list = []
-    try:
-        with open(rollout, "r", encoding="utf-8", errors="replace") as f:
-            for raw in f:
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                t = rec.get("type")
-                if t == "model_change":
-                    candidate = _record_model(rec)
-                    if candidate:
-                        info["model"] = candidate
-                    continue
-                if t in ("title", "title_change"):
-                    # omp renames a session mid-run and appends the new name
-                    # as its own record; the header keeps whatever the name
-                    # was at session start. Last one in the file wins, which
-                    # is what the terminal tab shows. `title_change.id` is the
-                    # message that triggered the rename, never a session id.
-                    title = (rec.get("title") or "").strip()
-                    if title:
-                        info["windowTitle"] = title
-                    continue
-                if t in ("session", "session-meta", "session-start", "meta"):
-                    info["sessionId"] = rec.get("id") or info["sessionId"]
-                    info["cwd"] = rec.get("cwd") or info["cwd"]
-                    title = (rec.get("title") or "").strip()
-                    if title:
-                        info["windowTitle"] = title
-                    continue
-                msg_obj = rec.get("message") if isinstance(rec.get("message"), dict) else rec
-                role = msg_obj.get("role") or rec.get("role")
-                if role == "assistant":
-                    info["state"] = (
-                        "working" if msg_obj.get("stopReason") == "toolUse" else "idle"
-                    )
-                    candidate = _record_model(rec)
-                    if candidate:
-                        info["model"] = candidate
-                    preview = _content_preview(msg_obj.get("content"))
-                    # The "→ " marker here is _content_preview's own output
-                    # for tool-only assistant messages, never user input.
-                    if preview.startswith("→ "):
-                        _peek_add(peek, "assistant", preview[2:], rec.get("timestamp"), "tools")
-                    else:
-                        _peek_add(peek, "assistant", preview, rec.get("timestamp"))
-                    continue
-                if role in ("user", "toolResult"):
-                    info["state"] = "working"
-                if role != "user":
-                    continue
-                content = msg_obj.get("content")
-                text = ""
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict):
-                            x = c.get("text") or ""
-                            if x:
-                                text = x
-                if text:
-                    _peek_add(peek, "user", text, rec.get("timestamp"))
-                    last_any = text
-                    if _is_real_user_prompt(text):
-                        last_real = text
-    except OSError:
-        return info
-    info["identityExact"] = (
-        direct and isinstance(info["sessionId"], str) and bool(info["sessionId"])
-    )
-    if not info["cwd"]:
-        info["cwd"] = _cwd_of(pid)
-    chosen = last_real or last_any
-    info["lastPrompt"] = " ".join(chosen.split())[:200]
-    info["recent"] = _peek_finalize(peek)
+    info = _transcript_info(rollout, "pi")
+    info["identityExact"] = direct and bool(info["sessionId"])
+    info["cwd"] = info["cwd"] or _cwd_of(pid)
     return info
 
 
@@ -951,18 +910,23 @@ def _build_records() -> list[dict]:
     seen_sids: set[str] = set()
     now_ms = int(time.time() * 1000)
     for provider, info_fn in _INFO_FN.items():
-        for pid in _pids_for(provider):
+        for pid in _pgrep(provider):
             host, host_pid, ancestors = _parent_walk_for_host(pid)
             # No terminal ancestor means there is no focusable session row.
             if not host:
                 continue
-            info = info_fn(pid) or {}
-            sid = info.get("sessionId") or f"untracked-{provider}-{pid}"
+            try:
+                info = info_fn(pid)
+            except (OSError, ValueError, TypeError, AttributeError, OverflowError):
+                info = {}
+            info = info if isinstance(info, dict) else {}
+            known_sid = _session_id(info.get("sessionId"))
+            sid = known_sid or f"untracked-{provider}-{pid}"
             if sid in seen_sids:
                 continue
             seen_sids.add(sid)
-            cwd = info.get("cwd") or _cwd_of(pid)
-            identity_exact = info.get("identityExact") is True
+            cwd = _text(info.get("cwd")) or _cwd_of(pid)
+            identity_exact = bool(known_sid) and info.get("identityExact") is True
             records.append({
                 "provider": provider,
                 "sessionId": sid,
@@ -972,7 +936,7 @@ def _build_records() -> list[dict]:
                 "ancestorPids": ancestors,
                 "host": host,
                 "tty": "",
-                "state": info.get("state") or "working",
+                "state": (info.get("state") or "working") if known_sid else "untracked",
                 "model": _model_text(info.get("model")),
                 "lastPrompt": info.get("lastPrompt") or "",
                 "recent": info.get("recent") or [],
@@ -1337,10 +1301,25 @@ def _locked_sweep(
         now_ms = int(time.time() * 1000)
         if _saved_write_is_newer(previous, boot_id, requested_at, now_ms):
             return previous, False
-        records = _build_records()
+        global _TRANSCRIPT_CACHE, _CACHE_ACTIVE
+        cache_path = aggregate_path.with_suffix(".parsers.json")
+        try:
+            saved = json.loads(cache_path.read_text())
+            entries = saved.get("entries") if isinstance(saved, dict) and saved.get("version") == _CACHE_VERSION else None
+            _TRANSCRIPT_CACHE = entries if isinstance(entries, dict) else {}
+        except (OSError, ValueError, UnicodeError):
+            _TRANSCRIPT_CACHE = {}
+        _CACHE_ACTIVE = set()
+        try:
+            records = _build_records()
+            _TRANSCRIPT_CACHE = {key: value for key, value in _TRANSCRIPT_CACHE.items()
+                                 if key in _CACHE_ACTIVE}
+            _write_aggregate({"version": _CACHE_VERSION, "entries": _TRANSCRIPT_CACHE}, cache_path)
+        finally:
+            _CACHE_ACTIVE = None
         if not _confirmed_boot_change(previous, boot_id):
             records = _apply_desktop_map(records, desktop_map or {})
-        payload = _merge_snapshot(records, previous, boot_id, now_ms)
+        payload = _merge_snapshot(records, previous, boot_id, int(time.time() * 1000))
         _write_aggregate(payload, aggregate_path)
         return payload, True
 

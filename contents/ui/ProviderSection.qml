@@ -143,7 +143,7 @@ ColumnLayout {
             readonly property var rec: modelData.rec
             readonly property real pct: Math.max(0, Math.min(100, rec.usedPercent || 0))
             readonly property color tint: root.colorFor(pct)
-            readonly property string resetText: root.formatReset(rec)
+            readonly property string resetText: root.formatReset(rec, root.nowMs)
 
             // Window pace: elapsed share of this usage window, assuming even
             // consumption. Needs resetsAt + windowMinutes; balance-only rows
@@ -152,7 +152,7 @@ ColumnLayout {
             // broken data — no tick rather than a confident fake position.
             readonly property real paceWindowMs: (rec.windowMinutes || 0) * 60000
             readonly property real paceRemainingMs: rec.resetsAt
-                ? new Date(rec.resetsAt).getTime() - Date.now() : NaN
+                ? new Date(rec.resetsAt).getTime() - root.nowMs : NaN
             readonly property bool paceValid: !isNaN(paceRemainingMs)
                 && paceWindowMs > 0 && paceRemainingMs > 0
                 && paceRemainingMs <= paceWindowMs
@@ -274,7 +274,7 @@ ColumnLayout {
 
     Rectangle {
         id: forecastCard
-        readonly property string forecastText: root.formatCodexForecast(section.forecast)
+        readonly property string forecastText: root.formatCodexForecast(section.forecast, root.nowMs)
         readonly property string alertText: root.formatCodexForecastAlert(section.forecast)
         visible: section.showForecast && forecastText.length > 0
         Layout.fillWidth: true

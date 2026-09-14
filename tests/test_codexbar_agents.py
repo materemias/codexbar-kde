@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 import shlex
 import sqlite3
 import stat
@@ -611,7 +613,7 @@ class ResumeAndIdentityTests(unittest.TestCase):
         }
         with (
             mock.patch.object(agents, "_INFO_FN", {"claude": info, "omp": info}),
-            mock.patch.object(agents, "_pids_for", return_value=[42]),
+            mock.patch.object(agents, "_pgrep", return_value=[42]),
             mock.patch.object(
                 agents, "_parent_walk_for_host", return_value=("kitty", 10, [42, 10])
             ),
@@ -743,6 +745,203 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
 
+
+
+class IncrementalParserTests(unittest.TestCase):
+    def setUp(self):
+        agents._TRANSCRIPT_CACHE.clear()
+
+    def rows(self, provider):
+        if provider == "claude":
+            return [
+                {"type": "ai-title", "aiTitle": "old title"},
+                {"type": "user", "message": {"content": "real prompt"}},
+                {"type": "assistant", "message": {"model": "old-model", "content": "answer"}},
+            ]
+        if provider == "codex":
+            return [
+                {"type": "session_meta", "payload": {"id": "sid", "cwd": "/old", "model": "old-model"}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "real prompt"}]}},
+            ]
+        return [
+            {"type": "session", "id": "sid", "cwd": "/old", "title": "old title"},
+            {"type": "model_change", "modelId": "old-model"},
+            {"type": "message", "message": {"role": "user", "content": "real prompt"}},
+        ]
+
+    def encode(self, rows):
+        return "".join(json.dumps(row) + "\n" for row in rows)
+
+    def assert_cold_equal(self, path, provider):
+        warm = agents._transcript_info(str(path), provider)
+        cache = dict(agents._TRANSCRIPT_CACHE)
+        agents._TRANSCRIPT_CACHE.clear()
+        cold = agents._transcript_info(str(path), provider)
+        self.assertEqual(warm, cold)
+        agents._TRANSCRIPT_CACHE.clear()
+        agents._TRANSCRIPT_CACHE.update(cache)
+        return warm
+
+    def test_append_rewrite_truncate_partial_and_rotation(self):
+        for provider in ("claude", "codex", "pi"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "session.jsonl"
+                original = self.encode(self.rows(provider))
+                path.write_text(original)
+                first = self.assert_cold_equal(path, provider)
+                self.assertEqual(first["model"], "old-model")
+                with path.open("a") as output:
+                    output.write(self.encode([[], 42, {"type": "response_item", "payload": []}]))
+                self.assert_cold_equal(path, provider)
+                partial = json.dumps(self.rows(provider)[-1])
+                with path.open("a") as output:
+                    output.write(partial[:10])
+                before = self.assert_cold_equal(path, provider)
+                with path.open("a") as output:
+                    output.write(partial[10:])
+                self.assertEqual(self.assert_cold_equal(path, provider), before)
+                with path.open("a") as output:
+                    output.write("\n")
+                self.assert_cold_equal(path, provider)
+                path.write_text(original.replace("old-model", "new-model"))
+                self.assertEqual(self.assert_cold_equal(path, provider)["model"], "new-model")
+                path.write_text("{}\n")
+                self.assertEqual(self.assert_cold_equal(path, provider)["model"], "")
+                replacement = path.with_suffix(".replacement")
+                replacement.write_text(original)
+                replacement.replace(path)
+                self.assertEqual(self.assert_cold_equal(path, provider)["model"], "old-model")
+
+    def test_tools_are_bounded_online_and_noise_preserves_last_real_prompt(self):
+        state = agents._parser_state()
+        for row in self.rows("claude"):
+            agents._parse_record("claude", state, row)
+        for index in range(5000):
+            agents._parse_record("claude", state, {
+                "type": "assistant", "message": {"content": [{"type": "tool_use", "name": "bash"}]},
+                "timestamp": index + 1,
+            })
+        agents._parse_record("claude", state, {"type": "user", "message": {"content": "<system-reminder> noise"}})
+        self.assertEqual(state["last_real"], "real prompt")
+        self.assertEqual(len(state["peek"]), 3)
+        self.assertEqual(len(state["peek"][-1]["names"]), 10)
+        self.assertTrue(agents._peek_finalize(state["peek"])[-1]["text"].endswith("+4990 more"))
+        self.assertLess(len(json.dumps(state)), 3000)
+        for index in range(20):
+            agents._peek_add(state["peek"], "user", str(index), 1)
+        self.assertEqual(len(state["peek"]), 8)
+
+    def test_collapsed_tool_preview_respects_display_limit(self):
+        peek = []
+        for _ in range(11):
+            agents._peek_add(peek, "assistant", "x" * 320, 1, "tools")
+        recent = agents._peek_finalize(peek)
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(len(recent[0]["text"]), 320)
+
+    def test_malformed_fields_do_not_hide_healthy_rows(self):
+        for provider in ("claude", "codex", "pi"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "session.jsonl"
+                bad = [[], None, 5, "scalar", {"type": "ai-title", "aiTitle": []},
+                       {"type": "session_meta", "payload": 4},
+                       {"type": "session", "id": [], "cwd": {}, "title": 7},
+                       {"type": "assistant", "message": {"content": [{"type": "text", "text": {}}, {"name": []}]}}]
+                path.write_text(self.encode(bad + self.rows(provider)))
+                info = agents._transcript_info(str(path), provider)
+                self.assertEqual(info["lastPrompt"], "real prompt")
+                self.assertEqual(info["model"], "old-model")
+
+    def test_pi_header_title_model_and_state_survive_long_append(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pi.jsonl"
+            path.write_text(self.encode(self.rows("pi")))
+            agents._transcript_info(str(path), "pi")
+            rows = [{"type": "message", "message": {"role": "assistant", "content": "answer", "stopReason": "stop"}}] * 100
+            rows += [{"type": "title_change", "id": "not-the-session", "title": "renamed"},
+                     {"type": "message", "message": {"role": "user", "content": "<system-reminder> noise"}}]
+            with path.open("a") as output:
+                output.write(self.encode(rows))
+            info = self.assert_cold_equal(path, "pi")
+            self.assertEqual(info["sessionId"], "sid")
+            self.assertEqual(info["cwd"], "/old")
+            self.assertEqual(info["windowTitle"], "renamed")
+            self.assertEqual(info["model"], "old-model")
+            self.assertEqual(info["lastPrompt"], "real prompt")
+            self.assertEqual(info["state"], "working")
+            self.assertEqual(len(info["recent"]), 8)
+
+    def test_malformed_claude_state_files_leave_healthy_sibling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            sessions = home / ".claude" / "sessions"
+            sessions.mkdir(parents=True)
+            for pid, record in enumerate([[], 3, {"sessionId": []}, {"sessionId": "healthy", "cwd": "/work", "status": "idle"}], 1):
+                (sessions / f"{pid}.json").write_text(json.dumps(record))
+            with mock.patch.object(agents.Path, "home", return_value=home), mock.patch.object(agents, "_INFO_FN", {"claude": agents._claude_info}), mock.patch.object(agents, "_pgrep", return_value=[1, 2, 3, 4]), mock.patch.object(agents, "_parent_walk_for_host", return_value=("kitty", 10, [])), mock.patch.object(agents, "_cwd_of", return_value="/work"):
+                rows = agents._build_records()
+            self.assertEqual(len(rows), 4)
+            self.assertEqual(rows[-1]["sessionId"], "healthy")
+            self.assertEqual([row["state"] for row in rows], ["untracked"] * 3 + ["idle"])
+
+    def test_unknown_identity_and_failed_session_have_untracked_counts(self):
+        def info(pid):
+            if pid == 1:
+                raise ValueError("bad session")
+            return {"sessionId": [] if pid == 2 else "healthy", "state": "idle", "identityExact": True}
+        with mock.patch.object(agents, "_INFO_FN", {"claude": info}), mock.patch.object(agents, "_pgrep", return_value=[1, 2, 3]), mock.patch.object(agents, "_parent_walk_for_host", return_value=("kitty", 10, [])), mock.patch.object(agents, "_cwd_of", return_value="/work"):
+            rows = agents._build_records()
+        snapshot = agents._merge_snapshot(rows, {}, "boot", 1)
+        self.assertEqual(snapshot["counts"], {"working": 0, "blocked": 0, "idle": 1, "untracked": 2, "total": 3})
+        for row in rows[:2]:
+            self.assertTrue(row["sessionId"].startswith("untracked-"))
+            self.assertFalse(row["identityExact"])
+            self.assertEqual(row["resumeCommand"], "")
+
+    def test_fresh_process_once_reuses_checkpoint_and_prunes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transcript.jsonl"
+            aggregate = Path(directory) / "agents.json"
+            path.write_text(self.encode(self.rows("claude")))
+            script = r"""
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("agents", sys.argv[1])
+a = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(a)
+count = [0]
+parse = a._parse_record
+def counted(*args):
+    count[0] += 1
+    return parse(*args)
+a._parse_record = counted
+a._build_records = lambda: (a._tail_claude_transcript(sys.argv[2]) and []) if sys.argv[4] != "prune" else []
+sweep = a._locked_sweep
+a._locked_sweep = lambda *args: sweep(*args, aggregate_path=Path(sys.argv[3]))
+a.main(["--once"])
+print(count[0])
+"""
+            def run(mode="scan"):
+                return int(subprocess.check_output([sys.executable, "-c", script, str(SCRIPT_PATH), str(path), str(aggregate), mode], text=True))
+            self.assertEqual(run(), 3)
+            self.assertEqual(run(), 0)
+            with path.open("a") as output:
+                output.write(self.encode([{"type": "ai-title", "aiTitle": "new title"}]))
+            self.assertEqual(run(), 1)
+            cache_path = aggregate.with_suffix(".parsers.json")
+            self.assertEqual(stat.S_IMODE(cache_path.stat().st_mode), 0o600)
+            self.assertEqual(run("prune"), 0)
+            self.assertEqual(json.loads(cache_path.read_text())["entries"], {})
+
+    def test_stdout_does_not_write_and_scan_timestamp_is_completion_time(self):
+        with mock.patch.object(agents, "_build_records", return_value=[]), mock.patch.object(agents, "_write_aggregate") as write, mock.patch.object(agents.sys, "stdout"):
+            agents.main([])
+            write.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agents.json"
+            with mock.patch.object(agents, "_build_records", return_value=[]), mock.patch.object(agents, "_read_boot_id", return_value="boot"), mock.patch.object(agents.time, "time", side_effect=[1.0, 4.0]):
+                payload, _ = agents._locked_sweep(aggregate_path=path)
+            self.assertEqual(payload["updatedAt"], 4000)
 
 if __name__ == "__main__":
     unittest.main()

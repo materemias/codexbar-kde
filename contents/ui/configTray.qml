@@ -3,6 +3,7 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasma5support as P5Support
+import "Command.js" as Command
 
 Item {
     id: root
@@ -15,12 +16,21 @@ Item {
     property var codexAccounts: []
     property bool codexLoading: true
     property string codexError: ""
+    property bool initialized: false
+    property string activeCommand: ""
+    property string activeCliPath: ""
+    readonly property string cliPath: Command.cliPath(cfg_cliPath)
+    onCliPathChanged: {
+        if (!initialized) return
+        codexAccounts = []
+        codexError = ""
+        codexLoading = true
+        loadCodexAccounts()
+    }
     readonly property bool codexReady:
         !codexLoading && codexError.length === 0 && codexAccounts.length > 0
-    readonly property string fetchScriptPath: {
-        var url = Qt.resolvedUrl("../scripts/codexbar_fetch.py").toString()
-        return url.replace(/^file:\/\//, "")
-    }
+    readonly property string fetchScriptPath: Command.localPath(
+        Qt.resolvedUrl("../scripts/codexbar_fetch.py"))
     implicitWidth: Kirigami.Units.gridUnit * 22
     implicitHeight: Kirigami.Units.gridUnit * 22
 
@@ -146,6 +156,12 @@ Item {
         connectedSources: []
         onNewData: function(sourceName, data) {
             disconnectSource(sourceName)
+            if (sourceName !== root.activeCommand) return
+            root.activeCommand = ""
+            if (root.activeCliPath !== root.cliPath) {
+                root.loadCodexAccounts()
+                return
+            }
             root.codexLoading = false
             var stdout = (data["stdout"] || "").trim()
             if (!stdout) {
@@ -181,11 +197,19 @@ Item {
         }
     }
 
+    function loadCodexAccounts() {
+        if (root.activeCommand) return
+        root.codexLoading = true
+        root.activeCliPath = root.cliPath
+        root.activeCommand = "python3 " + Command.shellQuote(root.fetchScriptPath)
+            + " --cli-path " + Command.shellQuote(root.activeCliPath)
+            + " --providers codex --timeout 30 # t=" + Date.now()
+        codexRunner.connectSource(root.activeCommand)
+    }
+
     Component.onCompleted: {
-        var cmd = "python3 \"" + root.fetchScriptPath + "\""
-            + " --cli-path \"" + root.cfg_cliPath
-            + "\" --providers codex --timeout 10"
-        codexRunner.connectSource(cmd)
+        root.initialized = true
+        root.loadCodexAccounts()
     }
 
     QQC2.ScrollView {

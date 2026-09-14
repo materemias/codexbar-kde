@@ -26,7 +26,7 @@ Item {
     readonly property int agentTotalCount: {
         var s = root.agentSnapshot
         if (!s || !s.counts) return 0
-        return (s.counts.total || 0) + (s.counts.untracked || 0)
+        return s.counts.total || 0
     }
     readonly property int recoveryCount: {
         var s = root.agentSnapshot
@@ -77,10 +77,11 @@ Item {
                 }
             }
             PC3.ToolButton {
+                objectName: "refreshNowButton"
                 icon.name: "view-refresh"
                 onClicked: {
                     root.refresh()
-                    root.refreshAgents()
+                    root.runAggregator()
                 }
                 PC3.ToolTip.visible: hovered
                 PC3.ToolTip.text: "Refresh now"
@@ -221,6 +222,7 @@ Item {
 
                 AgentsSection {
                     id: agentsSection
+                    objectName: "agentsSection"
                     Layout.fillWidth: true
                 }
             }
@@ -268,6 +270,7 @@ Item {
                 agentsSection.filterText.slice(0, -1)
             event.accepted = true
         } else if (event.text.length > 0
+            && !/[\u0000-\u001f\u007f]/.test(event.text)
             && (event.modifiers & ~Qt.ShiftModifier) === Qt.NoModifier) {
             // Type-to-filter: any printable key starts/extends the query.
             root.requestedTab = "agents"
@@ -283,7 +286,7 @@ Item {
         function onExpandedChanged() {
             if (root.expanded) {
                 refocusTimer.restart()
-                agentsSection.selectedIndex = 0
+                if (agentsSection.selectedIndex < 0) agentsSection.selectAt(0)
             } else {
                 agentsSection.filterText = ""
             }

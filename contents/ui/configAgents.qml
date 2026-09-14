@@ -3,6 +3,7 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasma5support as P5Support
+import "Command.js" as Command
 
 Item {
     id: root
@@ -15,12 +16,12 @@ Item {
     property bool cfg_showAgentStateDots: true
     property int  cfg_agentStateDotsScale: 100
     property bool cfg_closePopupOnFocusLoss: true
+    property bool cfg_showAgentTopicInPanel: false
+    property int cfg_agentTopicMaxWidth: 260
 
     property string hookStatus: "checking…"
-    readonly property string installScriptPath: {
-        var url = Qt.resolvedUrl("../scripts/install_integration.py").toString()
-        return url.replace(/^file:\/\//, "")
-    }
+    readonly property string installScriptPath: Command.localPath(
+        Qt.resolvedUrl("../scripts/install_integration.py"))
 
     implicitWidth: Kirigami.Units.gridUnit * 22
     implicitHeight: Kirigami.Units.gridUnit * 22
@@ -38,8 +39,8 @@ Item {
     }
 
     function _runHookCommand(arg) {
-        var cmd = "python3 \"" + root.installScriptPath + "\""
-        if (arg && arg.length > 0) cmd += " " + arg
+        var cmd = "python3 " + Command.shellQuote(root.installScriptPath)
+        if (arg && arg.length > 0) cmd += " " + Command.shellQuote(arg)
         hookRunner.connectSource(cmd)
     }
 
@@ -61,6 +62,7 @@ Item {
 
             QQC2.CheckBox {
                 text: "Show running/blocked agents section"
+                objectName: "showAgentsCheckBox"
                 checked: cfg_showAgents
                 onToggled: cfg_showAgents = checked
             }
@@ -83,22 +85,17 @@ Item {
                 onToggled: cfg_closePopupOnFocusLoss = checked
             }
 
-            QQC2.ComboBox {
+            RowLayout {
                 Kirigami.FormData.label: "Refresh agents every:"
-                model: [
-                    { text: "2 seconds",   value: 2 },
-                    { text: "5 seconds",   value: 5 },
-                    { text: "10 seconds",  value: 10 },
-                    { text: "30 seconds",  value: 30 },
-                    { text: "1 minute",    value: 60 }
-                ]
-                textRole: "text"
-                currentIndex: {
-                    var v = cfg_agentsRefreshSeconds
-                    for (var i = 0; i < model.length; i++) if (model[i].value === v) return i
-                    return 1
+                QQC2.SpinBox {
+                    objectName: "agentsRefreshSpinBox"
+                    from: 2
+                    to: 120
+                    editable: true
+                    value: cfg_agentsRefreshSeconds
+                    onValueModified: cfg_agentsRefreshSeconds = value
                 }
-                onActivated: cfg_agentsRefreshSeconds = model[currentIndex].value
+                QQC2.Label { text: "seconds" }
             }
 
             Kirigami.Separator {
@@ -139,6 +136,27 @@ Item {
                     horizontalAlignment: Text.AlignRight
                     opacity: 0.7
                 }
+            }
+
+            QQC2.CheckBox {
+                objectName: "showAgentTopicCheckBox"
+                text: "Show the current agent task in a horizontal panel"
+                checked: cfg_showAgentTopicInPanel
+                onToggled: cfg_showAgentTopicInPanel = checked
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Task label width:"
+                enabled: cfg_showAgentTopicInPanel
+                QQC2.SpinBox {
+                    objectName: "agentTopicWidthSpinBox"
+                    from: 80
+                    to: 800
+                    editable: true
+                    value: cfg_agentTopicMaxWidth
+                    onValueModified: cfg_agentTopicMaxWidth = value
+                }
+                QQC2.Label { text: "pixels" }
             }
 
             Kirigami.Separator {

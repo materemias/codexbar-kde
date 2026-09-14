@@ -27,6 +27,9 @@ A reset timestamp that is past or outside the declared window is treated as
 broken data and renders without a tick. Balance-only meters (OpenRouter limit,
 Kilo credits) have no time window and never show the tick.
 
+Countdowns and pace indicators update while the popup or tray tooltip is
+visible, independently of the provider polling interval.
+
 The popup header shows the version of the CodexBar CLI next to the title, read
 from `codexbar --version` during the same fetch that collects usage. If the CLI
 is missing or too old to report a version, the label hides and usage data is
@@ -42,6 +45,8 @@ appears on a second line so you can see why the next reset is coming. An alert
 that only announces the reset already recorded stays hidden. The forecast is
 optional and enabled by default. If codex-reset.com is unavailable, usage data
 continues to work. Cached forecast data can be marked stale.
+Forecast requests have an eight-second overall deadline and a 256 KiB response
+limit. A timed-out request falls back to cached forecast data when available.
 
 **Agent View tab** — A real-time overview of every active coding-agent session on
 your machine, grouped by project folder:
@@ -65,6 +70,8 @@ your machine, grouped by project folder:
 - **Conversation peek.** Click the arrow on a session row or press `Space` to
   expand its last eight user and assistant turns. Color-coded cards separate
   user, assistant, and tool turns.
+  Selection and the expanded preview follow the same session when polling
+  reorders the list.
 - **Type-to-filter search.** Start typing on the Agents tab. The filter fuzzy
   matches the session title, last prompt, working directory, and provider.
   Recent conversation text uses exact case-insensitive substring matching.
@@ -74,12 +81,21 @@ your machine, grouped by project folder:
   usage rings, optional featured-task label, and a red badge when agents need
   attention.
 
-The aggregator scans `/proc` to discover running agent processes, reads their
-session transcripts for window titles and last prompts, and writes a single
-`~/.codexbar/agents.json` that the widget polls via XHR — no background daemon
-required.
+The aggregator scans `/proc` to discover running agent processes and writes
+`~/.codexbar/agents.json`. The widget reads it after each successful scan, with
+at most one scan in flight per widget. No background daemon is required.
+Private parser checkpoints in `~/.codexbar/agents.parsers.json`, mode `0600`,
+retain session metadata and bounded recent turns across polls. Unchanged
+transcripts need no parsing; changed files validate the consumed prefix and
+parse only appended complete records. Rewrites, truncation, or file replacement
+reset the checkpoint. Missing or invalid checkpoints rebuild automatically.
+Both reader and writer use the current user's home directory, including homes
+outside `/home` and system-wide applet installations.
 At boot boundaries, the same file carries unresolved recovery records forward
 until the matching provider session becomes live again.
+Hiding the Agents tab does not stop polling while tray dots, the blocked badge,
+or the task label remain enabled. Unidentified processes are classified as
+untracked and can be excluded from both the list and its counts.
 
 ## Supported providers
 
@@ -237,8 +253,10 @@ kquitapp6 plasmashell && kstart plasmashell
 Right-click the widget → **Configure CodexBar**. Four tabs:
 
 ### Backend
-- Path to the `codexbar` CLI binary (default `/usr/bin/codexbar`)
-- Usage polling interval (10s–15min)
+- Path to the `codexbar` CLI binary (default `/usr/bin/codexbar`). Custom paths,
+  including spaces and shell-special characters, are passed literally. The same
+  setting controls normal polling and Codex account discovery in Tray settings.
+- Usage polling interval (10–3600 seconds)
 
 ### Providers
 - Toggle individual providers on/off (Claude, Codex, z.ai, OpenRouter, Kilo)
@@ -253,11 +271,12 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 
 ### Agents
 - Show/hide the Agents section in the popup
-- Include untracked claude/codex processes (no hook sentinel)
+- Include untracked processes without a resolved provider session
 - Show last user prompt under each session row
-- Agent state refresh interval (2s–1min)
+- Agent state refresh interval (2–120 seconds)
 - Red badge when any agent is blocked
 - Stacked colored count dots (working/blocked/idle) with adjustable size
+- Optional task label in horizontal panels, with adjustable maximum width
 - Close popup on focus loss
 - **Integration** — Install/Remove/Check buttons for the XHR env scripts and
   `codexbar://` URL handler

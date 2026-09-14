@@ -7,6 +7,11 @@ import org.kde.kirigami as Kirigami
 
 Item {
     id: compact
+    readonly property bool tooltipHovered: tooltipHover.hovered
+
+    HoverHandler {
+        id: tooltipHover
+    }
 
     readonly property int style: Plasmoid.configuration.compactStyle || 0
     readonly property var configured: Plasmoid.configuration.trayIndicators || []
@@ -168,6 +173,7 @@ Item {
         onClicked: function(mouse) {
             if (mouse.button === Qt.MiddleButton) {
                 root.refresh()
+                root.runAggregator()
             } else {
                 root.expanded = !root.expanded
             }
@@ -177,11 +183,7 @@ Item {
     // Blocked-agent indicator: small red dot in the top-right corner of the
     // tray icon group whenever an agent is waiting on user input. Gated by
     // `agentBlockedBadge` so users who don't want it can switch off.
-    readonly property int blockedAgentCount: {
-        var s = root.agentSnapshot
-        if (!s || !s.counts) return 0
-        return s.counts.blocked || 0
-    }
+    readonly property int blockedAgentCount: _agentCounts.blocked || 0
 
     Rectangle {
         id: blockedBadge

@@ -193,6 +193,10 @@ def _run_cli(cli: str, provider: str, source: str | None, timeout: float) -> lis
         return [_result_error(provider, "cli_missing", f"CLI not found at {cli}")]
     except subprocess.TimeoutExpired:
         return [_result_error(provider, "timeout", f"CLI timed out after {timeout}s")]
+    except OSError as exc:
+        return [_result_error(provider, "cli_error", str(exc), source)]
+    except UnicodeError as exc:
+        return [_result_error(provider, "parse", str(exc), source)]
 
     stdout = (proc.stdout or "").strip()
     if not stdout:
@@ -245,39 +249,12 @@ def _cli_version(cli: str, timeout: float = 5.0) -> str | None:
             timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         return None
     if proc.returncode != 0:
         return None
     match = re.search(r"\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.]+)?", proc.stdout or "")
     return match.group(0) if match else None
-
-def _highest(records: list[dict]) -> tuple[str | None, float]:
-    best_id: str | None = None
-    best_pct = -1.0
-    for rec in records:
-        if not rec.get("ok"):
-            continue
-        windows: list[dict] = []
-        for slot in ("primary", "secondary", "tertiary"):
-            w = rec.get(slot)
-            if isinstance(w, dict):
-                windows.append(w)
-        for extra in rec.get("extraRateWindows") or []:
-            if isinstance(extra, dict):
-                w = extra.get("window")
-                if isinstance(w, dict):
-                    windows.append(w)
-        for w in windows:
-            try:
-                pct = float(w.get("usedPercent") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if pct > best_pct:
-                best_pct = pct
-                best_id = rec.get("id")
-    return best_id, max(best_pct, 0.0)
-
 
 # codex-reset.com publishes a probabilistic forecast for the next OpenAI
 # usage-limit reset. It exposes no point estimate, only per-horizon
@@ -285,6 +262,7 @@ def _highest(records: list[dict]) -> tuple[str | None, float]:
 # last confirmed reset + recent median cadence, snapped into the hour window
 # resets historically land in.
 FORECAST_TIMEOUT = 8.0
+FORECAST_MAX_BODY_BYTES = 256 * 1024
 # Resets happen every few days and the model refreshes slowly, so a short
 # cache keeps a 30-second poll tick from hammering a third-party endpoint.
 FORECAST_CACHE_TTL = 900.0
@@ -453,18 +431,72 @@ def _normalize_forecast(data: dict) -> dict:
     }
 
 
-def _fetch_forecast(url: str, timeout: float) -> dict:
-    """Fetch and normalize the reset forecast without raising."""
-    fresh = _forecast_cache_read(FORECAST_CACHE_TTL)
-    if fresh is not None:
-        return fresh
+def _forecast_worker() -> int:
+    """Private HTTP worker: request on stdin, bounded body on stdout."""
     try:
+        request_data = json.load(sys.stdin)
         request = urllib.request.Request(
-            url,
+            request_data["url"],
             headers={"User-Agent": "codexbar-kde", "Accept": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", "replace").strip()
+        with urllib.request.urlopen(
+            request, timeout=request_data["timeout"]
+        ) as response:
+            body = response.read(FORECAST_MAX_BODY_BYTES + 1)
+        if len(body) > FORECAST_MAX_BODY_BYTES:
+            sys.stdout.write("forecast response exceeds the body size limit")
+            return 1
+        sys.stdout.buffer.write(body)
+        return 0
+    except Exception:  # noqa: BLE001 - never echo URLs or credentials
+        sys.stdout.write("forecast request failed")
+        return 1
+
+
+def _read_forecast_body(url: str, timeout: float) -> bytes:
+    # Socket timeouts cannot stop a slow-drip response or bound DNS lookup.
+    # Exec a disposable worker, including startup in its wall-clock budget.
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--forecast-worker"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ) as proc:
+        try:
+            body, _ = proc.communicate(
+                json.dumps({"url": url, "timeout": timeout}).encode("utf-8"),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+        except BaseException:
+            proc.kill()
+            proc.communicate()
+            raise
+    if proc.returncode != 0:
+        raise ValueError(body.decode("utf-8", "replace") or "forecast worker failed")
+    return body
+
+
+def _forecast_failure(exc: Exception) -> dict:
+    stale = _forecast_cache_read(None)
+    if stale is not None and stale.get("ok") is True:
+        return dict(stale, stale=True)
+    return {
+        "ok": False,
+        "stale": False,
+        "source": "codex-reset.com",
+        "expectedAt": None,
+        "error": {"code": "forecast_unavailable", "message": str(exc)},
+    }
+
+
+def _fetch_forecast(url: str, timeout: float) -> dict:
+    """Fetch and normalize the reset forecast without raising."""
+    try:
+        fresh = _forecast_cache_read(FORECAST_CACHE_TTL)
+        if fresh is not None:
+            return fresh
+        body = _read_forecast_body(url, timeout).decode("utf-8", "replace").strip()
         if not body:
             raise ValueError("empty response body")
         data = json.loads(body)
@@ -472,18 +504,16 @@ def _fetch_forecast(url: str, timeout: float) -> dict:
             raise ValueError("unexpected response shape")
         payload = _normalize_forecast(data)
     except Exception as exc:  # noqa: BLE001 - the endpoint cannot break usage
-        stale = _forecast_cache_read(None)
-        if stale is not None and stale.get("ok") is True:
-            return dict(stale, stale=True)
-        return {
-            "ok": False,
-            "stale": False,
-            "source": "codex-reset.com",
-            "expectedAt": None,
-            "error": {"code": "forecast_unavailable", "message": str(exc)},
-        }
+        return _forecast_failure(exc)
     _forecast_cache_write(payload)
     return payload
+
+
+def _positive_timeout(value: str) -> float:
+    timeout = _as_float(value)
+    if timeout is None or timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be finite and positive")
+    return timeout
 
 
 def main(argv: list[str]) -> int:
@@ -494,7 +524,7 @@ def main(argv: list[str]) -> int:
         default="codex,claude,openrouter,kilo",
         help="Comma-separated provider ids to query.",
     )
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=_positive_timeout, default=30.0)
     parser.add_argument(
         "--forecast-url",
         default=None,
@@ -511,8 +541,6 @@ def main(argv: list[str]) -> int:
                 "message": f"codexbar CLI not found or not executable: {cli}",
             },
             "providers": [],
-            "highestProvider": None,
-            "highestPercent": 0,
             "forecast": None,
             "cliVersion": None,
         }
@@ -534,20 +562,28 @@ def main(argv: list[str]) -> int:
                 _fetch_forecast, args.forecast_url, FORECAST_TIMEOUT
             )
         for fut in as_completed(futures):
-            results.extend(fut.result())
+            try:
+                results.extend(fut.result())
+            except Exception as exc:  # noqa: BLE001 - isolate provider failures
+                provider = futures[fut]
+                results.append(_result_error(provider, "provider", str(exc)))
+
+    forecast = None
+    if forecast_future is not None:
+        try:
+            forecast = forecast_future.result()
+        except Exception as exc:  # noqa: BLE001 - keep healthy provider results
+            forecast = _forecast_failure(exc)
 
     # Preserve the requested provider order in output.
     order = {p: i for i, p in enumerate(providers)}
     results.sort(key=lambda r: order.get(r["id"], 999))
 
-    best_id, best_pct = _highest(results)
     out = {
         "updatedAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        "highestProvider": best_id,
-        "highestPercent": best_pct,
         "providers": results,
         "fatal": None,
-        "forecast": forecast_future.result() if forecast_future is not None else None,
+        "forecast": forecast,
         "cliVersion": _cli_version(cli),
     }
     json.dump(out, sys.stdout)
@@ -556,4 +592,6 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--forecast-worker"]:
+        sys.exit(_forecast_worker())
     sys.exit(main(sys.argv[1:]))

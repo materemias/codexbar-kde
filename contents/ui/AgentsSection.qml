@@ -70,10 +70,10 @@ ColumnLayout {
         return arr
     }
 
-    // Keyboard navigation. `selectedIndex` is the row in `flatAgents` (the
-    // groups expanded in display order) that's highlighted; -1 = nothing.
-    // Reset to 0 whenever the popup opens or the list changes.
-    property int selectedIndex: -1
+    // Keep identity across poll-driven reordering. A vanished selection
+    // clears instead of silently targeting the next session at its index.
+    property string selectedKey: ""
+    readonly property int selectedIndex: indexForKey(selectedKey)
     readonly property var flatAgents: {
         var out = []
         for (var i = 0; i < groups.length; i++) {
@@ -84,10 +84,8 @@ ColumnLayout {
         return out
     }
 
-    // Peek panel: sessionId of the one row whose recent messages are
-    // expanded inline. Compared by string, same reason as selectedIndex —
-    // the aggregate objects are replaced on every poll tick.
-    property string peekSid: ""
+    // Composite provider/session identity survives fresh JSON objects.
+    property string peekKey: ""
 
     // Type-to-filter: printable keys typed while the popup has focus
     // accumulate here (FullRepresentation forwards them). Empty = no filter.
@@ -139,35 +137,39 @@ ColumnLayout {
         return slash >= 0 ? value.slice(slash + 1) : value
     }
 
+    function agentKey(record) {
+        if (!record || !record.provider || !record.sessionId) return ""
+        return JSON.stringify([record.provider, record.sessionId])
+    }
+
+    function indexForKey(key) {
+        if (!key) return -1
+        for (var i = 0; i < flatAgents.length; i++) {
+            if (agentKey(flatAgents[i]) === key) return i
+        }
+        return -1
+    }
+
     function togglePeek() {
-        if (selectedIndex < 0 || selectedIndex >= flatAgents.length) return
-        var a = flatAgents[selectedIndex]
-        if (!a || !a.sessionId) return
-        peekSid = peekSid === a.sessionId ? "" : a.sessionId
+        if (indexForKey(selectedKey) < 0) return
+        peekKey = peekKey === selectedKey ? "" : selectedKey
     }
 
     onFlatAgentsChanged: {
-        if (flatAgents.length === 0) selectedIndex = -1
-        else if (selectedIndex < 0 || selectedIndex >= flatAgents.length) selectedIndex = 0
-        if (peekSid !== "") {
-            var still = false
-            for (var k = 0; k < flatAgents.length; k++) {
-                if (flatAgents[k].sessionId === peekSid) { still = true; break }
-            }
-            if (!still) peekSid = ""
-        }
+        if (selectedKey && indexForKey(selectedKey) < 0) selectedKey = ""
+        if (peekKey && indexForKey(peekKey) < 0) peekKey = ""
     }
 
 
     function selectAt(index) {
-        if (flatAgents.length === 0) return
-        var followPeek = peekSid !== ""
-        selectedIndex = index
-        if (followPeek) peekSid = flatAgents[index].sessionId || ""
+        if (index < 0 || index >= flatAgents.length) return
+        var followPeek = peekKey !== ""
+        selectedKey = agentKey(flatAgents[index])
+        if (followPeek) peekKey = selectedKey
     }
     function selectNext() {
         if (flatAgents.length === 0) return
-        selectAt((Math.max(0, selectedIndex) + 1) % flatAgents.length)
+        selectAt((selectedIndex + 1) % flatAgents.length)
     }
     function selectPrevious() {
         if (flatAgents.length === 0) return
@@ -175,28 +177,16 @@ ColumnLayout {
         selectAt(((selectedIndex < 0 ? 0 : selectedIndex) - 1 + n) % n)
     }
     function activateSelected() {
-        if (selectedIndex < 0 || selectedIndex >= flatAgents.length) return
-        var a = flatAgents[selectedIndex]
+        var index = indexForKey(selectedKey)
+        if (index < 0) return
+        var a = flatAgents[index]
         if (a && a.sessionId) {
             Qt.openUrlExternally("codexbar://focus/" + a.sessionId)
         }
     }
 
-    // Ticking value so age labels ("2m", "15s") refresh while popup is open
-    // without re-polling the aggregator. Updated by an internal Timer below.
-    property int nowTick: 0
-
-    Timer {
-        interval: 1000
-        running: root.expanded && agents.hasSomething
-        repeat: true
-        onTriggered: agents.nowTick = Date.now()
-    }
-
     function _ageLabel(ms) {
-        // touch nowTick so the binding re-evaluates each second
-        var _ = agents.nowTick
-        return root.ageFrom(ms)
+        return root.ageFrom(ms, root.nowMs)
     }
 
     // Recovery records are separate from all live grouping, selection,
@@ -566,8 +556,9 @@ ColumnLayout {
             required property var modelData
 
             implicitHeight: rowCol.implicitHeight + 4
-            readonly property bool peekOpen: agents.peekSid !== ""
-                && modelData && modelData.sessionId === agents.peekSid
+            readonly property string sessionKey: agents.agentKey(modelData)
+            readonly property bool peekOpen: sessionKey !== ""
+                && sessionKey === agents.peekKey
 
             // While a filter is active: up to two conversation lines that
             // contain the query, as StyledText with the query highlighted.
@@ -599,7 +590,7 @@ ColumnLayout {
 
             // Row + optional peek panel stacked. The panel grows inside the
             // popup's ScrollView when open; only one row peeks at a time
-            // (agents.peekSid), so height stays bounded.
+            // (agents.peekKey), so height stays bounded.
             ColumnLayout {
                 id: rowCol
                 anchors.left: parent.left
@@ -725,8 +716,7 @@ ColumnLayout {
                         implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
                         padding: 1
                         onClicked: {
-                            agents.peekSid = rowItem.peekOpen
-                                ? "" : (rowItem.modelData.sessionId || "")
+                            agents.peekKey = rowItem.peekOpen ? "" : rowItem.sessionKey
                         }
                         PC3.ToolTip.visible: hovered
                         PC3.ToolTip.text: "Peek at recent messages (or press Space)"
@@ -927,26 +917,16 @@ ColumnLayout {
                 }
             }
 
-            // Compare by sessionId (stable string), NOT by object reference.
-            // The aggregate JSON re-parses every 5s, replacing all agent
-            // objects — so `flatAgents[selectedIndex] === modelData` silently
-            // always returns false after the first poll tick.
-            readonly property string _curSid: agents.flatAgents
-                && agents.selectedIndex >= 0
-                && agents.selectedIndex < agents.flatAgents.length
-                    ? (agents.flatAgents[agents.selectedIndex].sessionId || "")
-                    : ""
-            readonly property bool selected: _curSid !== ""
-                && modelData && modelData.sessionId === _curSid
+            readonly property bool selected: sessionKey !== ""
+                && sessionKey === agents.selectedKey
 
             // 1.0 at the moment a session goes idle, linearly down to 0 at
             // five minutes. Drives the "just finished" green background wash.
             readonly property real _idleFreshness: {
-                var _ = agents.nowTick
                 if (rowItem.state !== "idle") return 0
                 var since = rowItem.modelData.stateChangedAt || 0
                 if (!since) return 0
-                var age = Date.now() - since
+                var age = root.nowMs - since
                 return age >= 300000 ? 0 : (300000 - age) / 300000
             }
 

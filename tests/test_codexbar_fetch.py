@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import importlib.util
 import io
 import json
+import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +27,120 @@ SPEC = importlib.util.spec_from_file_location("codexbar_fetch", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 fetch = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(fetch)
+
+
+@contextlib.contextmanager
+def forecast_server(body: bytes, interval: float = 0):
+    stopped = threading.Event()
+    requested = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requested.set()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                if interval:
+                    for byte in body:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        if stopped.wait(interval):
+                            break
+                else:
+                    self.wfile.write(body)
+            except OSError:
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}
+    )
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/forecast", requested
+    finally:
+        stopped.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+class ProviderFailureTests(unittest.TestCase):
+    def test_invalid_executable_emits_normalized_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cli = Path(directory) / "invalid-cli"
+            cli.write_text("not an executable format\n", encoding="utf-8")
+            cli.chmod(0o700)
+            result = subprocess.run(
+                [
+                    sys.executable, str(SCRIPT_PATH),
+                    "--cli-path", str(cli), "--providers", "kilo",
+                ],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIsNone(payload["fatal"])
+        self.assertIsNone(payload["cliVersion"])
+        self.assertEqual(payload["providers"][0]["id"], "kilo")
+        self.assertFalse(payload["providers"][0]["ok"])
+        self.assertEqual(payload["providers"][0]["error"]["code"], "cli_error")
+
+    def test_process_oserrors_become_provider_errors(self) -> None:
+        for error in (PermissionError("denied"), OSError("I/O error")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(fetch.subprocess, "run", side_effect=error):
+                    result = fetch._run_cli("/bin/true", "kilo", None, 1)[0]
+                self.assertEqual(result["id"], "kilo")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "cli_error")
+
+    def test_malformed_provider_keeps_healthy_results(self) -> None:
+        def cli_result(command, **kwargs):
+            if "--version" in command:
+                return subprocess.CompletedProcess(command, 0, "CodexBar 0.56.3", "")
+            provider = command[command.index("--provider") + 1]
+            primary = {"usedPercent": 12}
+            if provider == "kilo":
+                primary["resetDescription"] = 42
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"usage": {"primary": primary}}), ""
+            )
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(fetch.subprocess, "run", side_effect=cli_result),
+            mock.patch("sys.stdout", output),
+        ):
+            exit_code = fetch.main(
+                ["--cli-path", "/bin/true", "--providers", "kilo,codex"]
+            )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertIsNone(payload["fatal"])
+        failed, healthy = payload["providers"]
+        self.assertEqual(failed["id"], "kilo")
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["error"]["code"], "provider")
+        self.assertEqual(healthy["id"], "codex")
+        self.assertTrue(healthy["ok"])
+        self.assertEqual(healthy["primary"]["usedPercent"], 12)
+
+    def test_timeout_requires_a_finite_positive_number(self) -> None:
+        for value in ("0", "-1", "nan", "inf", "-inf", "invalid"):
+            with self.subTest(value=value):
+                with (
+                    mock.patch("sys.stderr", io.StringIO()),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    fetch.main(
+                        ["--cli-path", "/bin/true", f"--timeout={value}"]
+                    )
+                self.assertEqual(raised.exception.code, 2)
 
 
 class ForecastTests(unittest.TestCase):
@@ -118,19 +239,17 @@ class ForecastTests(unittest.TestCase):
         self.assertIsNone(self._forecast_with_alert(None)["alertSummary"])
 
     def test_nonfinite_cadence_keeps_snapshot_healthy(self) -> None:
-        response = mock.MagicMock()
-        response.read.return_value = json.dumps(
+        body = json.dumps(
             {
                 "last_reset_at": "2026-08-31T02:34:27.000Z",
                 "cadence": {"recent_median_days": "inf"},
             }
         ).encode()
-        response.__enter__.return_value = response
 
         output = io.StringIO()
         with (
             mock.patch.object(fetch, "_forecast_cache_read", return_value=None),
-            mock.patch.object(fetch.urllib.request, "urlopen", return_value=response),
+            mock.patch.object(fetch, "_read_forecast_body", return_value=body),
             mock.patch("sys.stdout", output),
         ):
             exit_code = fetch.main(
@@ -163,8 +282,8 @@ class ForecastTests(unittest.TestCase):
                 fetch._forecast_cache_write(cached)
                 with mock.patch.object(fetch, "FORECAST_CACHE_TTL", -1):
                     with mock.patch.object(
-                        fetch.urllib.request,
-                        "urlopen",
+                        fetch,
+                        "_read_forecast_body",
                         side_effect=OSError("offline"),
                     ):
                         result = fetch._fetch_forecast("http://127.0.0.1:9", 1)
@@ -188,8 +307,8 @@ class ForecastTests(unittest.TestCase):
                 fetch._forecast_cache_write(cached)
                 with mock.patch.object(fetch, "FORECAST_CACHE_TTL", -1):
                     with mock.patch.object(
-                        fetch.urllib.request,
-                        "urlopen",
+                        fetch,
+                        "_read_forecast_body",
                         side_effect=OSError("offline"),
                     ):
                         result = fetch._fetch_forecast("http://127.0.0.1:9", 1)
@@ -197,6 +316,67 @@ class ForecastTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["stale"])
         self.assertIsNone(result["expectedAt"])
+
+    def test_successful_response_is_cached(self) -> None:
+        body = json.dumps({
+            "last_reset_at": "2026-09-14T02:00:00Z",
+            "cadence": {"recent_median_days": 2},
+        }).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "forecast.json"
+            with mock.patch.object(fetch, "FORECAST_CACHE_PATH", str(cache)):
+                with forecast_server(body) as (url, _):
+                    result = fetch._fetch_forecast(url, 2)
+                cached = fetch._fetch_forecast(url, 0.1)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["stale"])
+        self.assertEqual(cached, result)
+
+    def test_slow_drip_has_total_deadline_and_retains_stale_cache(self) -> None:
+        body = json.dumps({
+            "last_reset_at": "2026-09-14T02:00:00Z",
+            "cadence": {"recent_median_days": 2},
+        }).encode()
+        cached = {
+            "ok": True,
+            "stale": False,
+            "source": "codex-reset.com",
+            "expectedAt": "2026-09-16T02:00:00+00:00",
+        }
+        timeout = 0.4
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "forecast.json"
+            with (
+                mock.patch.object(fetch, "FORECAST_CACHE_PATH", str(cache)),
+                mock.patch.object(fetch, "FORECAST_CACHE_TTL", -1),
+                forecast_server(body, interval=0.05) as (url, requested),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                fetch._forecast_cache_write(cached)
+                started = time.monotonic()
+                result = pool.submit(fetch._fetch_forecast, url, timeout).result(
+                    timeout=3
+                )
+                elapsed = time.monotonic() - started
+        self.assertLess(elapsed, timeout + 0.75)
+        self.assertTrue(requested.is_set())
+        self.assertEqual(result, dict(cached, stale=True))
+
+    def test_oversized_valid_forecast_is_rejected(self) -> None:
+        body = json.dumps({
+            "last_reset_at": "2026-09-14T02:00:00Z",
+            "cadence": {"recent_median_days": 2},
+        }).encode() + b" " * (fetch.FORECAST_MAX_BODY_BYTES + 1)
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "forecast.json"
+            with (
+                mock.patch.object(fetch, "FORECAST_CACHE_PATH", str(cache)),
+                forecast_server(body) as (url, _),
+            ):
+                result = fetch._fetch_forecast(url, 2)
+                self.assertFalse(cache.exists())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "forecast_unavailable")
 
 
 class CliVersionTests(unittest.TestCase):
