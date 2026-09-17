@@ -143,6 +143,26 @@ class ProviderFailureTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 2)
 
 
+class ResetCreditTests(unittest.TestCase):
+    def test_counts_available_credits_and_soonest_expiry(self) -> None:
+        record = fetch._normalize_record("codex", {"usage": {
+            "primary": {"usedPercent": 1},
+            "codexResetCredits": {"availableCount": 3, "credits": [
+                {"status": "available", "expires_at": "2026-10-04T22:10:12Z"},
+                {"status": "available", "expires_at": "2026-10-04T00:47:58Z"},
+                {"status": "used", "expires_at": "2026-09-01T00:00:00Z"},
+            ]},
+        }})
+        self.assertEqual(record["resetCredits"], {
+            "count": 2,
+            "soonestExpiresAt": "2026-10-04T00:47:58+00:00",
+        })
+
+    def test_missing_credits_yield_none(self) -> None:
+        record = fetch._normalize_record("codex", {"usage": {"primary": {"usedPercent": 1}}})
+        self.assertIsNone(record["resetCredits"])
+
+
 class ForecastTests(unittest.TestCase):
     def test_eta_uses_cadence_and_future_window_start(self) -> None:
         last_reset = dt.datetime(2026, 8, 31, 2, 34, 27, tzinfo=dt.timezone.utc)

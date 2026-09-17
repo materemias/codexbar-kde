@@ -460,6 +460,11 @@ PlasmoidItem {
         if (root.codexForecastEnabled) {
             cmd += " --forecast-url https://codex-reset.com/api/forecast"
         }
+        // Unique shell comment per invocation: the executable engine keys
+        // sources by command string, so a static command would return the
+        // cached first run instead of re-fetching (same trick as the
+        // aggregator command above).
+        cmd += " # t=" + Date.now()
         runner.connectSource(cmd)
     }
 
@@ -591,13 +596,36 @@ PlasmoidItem {
         return forecast.alertSummary.trim()
     }
 
-    function firstCodexIndex() {
+    function lastCodexIndex() {
         var records = root.snapshot && Array.isArray(root.snapshot.providers)
             ? root.snapshot.providers : []
-        for (var i = 0; i < records.length; i++) {
+        for (var i = records.length - 1; i >= 0; i--) {
             if (records[i] && records[i].id === "codex") return i
         }
         return -1
+    }
+
+    function _isoDate(when) {
+        return when.getFullYear() + "-" + pad2(when.getMonth() + 1) + "-" + pad2(when.getDate())
+    }
+
+    // "2 saved resets · soonest expires in 16d 8h (2026-10-04)". Empty when
+    // the account has no usable reset credit.
+    function formatResetCredits(credits, now) {
+        if (!credits || typeof credits !== "object") return ""
+        var count = Number(credits.count)
+        if (!isFinite(count) || count < 1) return ""
+        var text = count + " saved reset" + (count === 1 ? "" : "s")
+        if (typeof credits.soonestExpiresAt === "string") {
+            var when = new Date(credits.soonestExpiresAt)
+            if (!isNaN(when.getTime())) {
+                var left = when.getTime() - now
+                text += " · soonest expires " + (left <= 0 ? "now"
+                    : "in " + _forecastTimeLeft(when, now))
+                    + " (" + _isoDate(when) + ")"
+            }
+        }
+        return text
     }
 
     // Returns "16:00 (2h 28m)" / "May 19, 21:56 (3d 8h)" / "" depending on data.

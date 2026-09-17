@@ -35,7 +35,20 @@ from `codexbar --version` during the same fetch that collects usage. If the CLI
 is missing or too old to report a version, the label hides and usage data is
 unaffected.
 
-**Codex reset forecast.** The Codex usage section shows an auxiliary forecast
+**Manual refresh.** The refresh button in the popup header — or pressing `R`
+while the popup is on the Usage tab — requests a fresh provider fetch and
+agent scan immediately, without waiting for the polling interval. When a
+provider is enabled, each request runs a new command rather than replaying a
+cached source; a call that lands while a fetch is already in flight is
+skipped. On the Agents tab, `r` types into the filter instead of refreshing.
+
+**Codex saved resets.** Each Codex account's weekly (7d) row appends its
+usable reset credits to the reset line, e.g. `· 2 saved resets · soonest
+expires in 16d 8h (2026-10-04)`. Only credits with status `available` count;
+the expiry shown is the earliest one. Accounts without credits show nothing.
+
+**Codex reset forecast.** Below the last Codex account, the usage tab shows an
+auxiliary forecast
 from [codex-reset.com](https://codex-reset.com). It estimates the next reset
 from the site's recent cadence and common reset window, not an exact timestamp.
 The widget shows the estimate and time remaining in local 24 hour time,
@@ -248,6 +261,15 @@ plasmashell --replace
 kquitapp6 plasmashell && kstart plasmashell
 ```
 
+Manual restarts inherit the locale of the launching shell. To keep Hungarian
+24-hour time formatting in the popup, restart from your session shell with:
+
+```sh
+kquitapp6 plasmashell \
+  && env LANG=hu_HU.utf8 LC_ALL=hu_HU.utf8 LC_TIME=hu_HU.utf8 \
+       kstart plasmashell
+```
+
 ## Configuration
 
 Right-click the widget → **Configure CodexBar**. Four tabs:
@@ -289,6 +311,7 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 | `↑` / `↓`        | Navigate agent rows; an open preview follows selection |
 | `Enter`          | Focus the terminal hosting the selected session    |
 | `Space`          | Expand or collapse the selected conversation peek  |
+| `R`              | Refresh usage (Usage tab only; `r` filters on Agents) |
 | Printable text   | Filter sessions on the Agents tab                   |
 | `Backspace`      | Edit the active filter                              |
 | `Esc`            | Clear the active filter, then close the popup       |

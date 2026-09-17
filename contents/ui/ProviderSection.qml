@@ -49,6 +49,18 @@ ColumnLayout {
         return rows
     }
 
+    // Row whose reset line carries the Codex "saved resets" suffix: the
+    // weekly (7d) core window, else the last visible row; -1 when none.
+    readonly property int creditsRowIndex: {
+        var rows = section.visibleRows
+        for (var i = 0; i < rows.length; i++) {
+            var slot = rows[i].slot
+            if ((slot === "primary" || slot === "secondary" || slot === "tertiary")
+                    && rows[i].rec.windowMinutes === 10080) return i
+        }
+        return rows.length - 1
+    }
+
     // Header: icon + UPPERCASE name + plan/subtitle + right-side badge.
     // Explicit Layout.minimumHeight on the row prevents the section header
     // from collapsing if any inner Label transiently has empty text.
@@ -140,10 +152,19 @@ ColumnLayout {
             spacing: 1
             opacity: rowItem.pct < 1 ? 0.45 : 1.0
             required property var modelData
+            required property int index
             readonly property var rec: modelData.rec
             readonly property real pct: Math.max(0, Math.min(100, rec.usedPercent || 0))
             readonly property color tint: root.colorFor(pct)
             readonly property string resetText: root.formatReset(rec, root.nowMs)
+            // Codex "saved reset" credits ride on the weekly row's reset line
+            // (they restore the 7d + 5h windows), falling back to the last row.
+            readonly property string creditsSuffix: {
+                if (!section.record || section.record.id !== "codex") return ""
+                if (index !== section.creditsRowIndex) return ""
+                var txt = root.formatResetCredits(section.record.resetCredits, root.nowMs)
+                return txt.length > 0 ? " · " + txt : ""
+            }
 
             // Window pace: elapsed share of this usage window, assuming even
             // consumption. Needs resetsAt + windowMinutes; balance-only rows
@@ -264,7 +285,7 @@ ColumnLayout {
                 visible: text.length > 0
                 Layout.fillWidth: true
                 Layout.leftMargin: section.labelColumnWidth + Kirigami.Units.smallSpacing
-                text: rowItem.resetText + rowItem.projectionSuffix
+                text: rowItem.resetText + rowItem.projectionSuffix + rowItem.creditsSuffix
                 opacity: 0.55
                 horizontalAlignment: Text.AlignLeft
                 elide: Text.ElideRight

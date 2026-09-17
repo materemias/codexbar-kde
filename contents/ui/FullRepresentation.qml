@@ -84,7 +84,7 @@ Item {
                     root.runAggregator()
                 }
                 PC3.ToolTip.visible: hovered
-                PC3.ToolTip.text: "Refresh now"
+                PC3.ToolTip.text: "Refresh now (R)"
             }
         }
 
@@ -194,7 +194,7 @@ Item {
                             forecast: showForecast ? root.snapshot.forecast : null
                             showForecast: root.codexForecastEnabled
                                 && parent.modelData.id === "codex"
-                                && index === root.firstCodexIndex()
+                                && index === root.lastCodexIndex()
                         }
 
                         Kirigami.Separator {
@@ -264,6 +264,13 @@ Item {
         } else if (event.key === Qt.Key_Left
             && tabBar.currentIndex > 0) {
             tabBar.currentIndex--
+            event.accepted = true
+        } else if (event.key === Qt.Key_R
+            && tabHost.activeTab === 0) {
+            // R on the Usage tab = manual refresh, same as the header
+            // button. On the Agents tab R stays a filter character.
+            root.refresh()
+            root.runAggregator()
             event.accepted = true
         } else if (event.key === Qt.Key_Backspace) {
             agentsSection.filterText =

@@ -88,6 +88,32 @@ def _openrouter_balance_text(usage: dict) -> str | None:
     return None
 
 
+def _reset_credits(usage: dict) -> dict | None:
+    """Codex "saved reset" credits: how many are usable and which expires first.
+
+    The CLI mirrors the OpenAI payload (`codexResetCredits.credits[]` with a
+    `status` and `expires_at`). Only `available` credits count; the soonest
+    expiry is the one the user has to spend first. None when absent.
+    """
+    raw = usage.get("codexResetCredits")
+    if not isinstance(raw, dict):
+        return None
+    credits = raw.get("credits")
+    soonest: _dt.datetime | None = None
+    count = 0
+    for credit in credits if isinstance(credits, list) else []:
+        if not isinstance(credit, dict) or credit.get("status") != "available":
+            continue
+        count += 1
+        expires = _parse_iso(credit.get("expires_at"))
+        if expires is not None and (soonest is None or expires < soonest):
+            soonest = expires
+    return {
+        "count": count,
+        "soonestExpiresAt": soonest.isoformat() if soonest else None,
+    }
+
+
 def _normalize_record(provider: str, record: dict) -> dict:
     raw_usage = record.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -171,6 +197,7 @@ def _normalize_record(provider: str, record: dict) -> dict:
         "secondary": usage.get("secondary"),
         "tertiary": usage.get("tertiary"),
         "extraRateWindows": extra_rate_windows,
+        "resetCredits": _reset_credits(usage) if provider == "codex" else None,
         "openRouterUsage": or_usage,
         "balanceText": balance_text,
         "updatedAt": usage.get("updatedAt"),
