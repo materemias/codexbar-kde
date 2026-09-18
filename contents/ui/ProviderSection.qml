@@ -30,7 +30,9 @@ ColumnLayout {
         for (var i = 0; i < slots.length; i++) {
             var w = section.record[slots[i]]
             if (!w || w.usedPercent === undefined || w.usedPercent === null) continue
-            if (hideZero && slots[i] === "tertiary" && (w.usedPercent || 0) < 0.01) continue
+            // Claude's tertiary (Sonnet) is noise at 0%; OpenCode Go's is its monthly window.
+            if (hideZero && slots[i] === "tertiary" && pid !== "opencodego"
+                    && (w.usedPercent || 0) < 0.01) continue
             rows.push({ rec: w, slot: slots[i], providerId: pid, extraTitle: "" })
         }
         var extras = section.record.extraRateWindows || []

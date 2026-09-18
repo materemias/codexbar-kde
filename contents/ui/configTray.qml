@@ -9,6 +9,7 @@ Item {
     id: root
 
     property var cfg_trayIndicators: []
+    property var cfg_trayOverPaceOnly: []
     property int cfg_compactStyle: 0
     property int cfg_trayIconSize: 22
     property string cfg_cliPath: "/usr/bin/codexbar"
@@ -43,6 +44,44 @@ Item {
         if (on && idx < 0) current.push(key)
         if (!on && idx >= 0) current.splice(idx, 1)
         cfg_trayIndicators = current
+    }
+    function _overPaceOnly(key) {
+        return cfg_trayOverPaceOnly && cfg_trayOverPaceOnly.indexOf(key) >= 0
+    }
+    function _toggleOverPaceOnly(key, on) {
+        var current = cfg_trayOverPaceOnly ? cfg_trayOverPaceOnly.slice() : []
+        var idx = current.indexOf(key)
+        if (on && idx < 0) current.push(key)
+        if (!on && idx >= 0) current.splice(idx, 1)
+        cfg_trayOverPaceOnly = current
+    }
+
+    // One tray meter: the main on/off box plus, while on, a secondary box
+    // that hides the meter until its projected usage at reset passes 100%.
+    component MeterCheck: RowLayout {
+        id: meter
+        property string key
+        property string text
+        property bool isOn: root._has(key)
+        property var setOn: function (on) { root._toggle(meter.key, on) }
+        spacing: Kirigami.Units.smallSpacing
+
+        QQC2.CheckBox {
+            text: meter.text
+            checked: meter.isOn
+            onToggled: meter.setOn(checked)
+        }
+        QQC2.CheckBox {
+            visible: meter.isOn
+            text: "only if proj > 100%"
+            opacity: 0.7
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            checked: root._overPaceOnly(meter.key)
+            onToggled: root._toggleOverPaceOnly(meter.key, checked)
+            QQC2.ToolTip.text: "Hide this meter from the tray unless the current rate projects above 100% at reset"
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+        }
     }
 
     function _codexWindowLabel(id, fallback) {
@@ -222,39 +261,23 @@ Item {
             width: scroller.availableWidth
 
             QQC2.Label {
-                text: "Pick which (provider, window) meters to render as separate tray indicators."
+                text: "Pick which (provider, window) meters to render as separate tray indicators. "
+                    + "\"only if proj > 100%\" keeps a meter hidden while it is on pace to last until reset."
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
                 opacity: 0.7
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
             }
 
-            QQC2.CheckBox {
+            MeterCheck {
                 Kirigami.FormData.label: "Claude:"
+                key: "claude:primary"
                 text: "5h session"
-                checked: root._has("claude:primary")
-                onToggled: root._toggle("claude:primary", checked)
             }
-            QQC2.CheckBox {
-                text: "7d weekly (all models)"
-                checked: root._has("claude:secondary")
-                onToggled: root._toggle("claude:secondary", checked)
-            }
-            QQC2.CheckBox {
-                text: "7d weekly (Sonnet)"
-                checked: root._has("claude:tertiary")
-                onToggled: root._toggle("claude:tertiary", checked)
-            }
-            QQC2.CheckBox {
-                text: "Claude Design"
-                checked: root._has("claude:claude-design")
-                onToggled: root._toggle("claude:claude-design", checked)
-            }
-            QQC2.CheckBox {
-                text: "Daily Routines"
-                checked: root._has("claude:claude-routines")
-                onToggled: root._toggle("claude:claude-routines", checked)
-            }
+            MeterCheck { key: "claude:secondary"; text: "7d weekly (all models)" }
+            MeterCheck { key: "claude:tertiary"; text: "7d weekly (Sonnet)" }
+            MeterCheck { key: "claude:claude-design"; text: "Claude Design" }
+            MeterCheck { key: "claude:claude-routines"; text: "Daily Routines" }
             ColumnLayout {
                 Kirigami.FormData.label: "Codex:"
                 visible: !root.codexReady
@@ -262,13 +285,15 @@ Item {
 
                 Repeater {
                     model: root._fallbackCodexWindows()
-                    delegate: QQC2.CheckBox {
+                    delegate: MeterCheck {
                         id: fallbackWindow
                         required property var modelData
+                        key: "codex:" + fallbackWindow.modelData.id
                         text: fallbackWindow.modelData.text
-                        checked: root._codexAllChecked(fallbackWindow.modelData.id)
-                        onToggled: root._toggleCodexAll(
-                            fallbackWindow.modelData.id, checked)
+                        isOn: root._codexAllChecked(fallbackWindow.modelData.id)
+                        setOn: function (on) {
+                            root._toggleCodexAll(fallbackWindow.modelData.id, on)
+                        }
                     }
                 }
             }
@@ -295,14 +320,17 @@ Item {
 
                         Repeater {
                             model: root._codexWindows(accountGroup.modelData)
-                            delegate: QQC2.CheckBox {
+                            delegate: MeterCheck {
                                 id: accountWindow
                                 required property var modelData
+                                key: root._codexKey(accountGroup.modelData, accountWindow.modelData.id)
                                 text: accountWindow.modelData.text
-                                checked: root._codexChecked(
+                                isOn: root._codexChecked(
                                     accountGroup.modelData, accountWindow.modelData.id)
-                                onToggled: root._toggleCodex(
-                                    accountGroup.modelData, accountWindow.modelData.id, checked)
+                                setOn: function (on) {
+                                    root._toggleCodex(
+                                        accountGroup.modelData, accountWindow.modelData.id, on)
+                                }
                             }
                         }
                     }
@@ -317,28 +345,28 @@ Item {
                     ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
                 opacity: root.codexError.length > 0 ? 1.0 : 0.6
             }
-            QQC2.CheckBox {
+            MeterCheck {
                 Kirigami.FormData.label: "z.ai:"
+                key: "zai:primary"
                 text: "5h window"
-                checked: root._has("zai:primary")
-                onToggled: root._toggle("zai:primary", checked)
             }
-            QQC2.CheckBox {
-                text: "Monthly"
-                checked: root._has("zai:secondary")
-                onToggled: root._toggle("zai:secondary", checked)
+            MeterCheck { key: "zai:secondary"; text: "Monthly" }
+            MeterCheck {
+                Kirigami.FormData.label: "OpenCode Go:"
+                key: "opencodego:primary"
+                text: "5h window"
             }
-            QQC2.CheckBox {
+            MeterCheck { key: "opencodego:secondary"; text: "7d weekly" }
+            MeterCheck { key: "opencodego:tertiary"; text: "Monthly" }
+            MeterCheck {
                 Kirigami.FormData.label: "OpenRouter:"
+                key: "openrouter:primary"
                 text: "credit usage"
-                checked: root._has("openrouter:primary")
-                onToggled: root._toggle("openrouter:primary", checked)
             }
-            QQC2.CheckBox {
+            MeterCheck {
                 Kirigami.FormData.label: "Kilo:"
+                key: "kilo:primary"
                 text: "credit usage"
-                checked: root._has("kilo:primary")
-                onToggled: root._toggle("kilo:primary", checked)
             }
 
             QQC2.ComboBox {

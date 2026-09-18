@@ -10,6 +10,7 @@ Kirigami.FormLayout {
     property bool cfg_enableCodex: true
     property bool cfg_showCodexResetForecast: true
     property bool cfg_enableZai: true
+    property bool cfg_enableOpenCodeGo: true
     property bool cfg_enableOpenRouter: true
     property bool cfg_enableKilo: true
 
@@ -36,6 +37,12 @@ Kirigami.FormLayout {
         text: "API (subscription)"
         checked: cfg_enableZai
         onToggled: cfg_enableZai = checked
+    }
+    QQC2.CheckBox {
+        Kirigami.FormData.label: "OpenCode Go:"
+        text: "Local usage history"
+        checked: cfg_enableOpenCodeGo
+        onToggled: cfg_enableOpenCodeGo = checked
     }
     QQC2.CheckBox {
         Kirigami.FormData.label: "OpenRouter:"

@@ -12,8 +12,8 @@ Linux port of the macOS [CodexBar](https://github.com/steipete/CodexBar) menu-ba
 ## What it does
 
 **Usage tab** — Per-provider rate-limit meters with progress bars, percent used,
-and reset countdowns. Supports Claude, Codex, z.ai, OpenRouter, and Kilo out of
-the box.
+and reset countdowns. Supports Claude, Codex, z.ai, OpenCode Go, OpenRouter, and
+Kilo out of the box.
 
 Each meter carries a **pace tick**: a small marker showing where even
 consumption would sit at this point in the window. A white tick ahead of the
@@ -117,6 +117,7 @@ untracked and can be excluded from both the list and its counts.
 | **Claude**     | OAuth (`~/.claude/.credentials.json`) | 5h / 7d windows, plus Claude Design and Daily Routines quotas     |
 | **Codex**      | OAuth (`~/.codex/auth.json`)          | Per-account 5h and weekly windows, plus Reserve 7d |
 | **z.ai**       | API key (`ZAI_API_KEY`)               | 5h and monthly windows                                            |
+| **OpenCode Go** | `apiKey` in `~/.codexbar/config.json` (your `opencode-go` key from `~/.local/share/opencode/auth.json`), else `OPENCODE_API_KEY`; falls back to a local estimate | 5h / 7d / monthly windows |
 | **OpenRouter** | `apiKey` in `~/.codexbar/config.json`, else `OPENROUTER_API_KEY` | Remaining balance; per-key allowance bar when a `keyLimit` is set |
 | **Kilo**       | `apiKey` in `~/.codexbar/config.json`, else `KILO_API_KEY` | Remaining credits balance                                         |
 
@@ -183,6 +184,7 @@ The same file can list additional Codex profile homes:
   "providers": [
     {"id": "codex", "enabled": true, "codexProfileHomePaths": ["~/.codex-pro"]},
     {"id": "zai",   "enabled": true, "apiKey": "<from https://z.ai/manage-apikey/apikey>"},
+    {"id": "opencodego", "enabled": true, "apiKey": "<your opencode-go key, see ~/.local/share/opencode/auth.json>"},
     {"id": "kilo",  "enabled": true, "apiKey": "<from app.kilo.ai>"},
     {"id": "openrouter", "enabled": true, "apiKey": "<management key from https://openrouter.ai/settings/keys>"}
   ]
@@ -281,13 +283,18 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 - Usage polling interval (10–3600 seconds)
 
 ### Providers
-- Toggle individual providers on/off (Claude, Codex, z.ai, OpenRouter, Kilo)
+- Toggle individual providers on/off (Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo)
 - In the Providers tab, toggle the Codex reset forecast with
   `showCodexResetForecast` (enabled by default)
 
 ### Tray
 - Pick meters per Codex account and per rate window
-- Pick provider and window meters for Claude, z.ai, OpenRouter, and Kilo
+- Pick provider and window meters for Claude, z.ai, OpenCode Go, OpenRouter, and Kilo
+- Per meter, "only if proj > 100%" hides the tray indicator while the window is
+  on pace to last until its reset (projection as in the popup's `proj N%`);
+  it reappears once the current rate would exceed 100%. Meters whose window
+  cannot be projected yet (under 3% elapsed, no reset time) stay hidden too.
+  The provider icon disappears along with its last visible meter.
 - Indicator style: ring + percent, ring only, or percent only
 - Icon and ring size (14–48px, capped by panel thickness)
 

@@ -34,13 +34,20 @@
         <entry name="enableZai" type="Bool">
             <default>true</default>
         </entry>
+        <entry name="enableOpenCodeGo" type="Bool">
+            <default>true</default>
+        </entry>
         <entry name="compactStyle" type="Int">
             <label>Compact representation style (0=ring+percent, 1=ring only, 2=percent only)</label>
             <default>0</default>
         </entry>
         <entry name="trayIndicators" type="StringList">
             <label>Which (provider, window) indicators to render in the tray</label>
-            <default>claude:primary,codex:primary,zai:primary,openrouter:primary,kilo:primary</default>
+            <default>claude:primary,codex:primary,zai:primary,opencodego:primary,openrouter:primary,kilo:primary</default>
+        </entry>
+        <entry name="trayOverPaceOnly" type="StringList">
+            <label>Subset of trayIndicators that only render while their projected usage at reset exceeds 100%</label>
+            <default></default>
         </entry>
         <entry name="trayIconSize" type="Int">
             <label>Tray icon + ring size in pixels (capped by panel thickness)</label>

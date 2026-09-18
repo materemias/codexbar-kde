@@ -51,7 +51,8 @@ When completing a feature, update README.md in the same change.
 - Claude `extraRateWindows` require OAuth.
 - Codex emits one normalized record per account. Legacy tray keys use `codex:<window>`. Account-specific keys use `codex:<encoded-email>:<window>`.
 - Codex Spark windows are intentionally filtered out.
-- Provider order is Claude, Codex, z.ai, OpenRouter, Kilo on every surface.
+- Provider order is Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo on every surface.
+- OpenCode Go (`opencodego`) uses the `api` source with an `apiKey` in `~/.codexbar/config.json`; the CLI's auto pick is a `local` estimate that is far off the real quota, kept only as fallback. Its `tertiary` slot is the monthly window and is never hidden at 0%. OpenCode Zen (`opencode`) is web-only on macOS and unsupported here.
 - OpenRouter shows balance in the header. It renders a usage bar only when `keyLimit > 0`.
 
 Plasmashell does not inherit API keys from shell startup files.

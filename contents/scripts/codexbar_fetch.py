@@ -6,7 +6,7 @@ provider in parallel, merges the per-provider results into a single JSON
 document on stdout. The QML widget calls this once per polling tick.
 
 Usage:
-  codexbar_fetch.py --cli-path PATH --providers codex,claude,openrouter,kilo
+  codexbar_fetch.py --cli-path PATH --providers codex,claude,zai,opencodego,openrouter,kilo
 
 With --forecast-url it also attaches a `forecast` object describing when the next
 OpenAI usage-limit reset is expected (data from codex-reset.com).
@@ -33,6 +33,9 @@ PROVIDER_SOURCE: dict[str, str | None] = {
     "codex": "oauth",
     "claude": "oauth",
     "zai": None,
+    # api = real opencode.ai quota (needs apiKey in ~/.codexbar/config.json);
+    # the CLI's auto pick is the "local" estimate, which is far off.
+    "opencodego": "api",
     "openrouter": None,
     "kilo": None,
 }
@@ -41,6 +44,7 @@ PROVIDER_SOURCE: dict[str, str | None] = {
 PROVIDER_FALLBACK_SOURCES: dict[str, list[str]] = {
     "codex": ["cli"],
     "claude": ["cli"],
+    "opencodego": ["local"],
 }
 
 
@@ -548,7 +552,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--cli-path", required=True)
     parser.add_argument(
         "--providers",
-        default="codex,claude,openrouter,kilo",
+        default="codex,claude,zai,opencodego,openrouter,kilo",
         help="Comma-separated provider ids to query.",
     )
     parser.add_argument("--timeout", type=_positive_timeout, default=30.0)

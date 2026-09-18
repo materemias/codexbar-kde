@@ -15,9 +15,12 @@ Item {
 
     readonly property int style: Plasmoid.configuration.compactStyle || 0
     readonly property var configured: Plasmoid.configuration.trayIndicators || []
+    // Keys (same format as trayIndicators) that stay hidden unless the
+    // window is projected to exceed 100% before it resets.
+    readonly property var overPaceOnly: Plasmoid.configuration.trayOverPaceOnly || []
 
     // Provider-grouped indicator records:
-    //   [{ providerId, icon, windows: [{ slot, pct, hasData, ok }] }, ...]
+    //   [{ providerId, icon, windows: [{ slot, pct, hasData, ok, projected }] }, ...]
     // Grouping is in first-appearance order from the configured list, so the
     // user's ordering ("codex:primary, claude:primary, codex:secondary") still
     // produces a clean group-by-provider layout.
@@ -28,7 +31,7 @@ Item {
     // Canonical provider display order, applied regardless of how the user's
     // config list happens to be sorted — keeps tray ordering consistent with
     // the popup, tooltip, and settings layout.
-    readonly property var _canonicalOrder: ["claude", "codex", "zai", "openrouter", "kilo"]
+    readonly property var _canonicalOrder: ["claude", "codex", "zai", "opencodego", "openrouter", "kilo"]
 
     readonly property var groups: {
         var keys = compact.configured || []
@@ -51,7 +54,8 @@ Item {
             }
             return null
         }
-        function addWindow(pid, encodedAccount, slot) {
+        var now = Date.now()
+        function addWindow(pid, encodedAccount, slot, key) {
             var groupKey = pid + "|" + encodedAccount
             if (!groupByKey[groupKey]) {
                 groupByKey[groupKey] = {
@@ -67,7 +71,7 @@ Item {
             group.windowKeys[slot] = true
 
             var records = byId[pid] || []
-            var win = { slot: slot, pct: 0, hasData: false, ok: false }
+            var win = { slot: slot, pct: 0, hasData: false, ok: false, projected: -1 }
             for (var ri = 0; ri < records.length; ri++) {
                 var rec = records[ri]
                 var recAccount = rec.accountEmail
@@ -80,13 +84,20 @@ Item {
                     var pct = Math.max(0, Math.min(100, w.usedPercent))
                     if (!win.hasData || pct > win.pct) win.pct = pct
                     win.hasData = true
+                    win.projected = Math.max(win.projected, root.projectedPercent(w, now))
                 }
             }
+            // Legacy "codex:<slot>" keys expand to per-account windows; honour
+            // the flag on either form.
+            var gated = compact.overPaceOnly.indexOf(key) >= 0
+                || compact.overPaceOnly.indexOf(pid + ":" + slot) >= 0
+            if (gated && win.projected <= 100) return
             group.windows.push(win)
         }
 
         for (var k = 0; k < keys.length; k++) {
-            var parts = String(keys[k]).split(":")
+            var key = String(keys[k])
+            var parts = key.split(":")
             var pid = parts[0]
             if (pid === "codex" && parts.length === 2) {
                 var codexRecords = byId.codex || []
@@ -94,14 +105,15 @@ Item {
                 for (var ai = 0; ai < codexRecords.length; ai++) {
                     var email = codexRecords[ai].accountEmail
                     if (!email) continue
-                    addWindow(pid, encodeURIComponent(String(email)), parts[1])
+                    addWindow(pid, encodeURIComponent(String(email)), parts[1],
+                              pid + ":" + encodeURIComponent(String(email)) + ":" + parts[1])
                     expanded = true
                 }
                 if (expanded) continue
             }
             var account = parts.length > 2 ? parts[1] : ""
             var slot = parts.length > 2 ? parts.slice(2).join(":") : (parts[1] || "primary")
-            addWindow(pid, account, slot)
+            addWindow(pid, account, slot, key)
         }
 
         var out = []
@@ -120,7 +132,8 @@ Item {
             var remainingKey = groupOrder[gi]
             if (!seen[remainingKey]) out.push(groupByKey[remainingKey])
         }
-        return out
+        // A group whose every meter is gated out disappears with its icon.
+        return out.filter(function (group) { return group.windows.length > 0 })
     }
 
     // Configurable target size from settings; clamped to what the panel
@@ -335,7 +348,9 @@ Item {
                             anchors.leftMargin: ring.visible ? 2 : 0
                             text: indicatorRoot.active ? Math.round(indicatorRoot.pct) + "%" : "—"
                             color: indicatorRoot.tint
-                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            // Same size as the in-ring percent so switching styles keeps legibility.
+                            font.pixelSize: Math.max(8, Math.floor(compact.ringSize * 0.45))
+                            font.weight: Font.DemiBold
                         }
                     }
                 }

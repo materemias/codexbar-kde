@@ -70,12 +70,13 @@ PlasmoidItem {
         && Plasmoid.configuration.showCodexResetForecast !== false
     readonly property int refreshMs: Math.max(10, Plasmoid.configuration.refreshSeconds || 30) * 1000
     readonly property var enabledProviders: {
-        // Display order: Claude → Codex → z.ai → OpenRouter → Kilo
+        // Display order: Claude → Codex → z.ai → OpenCode Go → OpenRouter → Kilo
         // (preserved in tray rings, popup sections, tooltip, settings).
         var ids = []
         if (Plasmoid.configuration.enableClaude)     ids.push("claude")
         if (Plasmoid.configuration.enableCodex)      ids.push("codex")
         if (Plasmoid.configuration.enableZai)        ids.push("zai")
+        if (Plasmoid.configuration.enableOpenCodeGo) ids.push("opencodego")
         if (Plasmoid.configuration.enableOpenRouter) ids.push("openrouter")
         if (Plasmoid.configuration.enableKilo)       ids.push("kilo")
         return ids
@@ -114,19 +115,20 @@ PlasmoidItem {
     // and time-left columns. PC3.Label inside Plasma's tooltip honours this.
     toolTipTextFormat: Text.RichText
     // Tooltip stays focused on the recurring usage windows users actually
-    // watch: Claude 5h+7d, Codex 5h+7d, z.ai 5h+monthly. Extras (Sonnet,
-    // Claude Design, Routines) and balance-only providers (OpenRouter, Kilo)
+    // watch: Claude 5h+7d, Codex 5h+7d, z.ai 5h+monthly, OpenCode Go 5h+7d.
+    // Extras (Sonnet, Claude Design, Routines) and balance-only providers (OpenRouter, Kilo)
     // are intentionally omitted — they're available in the popup.
     readonly property var _tooltipSlots: ({
         claude: ["primary", "secondary"],
         codex:  ["primary", "secondary"],
-        zai:    ["primary", "secondary"]
+        zai:    ["primary", "secondary"],
+        opencodego: ["primary", "secondary"]
     })
     toolTipSubText: {
         if (root.lastError) return root.lastError
         var arr = root.snapshot.providers || []
         if (arr.length === 0) return root.loading ? "Loading…" : "No providers enabled"
-        var labels = { codex: "Codex", claude: "Claude", zai: "z.ai" }
+        var labels = { codex: "Codex", claude: "Claude", zai: "z.ai", opencodego: "OpenCode Go" }
         // width="240" widens the tooltip a touch so the columns don't crowd.
         // Cellpadding gives horizontal breathing room between label / pct /
         // time-left without forcing a wider column with &nbsp;.
@@ -646,6 +648,20 @@ PlasmoidItem {
         return ""
     }
 
+    // Projected usage at reset if the current rate holds, or -1 when the
+    // window cannot be projected: no resetsAt/windowMinutes, a reset that is
+    // past or outside the declared window, or less than 3% elapsed (pure
+    // noise). Same rule as the pace tick in ProviderSection.
+    function projectedPercent(win, now) {
+        if (!win || !win.resetsAt || !win.windowMinutes) return -1
+        var windowMs = win.windowMinutes * 60000
+        var remainingMs = new Date(win.resetsAt).getTime() - now
+        if (isNaN(remainingMs) || remainingMs <= 0 || remainingMs > windowMs) return -1
+        var pacePct = (1 - remainingMs / windowMs) * 100
+        if (pacePct < 3) return -1
+        return Math.min(999, (win.usedPercent || 0) * 100 / pacePct)
+    }
+
     function windowLabel(providerId, slot, rec, extraTitle) {
         // Codex exposes this separate weekly GPT quota as "gpt-reserve".
         if (providerId === "codex"
@@ -665,6 +681,7 @@ PlasmoidItem {
         if (mins === 300) return "5h"
         if (mins === 1440) return "1d"
         if (mins === 10080) return "7d"
+        if (mins === 43200) return "Monthly"
         return slot
     }
 
@@ -673,6 +690,7 @@ PlasmoidItem {
             codex: "OPENAI CODEX",
             claude: "CLAUDE CODE",
             zai: "Z.AI",
+            opencodego: "OPENCODE GO",
             openrouter: "OPENROUTER",
             kilo: "KILO"
         }
