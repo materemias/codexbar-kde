@@ -13,6 +13,7 @@ Kirigami.FormLayout {
     property bool cfg_enableOpenCodeGo: true
     property bool cfg_enableOpenRouter: true
     property bool cfg_enableKilo: true
+    property bool cfg_enableTypeSafe: false
 
     QQC2.CheckBox {
         Kirigami.FormData.label: "Claude:"
@@ -55,6 +56,12 @@ Kirigami.FormLayout {
         text: "API"
         checked: cfg_enableKilo
         onToggled: cfg_enableKilo = checked
+    }
+    QQC2.CheckBox {
+        Kirigami.FormData.label: "TypeSafe:"
+        text: "Console cookie (manual)"
+        checked: cfg_enableTypeSafe
+        onToggled: cfg_enableTypeSafe = checked
     }
 
     QQC2.Label {

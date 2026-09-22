@@ -4,7 +4,7 @@ import QtQuick.Window
 import QtCore
 import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
-import org.kde.plasma.plasma5support as P5Support
+import "process" as Process
 import org.kde.taskmanager as TaskManager
 import "Command.js" as Command
 
@@ -70,7 +70,7 @@ PlasmoidItem {
         && Plasmoid.configuration.showCodexResetForecast !== false
     readonly property int refreshMs: Math.max(10, Plasmoid.configuration.refreshSeconds || 30) * 1000
     readonly property var enabledProviders: {
-        // Display order: Claude → Codex → z.ai → OpenCode Go → OpenRouter → Kilo
+        // Display order: Claude → Codex → z.ai → OpenCode Go → OpenRouter → Kilo → TypeSafe
         // (preserved in tray rings, popup sections, tooltip, settings).
         var ids = []
         if (Plasmoid.configuration.enableClaude)     ids.push("claude")
@@ -79,6 +79,7 @@ PlasmoidItem {
         if (Plasmoid.configuration.enableOpenCodeGo) ids.push("opencodego")
         if (Plasmoid.configuration.enableOpenRouter) ids.push("openrouter")
         if (Plasmoid.configuration.enableKilo)       ids.push("kilo")
+        if (Plasmoid.configuration.enableTypeSafe)   ids.push("typesafe")
         return ids
     }
 
@@ -116,7 +117,7 @@ PlasmoidItem {
     toolTipTextFormat: Text.RichText
     // Tooltip stays focused on the recurring usage windows users actually
     // watch: Claude 5h+7d, Codex 5h+7d, z.ai 5h+monthly, OpenCode Go 5h+7d.
-    // Extras (Sonnet, Claude Design, Routines) and balance-only providers (OpenRouter, Kilo)
+    // Extras (Sonnet, Claude Design, Routines) and balance-only providers (OpenRouter, Kilo, TypeSafe)
     // are intentionally omitted — they're available in the popup.
     readonly property var _tooltipSlots: ({
         claude: ["primary", "secondary"],
@@ -188,16 +189,13 @@ PlasmoidItem {
         return anyData ? html : ""
     }
 
-    P5Support.DataSource {
+    Process.CommandRunner {
         id: runner
-        engine: "executable"
-        connectedSources: []
 
-        onNewData: function(sourceName, data) {
-            disconnectSource(sourceName)
+        onFinished: function(command, exitCode, standardOutput, standardError) {
             root.loading = false
-            var stdout = (data["stdout"] || "").trim()
-            var stderr = (data["stderr"] || "").trim()
+            var stdout = standardOutput.trim()
+            var stderr = standardError.trim()
             if (stdout === "") {
                 root.lastError = stderr || "fetcher produced no output"
                 return
@@ -212,20 +210,16 @@ PlasmoidItem {
         }
     }
 
-    // Read the aggregate only after its writer exits successfully. The
-    // unique shell comment makes each invocation a fresh dataengine source.
-    P5Support.DataSource {
+    // Read the aggregate only after its writer exits successfully.
+    Process.CommandRunner {
         id: aggregatorRunner
-        engine: "executable"
-        connectedSources: []
 
-        onNewData: function(sourceName, data) {
-            disconnectSource(sourceName)
+        onFinished: function(command, exitCode, standardOutput, standardError) {
             root.aggregatorLoading = false
             if (!root.agentsEnabled) return
-            if (data["exit code"] !== 0) {
-                root.agentsError = (data["stderr"] || "").trim()
-                    || "agent scan failed (exit " + data["exit code"] + ")"
+            if (exitCode !== 0) {
+                root.agentsError = standardError.trim()
+                    || "agent scan failed (exit " + exitCode + ")"
                 return
             }
             root.refreshAgents()
@@ -371,8 +365,7 @@ PlasmoidItem {
         var cmd = "python3 " + Command.shellQuote(root.aggregatorScriptPath) + " --once"
             + " --desktop-map " + Command.shellQuote(desktopMap)
             + " --requested-at " + requestedAt
-            + " # t=" + requestedAt
-        aggregatorRunner.connectSource(cmd)
+        aggregatorRunner.run(cmd)
     }
 
     function refreshAgents() {
@@ -462,12 +455,7 @@ PlasmoidItem {
         if (root.codexForecastEnabled) {
             cmd += " --forecast-url https://codex-reset.com/api/forecast"
         }
-        // Unique shell comment per invocation: the executable engine keys
-        // sources by command string, so a static command would return the
-        // cached first run instead of re-fetching (same trick as the
-        // aggregator command above).
-        cmd += " # t=" + Date.now()
-        runner.connectSource(cmd)
+        runner.run(cmd)
     }
 
     Timer {
@@ -531,15 +519,19 @@ PlasmoidItem {
         return pad2(when.getHours()) + ":" + pad2(when.getMinutes())
     }
 
+    function _monthDay(when) {
+        var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        return months[when.getMonth()] + " " + when.getDate()
+    }
+
     function _absoluteTime(when, nowMs) {
         var now = new Date(nowMs)
         var sameDay = now.toDateString() === when.toDateString()
         var hhmm = _time24(when)
 
         if (sameDay) return hhmm
-        var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        return months[when.getMonth()] + " " + when.getDate() + ", " + hhmm
+        return _monthDay(when) + ", " + hhmm
     }
 
     function _forecastTimeLeft(when, now) {
@@ -554,48 +546,108 @@ PlasmoidItem {
         return relativeMs(diff).replace(/^in /, "").replace(/ 0h$/, "")
     }
 
-    function formatCodexForecast(forecast, now) {
+    // Below this 48h chance the cadence-based ETA is noise, so the line says
+    // "unknown" instead of inventing a timestamp.
+    readonly property int forecastLikelyPercent: 50
+
+    function _forecastPercent(value) {
+        if (value === undefined || value === null) return NaN
+        var p = Number(value)
+        return isFinite(p) && p >= 0 && p <= 100 ? Math.round(p) : NaN
+    }
+
+    // Which branch the forecast card is in: "announced" (Tibo committed to a
+    // window), "likely" (cadence model ≥ forecastLikelyPercent within 48h),
+    // "unknown" (anything else), "" when there is no usable forecast.
+    function codexForecastState(forecast) {
         if (!forecast || typeof forecast !== "object" || forecast.ok !== true) return ""
+        if (forecast.signal && typeof forecast.signal === "object") return "announced"
+        var p48 = _forecastPercent(forecast.prob48h)
+        var expected = typeof forecast.expectedAt === "string"
+            ? new Date(forecast.expectedAt) : null
+        if (!isNaN(p48) && p48 >= root.forecastLikelyPercent
+                && expected && !isNaN(expected.getTime())) return "likely"
+        return "unknown"
+    }
 
-        var expectedText = typeof forecast.expectedAt === "string"
-            ? forecast.expectedAt.trim() : ""
-        if (expectedText.length === 0) return ""
+    // Detail text next to the state badge; the badge itself names the state.
+    function formatCodexForecast(forecast, now) {
+        var state = codexForecastState(forecast)
+        if (state.length === 0) return ""
 
-        var expected = new Date(expectedText)
-        if (isNaN(expected.getTime())) return ""
-
-        var details = [
-            "Next reset estimate: ~ " + _absoluteTime(expected, now)
-                + " (" + _forecastTimeLeft(expected, now) + ")"
-        ]
+        var details = []
+        if (state === "announced") {
+            // Promised window, its deadline and the site's signal score. Model
+            // confidence is about the cadence model, so it is left off here.
+            var signal = forecast.signal
+            var head = signal.windowLabel || "reset"
+            var deadline = typeof signal.deadlineAt === "string"
+                ? new Date(signal.deadlineAt) : null
+            if (deadline && !isNaN(deadline.getTime())) {
+                head += " (by " + _absoluteTime(deadline, now)
+                    + ", " + _forecastTimeLeft(deadline, now) + ")"
+            }
+            var sp = _forecastPercent(signal.percent)
+            if (!isNaN(sp)) head += " · " + sp + "% chance"
+            details.push(head)
+        } else if (state === "likely") {
+            // The site's cadence model ignores announcements, so its 48h number
+            // is only printed here, where it is the whole basis of the estimate.
+            var expected = new Date(forecast.expectedAt)
+            details.push("~ " + _absoluteTime(expected, now)
+                + " (" + _forecastTimeLeft(expected, now) + ") · "
+                + _forecastPercent(forecast.prob48h) + "% chance within 48h")
+        } else {
+            // No estimate worth printing; the elapsed wait against recent gaps
+            // is the one time-dependent signal the site publishes.
+            var line = "next reset unknown"
+            var wait = forecast.wait && typeof forecast.wait === "object"
+                ? forecast.wait : null
+            var waited = wait ? Number(wait.days) : NaN
+            if (isFinite(waited) && waited >= 0) {
+                line += " · waited " + Math.round(waited) + "d"
+                var share = Number(wait.shorterShare)
+                if (isFinite(share) && share >= 0 && share <= 1) {
+                    line += ", longer than " + Math.round(share * 100) + "% of recent gaps"
+                }
+            }
+            details.push(line)
+        }
         if (forecast.stale === true) details[0] += " (cached)"
 
-        var probabilities = []
-        var p24 = Number(forecast.prob24h)
-        if (forecast.prob24h !== undefined && forecast.prob24h !== null
-                && isFinite(p24) && p24 >= 0 && p24 <= 100) {
-            probabilities.push("24h " + Math.round(p24) + "%")
-        }
-        var p48 = Number(forecast.prob48h)
-        if (forecast.prob48h !== undefined && forecast.prob48h !== null
-                && isFinite(p48) && p48 >= 0 && p48 <= 100) {
-            probabilities.push("48h " + Math.round(p48) + "%")
-        }
-        if (probabilities.length > 0) details.push(probabilities.join(" · "))
-
-        if (typeof forecast.confidence === "string"
+        if (state !== "announced" && typeof forecast.confidence === "string"
                 && forecast.confidence.trim().length > 0) {
             details.push(forecast.confidence.trim() + " confidence")
         }
         return details.join(" · ")
     }
 
-    // Why the next reset is coming, when codex-reset.com has an alert that
-    // postdates the last recorded reset. Kept separate from the summary line.
+    // Open Codex incident: compensation resets follow outages. Rendered in the
+    // negative colour, so it stays separate from the announcement/hint line.
+    function formatCodexForecastIncident(forecast) {
+        if (!forecast || typeof forecast !== "object" || forecast.ok !== true) return ""
+        var incident = forecast.incident
+        if (!incident || typeof incident !== "object" || incident.open !== true) return ""
+        var surfaces = Array.isArray(incident.surfaces) ? incident.surfaces : []
+        return "Codex incident open"
+            + (surfaces.length > 0 ? " (" + surfaces.join(", ") + ")" : "")
+            + " — compensation reset possible"
+    }
+
+    // Why the next reset is coming: the alert that postdates the last recorded
+    // reset, or, failing that, Tibo's latest soft hint.
     function formatCodexForecastAlert(forecast) {
         if (!forecast || typeof forecast !== "object" || forecast.ok !== true) return ""
-        if (typeof forecast.alertSummary !== "string") return ""
-        return forecast.alertSummary.trim()
+        if (typeof forecast.alertSummary === "string" && forecast.alertSummary.trim().length > 0) {
+            return forecast.alertSummary.trim()
+        }
+        if (forecast.hint && typeof forecast.hint === "object"
+                && typeof forecast.hint.quote === "string") {
+            var at = typeof forecast.hint.at === "string" ? new Date(forecast.hint.at) : null
+            return "Hint" + (at && !isNaN(at.getTime()) ? " " + _monthDay(at) : "")
+                + ": \u201c" + forecast.hint.quote.trim() + "\u201d"
+        }
+        return ""
     }
 
     function lastCodexIndex() {
@@ -692,7 +744,8 @@ PlasmoidItem {
             zai: "Z.AI",
             opencodego: "OPENCODE GO",
             openrouter: "OPENROUTER",
-            kilo: "KILO"
+            kilo: "KILO",
+            typesafe: "TYPESAFE"
         }
         return map[id] || id.toUpperCase()
     }

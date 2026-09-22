@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import org.kde.plasma.plasma5support as P5Support
+import "process" as Process
 import "Command.js" as Command
 
 Item {
@@ -189,23 +189,20 @@ Item {
         cfg_trayIndicators = current
     }
 
-    P5Support.DataSource {
+    Process.CommandRunner {
         id: codexRunner
-        engine: "executable"
-        connectedSources: []
-        onNewData: function(sourceName, data) {
-            disconnectSource(sourceName)
-            if (sourceName !== root.activeCommand) return
+        onFinished: function(command, exitCode, standardOutput, standardError) {
+            if (command !== root.activeCommand) return
             root.activeCommand = ""
             if (root.activeCliPath !== root.cliPath) {
                 root.loadCodexAccounts()
                 return
             }
             root.codexLoading = false
-            var stdout = (data["stdout"] || "").trim()
+            var stdout = standardOutput.trim()
             if (!stdout) {
                 root.codexAccounts = []
-                root.codexError = (data["stderr"] || "No Codex account data").trim()
+                root.codexError = (standardError || "No Codex account data").trim()
                 return
             }
             try {
@@ -242,8 +239,8 @@ Item {
         root.activeCliPath = root.cliPath
         root.activeCommand = "python3 " + Command.shellQuote(root.fetchScriptPath)
             + " --cli-path " + Command.shellQuote(root.activeCliPath)
-            + " --providers codex --timeout 30 # t=" + Date.now()
-        codexRunner.connectSource(root.activeCommand)
+            + " --providers codex --timeout 30"
+        codexRunner.run(root.activeCommand)
     }
 
     Component.onCompleted: {

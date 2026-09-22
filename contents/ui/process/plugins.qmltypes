@@ -1,0 +1,21 @@
+import QtQuick.tooling 1.2
+
+Module {
+    Component {
+        name: "CommandRunner"
+        prototype: "QObject"
+        exports: ["CodexBar.Process/CommandRunner 1.0"]
+        exportMetaObjectRevisions: [256]
+        Signal {
+            name: "finished"
+            Parameter { name: "command"; type: "QString" }
+            Parameter { name: "exitCode"; type: "int" }
+            Parameter { name: "standardOutput"; type: "QString" }
+            Parameter { name: "standardError"; type: "QString" }
+        }
+        Method {
+            name: "run"
+            Parameter { name: "command"; type: "QString" }
+        }
+    }
+}

@@ -8,21 +8,32 @@ KDE Plasma 6 system-tray applet for AI provider usage and active coding-agent se
 - `contents/scripts/codexbar_agents.py` scans `/proc`, reads transcripts, and writes `~/.codexbar/agents.json`.
 - `contents/config/main.xml` is the sole configuration schema. Settings pages live in `contents/ui/config*.qml`.
 - `contents/scripts/codexbar_focus.py` and `contents/scripts/install_integration.py` implement terminal focus and integration setup.
+- `native/` exposes asynchronous `QProcess` commands to QML. Keep execution here;
+  unique executable DataSource names make Plasma's dynamic metadata grow.
 
 Extend these paths instead of adding another polling, normalization, or configuration path.
 
 ## Development
 
 ```sh
-# First install
-kpackagetool6 -t Plasma/Applet -i .
+# Build the complete package, including its native QML plugin
+cmake -S . -B build -DCODEXBAR_BUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
 
-# Upgrade after edits
-kpackagetool6 -t Plasma/Applet -u .
+# First install
+kpackagetool6 -t Plasma/Applet -i build/package
+
+# Upgrade after edits; stop Plasma before replacing its loaded native library
+kquitapp6 plasmashell
+kpackagetool6 -t Plasma/Applet -u build/package
+kstart plasmashell
 
 # Clean reinstall after deleting packaged files
+kquitapp6 plasmashell
 kpackagetool6 -t Plasma/Applet -r org.codexbar.plasmoid
-kpackagetool6 -t Plasma/Applet -i .
+kpackagetool6 -t Plasma/Applet -i build/package
+kstart plasmashell
 
 # Reload the real panel from the user's session shell
 kquitapp6 plasmashell && kstart plasmashell
@@ -38,10 +49,10 @@ kquitapp6 plasmashell \
        kstart plasmashell
 ```
 
-For changed QML, run `qmllint`. For changed Python, run
-`uv run python -m py_compile <files>`. Install the package and verify UI
-behavior in the actual panel. `plasmoidviewer` is unreliable on Wayland and can
-exit on focus loss.
+For changed QML, run `qmllint` on the staged files under `build/package`.
+For changed Python, run `uv run python -m py_compile <files>`. Install the
+built package and verify UI behavior in the actual panel. `plasmoidviewer`
+is unreliable on Wayland and can exit on focus loss.
 
 When completing a feature, update README.md in the same change.
 
@@ -51,9 +62,10 @@ When completing a feature, update README.md in the same change.
 - Claude `extraRateWindows` require OAuth.
 - Codex emits one normalized record per account. Legacy tray keys use `codex:<window>`. Account-specific keys use `codex:<encoded-email>:<window>`.
 - Codex Spark windows are intentionally filtered out.
-- Provider order is Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo on every surface.
+- Provider order is Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo, TypeSafe on every surface.
 - OpenCode Go (`opencodego`) uses the `api` source with an `apiKey` in `~/.codexbar/config.json`; the CLI's auto pick is a `local` estimate that is far off the real quota, kept only as fallback. Its `tertiary` slot is the monthly window and is never hidden at 0%. OpenCode Zen (`opencode`) is web-only on macOS and unsupported here.
 - OpenRouter shows balance in the header. It renders a usage bar only when `keyLimit > 0`.
+- TypeSafe (`typesafe`, CLI 0.64.0+) is balance-only and off by default: no `primary`, header shows `Balance` parsed from `loginMethod`, no tray meter. Browser cookie import is macOS-only; Linux needs `cookieSource: "manual"` plus `cookieHeader` in `~/.codexbar/config.json`.
 
 Plasmashell does not inherit API keys from shell startup files.
 `~/.codexbar/config.json` must be mode `0600`; the CLI reads it for provider

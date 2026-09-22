@@ -1,0 +1,3 @@
+module CodexBar.Process
+plugin codexbarprocess
+typeinfo plugins.qmltypes

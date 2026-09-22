@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import org.kde.plasma.plasma5support as P5Support
+import "process" as Process
 import "Command.js" as Command
 
 Item {
@@ -20,28 +20,29 @@ Item {
     property int cfg_agentTopicMaxWidth: 260
 
     property string hookStatus: "checking…"
+    property bool hookLoading: false
     readonly property string installScriptPath: Command.localPath(
         Qt.resolvedUrl("../scripts/install_integration.py"))
 
     implicitWidth: Kirigami.Units.gridUnit * 22
     implicitHeight: Kirigami.Units.gridUnit * 22
 
-    P5Support.DataSource {
+    Process.CommandRunner {
         id: hookRunner
-        engine: "executable"
-        connectedSources: []
-        onNewData: function(sourceName, data) {
-            disconnectSource(sourceName)
-            var stdout = (data["stdout"] || "").trim()
-            var stderr = (data["stderr"] || "").trim()
+        onFinished: function(command, exitCode, standardOutput, standardError) {
+            root.hookLoading = false
+            var stdout = standardOutput.trim()
+            var stderr = standardError.trim()
             root.hookStatus = stdout || stderr || "(no output)"
         }
     }
 
     function _runHookCommand(arg) {
+        if (root.hookLoading) return
+        root.hookLoading = true
         var cmd = "python3 " + Command.shellQuote(root.installScriptPath)
         if (arg && arg.length > 0) cmd += " " + Command.shellQuote(arg)
-        hookRunner.connectSource(cmd)
+        hookRunner.run(cmd)
     }
 
     Component.onCompleted: _runHookCommand("--status")
@@ -165,6 +166,7 @@ Item {
             }
 
             RowLayout {
+                enabled: !root.hookLoading
                 spacing: Kirigami.Units.smallSpacing
                 Layout.fillWidth: true
 

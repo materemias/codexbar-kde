@@ -12,8 +12,8 @@ Linux port of the macOS [CodexBar](https://github.com/steipete/CodexBar) menu-ba
 ## What it does
 
 **Usage tab** — Per-provider rate-limit meters with progress bars, percent used,
-and reset countdowns. Supports Claude, Codex, z.ai, OpenCode Go, OpenRouter, and
-Kilo out of the box.
+and reset countdowns. Supports Claude, Codex, z.ai, OpenCode Go, OpenRouter,
+Kilo, and TypeSafe out of the box.
 
 Each meter carries a **pace tick**: a small marker showing where even
 consumption would sit at this point in the window. A white tick ahead of the
@@ -25,7 +25,7 @@ pace, and when the meter would hit 100%. Before that the tick stays neutral and
 no projection is shown, since the numbers are pure noise in the first minutes.
 A reset timestamp that is past or outside the declared window is treated as
 broken data and renders without a tick. Balance-only meters (OpenRouter limit,
-Kilo credits) have no time window and never show the tick.
+Kilo credits, TypeSafe balance) have no time window and never show the tick.
 
 Countdowns and pace indicators update while the popup or tray tooltip is
 visible, independently of the provider polling interval.
@@ -49,15 +49,30 @@ the expiry shown is the earliest one. Accounts without credits show nothing.
 
 **Codex reset forecast.** Below the last Codex account, the usage tab shows an
 auxiliary forecast
-from [codex-reset.com](https://codex-reset.com). It estimates the next reset
-from the site's recent cadence and common reset window, not an exact timestamp.
-The widget shows the estimate and time remaining in local 24 hour time,
-along with short-horizon probabilities and confidence. When codex-reset.com
-publishes an alert that is newer than the last recorded reset, its summary
-appears on a second line so you can see why the next reset is coming. An alert
-that only announces the reset already recorded stays hidden. The forecast is
-optional and enabled by default. If codex-reset.com is unavailable, usage data
-continues to work. Cached forecast data can be marked stale.
+from [codex-reset.com](https://codex-reset.com). A coloured badge names the
+state, and the card border takes the same colour:
+
+- `ANNOUNCED` (green): a dated commitment or alert newer than the last recorded
+  reset, e.g. `end of Tuesday (by Sep 23, 09:00, 23h) · 93% chance`, with the
+  announcement text on the next line.
+- `LIKELY` (amber): no announcement, but the model's 48h chance is at least
+  50%; shows an estimate derived from the site's recent cadence and common
+  reset window, e.g. `~ Sep 23, 01:00 (16h) · 62% chance within 48h`.
+- `UNKNOWN` (grey): below that chance a cadence-based timestamp would be
+  noise, so the elapsed wait against recent reset gaps stands in for it:
+  `next reset unknown · waited 10d, longer than 88% of recent gaps`.
+
+An open Codex incident from the site's status feed appears in red on its own
+line (`Codex incident open (Codex API) — compensation reset possible`). The
+last line carries the announcement text, or, without an announcement, Tibo's
+latest soft hint (`Hint Sep 19: "…still coming in Tuesday"`); hints older than
+the last recorded reset are not shown.
+
+The model confidence is appended when no reset is announced. Times use local
+24 hour time. The forecast is optional and enabled by default. If
+codex-reset.com is unavailable, usage data continues to work. Cached forecast
+data can be marked stale. The status feed is fetched with the forecast, with a
+four-second deadline, and its failure only drops the incident line.
 Forecast requests have an eight-second overall deadline and a 256 KiB response
 limit. A timed-out request falls back to cached forecast data when available.
 
@@ -120,6 +135,7 @@ untracked and can be excluded from both the list and its counts.
 | **OpenCode Go** | `apiKey` in `~/.codexbar/config.json` (your `opencode-go` key from `~/.local/share/opencode/auth.json`), else `OPENCODE_API_KEY`; falls back to a local estimate | 5h / 7d / monthly windows |
 | **OpenRouter** | `apiKey` in `~/.codexbar/config.json`, else `OPENROUTER_API_KEY` | Remaining balance; per-key allowance bar when a `keyLimit` is set |
 | **Kilo**       | `apiKey` in `~/.codexbar/config.json`, else `KILO_API_KEY` | Remaining credits balance                                         |
+| **TypeSafe**   | Console session `cookieHeader` in `~/.codexbar/config.json` (`cookieSource: "manual"`); off by default | Remaining credit balance; spend, plan, and credit expiry in details |
 
 The Reserve 7d row is the separate weekly quota that the Codex CLI reports
 for GPT models.
@@ -151,13 +167,17 @@ existing layout.
   elsewhere.
 - Python 3 (already present on every Plasma 6 system)
 - `kpackagetool6` (ships with Plasma 6)
+- Build tools: CMake 3.21+, a C++17 compiler, and Qt 6 Core/QML development
+  files. On Arch, these come from `base-devel`, `cmake`, and `qt6-declarative`.
 
 ## Install
 
 ```sh
 git clone https://github.com/materemias/codexbar-kde
 cd codexbar-kde
-kpackagetool6 -t Plasma/Applet -i .
+cmake -S . -B build
+cmake --build build
+kpackagetool6 -t Plasma/Applet -i build/package
 ```
 
 Then in Plasma:
@@ -170,6 +190,14 @@ Then in Plasma:
 
 The installed copy lives at `~/.local/share/plasma/plasmoids/org.codexbar.plasmoid/` —
 it's a self-contained snapshot, so the source directory can live anywhere.
+
+The build packages a small local `QProcess` plugin alongside the QML.
+Commands run directly through Qt rather than Plasma's executable DataSource,
+avoiding its growing dynamic-property metadata when polling commands change.
+Agent polling still passes a fresh desktop map and request timestamp every tick.
+Build on the target machine; the package contains a native library.
+Install `build/package`, not the source directory; the source tree has no
+compiled plugin.
 
 ## Configure provider credentials
 
@@ -186,7 +214,8 @@ The same file can list additional Codex profile homes:
     {"id": "zai",   "enabled": true, "apiKey": "<from https://z.ai/manage-apikey/apikey>"},
     {"id": "opencodego", "enabled": true, "apiKey": "<your opencode-go key, see ~/.local/share/opencode/auth.json>"},
     {"id": "kilo",  "enabled": true, "apiKey": "<from app.kilo.ai>"},
-    {"id": "openrouter", "enabled": true, "apiKey": "<management key from https://openrouter.ai/settings/keys>"}
+    {"id": "openrouter", "enabled": true, "apiKey": "<management key from https://openrouter.ai/settings/keys>"},
+    {"id": "typesafe", "enabled": true, "cookieSource": "manual", "cookieHeader": "<Cookie: header copied from https://console.typesafe.ai/settings/billing>"}
   ]
 }
 ```
@@ -215,6 +244,15 @@ The balance in the row header is the remaining credit from the CLI's credits
 output, so it appears whenever the key can read credits. A usage bar appears
 only when the key has a per-key spend limit set on OpenRouter.
 
+TypeSafe (CodexBar CLI 0.64.0 or newer) has no usage API; the CLI reads the
+console's billing page with your browser session. Browser cookie import is
+macOS-only, so on Linux set `cookieSource` to `manual` and paste the full
+`Cookie:` request header from a signed-in
+`https://console.typesafe.ai/settings/billing` request (browser dev tools,
+Network tab). The session expires eventually; the row then shows "TypeSafe
+session expired" until you paste a fresh header. TypeSafe reports no rate
+window, so it has no tray meter; enable it in Settings → Providers.
+
 ## Troubleshooting
 
 ### "Kilo CLI session file is invalid ... run `kilo login`"
@@ -236,14 +274,23 @@ error comes back.
 ```sh
 cd /path/to/codexbar-kde
 git pull
-kpackagetool6 -t Plasma/Applet -u .
+cmake -S . -B build
+cmake --build build
+kquitapp6 plasmashell
+kpackagetool6 -t Plasma/Applet -u build/package
+kstart plasmashell
 ```
+
+Run this from your desktop session shell. Stop Plasma before replacing the
+native library, then start it again to load the updated package.
 
 If files were deleted between versions, do a clean reinstall:
 
 ```sh
+kquitapp6 plasmashell
 kpackagetool6 -t Plasma/Applet -r org.codexbar.plasmoid
-kpackagetool6 -t Plasma/Applet -i .
+kpackagetool6 -t Plasma/Applet -i build/package
+kstart plasmashell
 ```
 
 ## Uninstall
@@ -283,7 +330,7 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 - Usage polling interval (10–3600 seconds)
 
 ### Providers
-- Toggle individual providers on/off (Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo)
+- Toggle individual providers on/off (Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo, TypeSafe; TypeSafe is off by default)
 - In the Providers tab, toggle the Codex reset forecast with
   `showCodexResetForecast` (enabled by default)
 
@@ -326,6 +373,8 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 ## Layout
 
 ```
+CMakeLists.txt                  # Builds the plugin and stages build/package
+native/                        # QProcess QML plugin and lifecycle regression
 contents/
   config/main.xml              # KConfigXT schema (all settings keys)
   config/config.qml             # Settings tab definitions
@@ -338,6 +387,7 @@ contents/
   ui/configProviders.qml        # Settings → Providers tab
   ui/configTray.qml             # Settings → Tray tab
   ui/configAgents.qml           # Settings → Agents tab
+  ui/process/                   # Local native module metadata
   scripts/codexbar_fetch.py     # Parallel CLI invocation, merges JSON
   scripts/codexbar_agents.py    # Agent state aggregator (/proc scanner)
   scripts/codexbar_focus.py     # Click-to-focus: KWin + Kitty activation

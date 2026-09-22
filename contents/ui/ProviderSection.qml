@@ -297,7 +297,13 @@ ColumnLayout {
 
     Rectangle {
         id: forecastCard
+        readonly property string forecastState: root.codexForecastState(section.forecast)
+        readonly property color stateColor: forecastState === "announced"
+            ? Kirigami.Theme.positiveTextColor
+            : forecastState === "likely" ? Kirigami.Theme.neutralTextColor
+                                          : Kirigami.Theme.disabledTextColor
         readonly property string forecastText: root.formatCodexForecast(section.forecast, root.nowMs)
+        readonly property string incidentText: root.formatCodexForecastIncident(section.forecast)
         readonly property string alertText: root.formatCodexForecastAlert(section.forecast)
         visible: section.showForecast && forecastText.length > 0
         Layout.fillWidth: true
@@ -307,12 +313,10 @@ ColumnLayout {
         radius: 5
         color: Kirigami.Theme.alternateBackgroundColor
         border.width: 1
-        border.color: Qt.rgba(
-            Kirigami.Theme.textColor.r,
-            Kirigami.Theme.textColor.g,
-            Kirigami.Theme.textColor.b,
-            0.22
-        )
+        // The border carries the state colour so the card reads at a glance;
+        // unknown stays neutral so it does not compete with the usage bars.
+        border.color: Qt.rgba(stateColor.r, stateColor.g, stateColor.b,
+                              forecastState === "unknown" ? 0.3 : 0.6)
 
         ColumnLayout {
             id: forecastContent
@@ -326,12 +330,47 @@ ColumnLayout {
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
             }
 
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+
+                Rectangle {
+                    id: statePill
+                    Layout.alignment: Qt.AlignTop
+                    Layout.topMargin: 1
+                    implicitWidth: stateLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
+                    implicitHeight: stateLabel.implicitHeight + 2
+                    radius: height / 2
+                    color: Qt.rgba(forecastCard.stateColor.r, forecastCard.stateColor.g,
+                                   forecastCard.stateColor.b, 0.18)
+                    border.width: 1
+                    border.color: forecastCard.stateColor
+
+                    PC3.Label {
+                        id: stateLabel
+                        anchors.centerIn: parent
+                        text: forecastCard.forecastState.toUpperCase()
+                        color: forecastCard.stateColor
+                        font.weight: Font.DemiBold
+                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 2
+                    }
+                }
+
+                PC3.Label {
+                    Layout.fillWidth: true
+                    text: forecastCard.forecastText
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                    opacity: 0.72
+                }
+            }
             PC3.Label {
                 Layout.fillWidth: true
-                text: forecastCard.forecastText
+                text: forecastCard.incidentText
+                visible: text.length > 0
                 wrapMode: Text.WordWrap
+                color: Kirigami.Theme.negativeTextColor
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
-                opacity: 0.72
             }
             PC3.Label {
                 Layout.fillWidth: true

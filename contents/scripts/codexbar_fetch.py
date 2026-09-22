@@ -6,7 +6,7 @@ provider in parallel, merges the per-provider results into a single JSON
 document on stdout. The QML widget calls this once per polling tick.
 
 Usage:
-  codexbar_fetch.py --cli-path PATH --providers codex,claude,zai,opencodego,openrouter,kilo
+  codexbar_fetch.py --cli-path PATH --providers codex,claude,zai,opencodego,openrouter,kilo,typesafe
 
 With --forecast-url it also attaches a `forecast` object describing when the next
 OpenAI usage-limit reset is expected (data from codex-reset.com).
@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -38,6 +39,9 @@ PROVIDER_SOURCE: dict[str, str | None] = {
     "opencodego": "api",
     "openrouter": None,
     "kilo": None,
+    # Balance-only. Linux has no browser cookie import, so the CLI needs
+    # cookieSource=manual + cookieHeader in ~/.codexbar/config.json.
+    "typesafe": None,
 }
 
 # Fallback sources tried in order when the primary source errors (e.g. 429).
@@ -61,19 +65,19 @@ def _result_error(provider: str, code: str, message: str, source: str | None = N
     }
 
 
-# Money as the OpenRouter details rows format it, e.g. "$6.17" or "$1,234.50".
+# Money as the balance details rows format it, e.g. "$6.17" or "$1,234.50".
 _OR_MONEY_RE = re.compile(r"^\s*\$?([\d,]+(?:\.\d+)?)\s*$")
 # Identity line the CLI builds when it has a credit balance, e.g. "Balance: $6.17".
 _OR_BALANCE_RE = re.compile(r"^\s*Balance:\s*\$?([\d,]+(?:\.\d+)?)\s*$")
 
 
-def _openrouter_balance_text(usage: dict) -> str | None:
-    """Remaining OpenRouter credit as "$6.17 left".
+def _balance_text(usage: dict) -> str | None:
+    """Remaining credit of a balance-only provider as "$6.17 left".
 
-    CLI 0.56.3 stopped emitting `openRouterUsage`, so the remaining credit is
-    only in the "Credits" / "Remaining" details row, with the identity line
-    ("Balance: $6.17") as the last resort. Neither carries a numeric field.
-    Returns None when no amount parses.
+    OpenRouter: CLI 0.56.3 stopped emitting `openRouterUsage`, so the remaining
+    credit is only in the "Credits" / "Remaining" details row, with the identity
+    line ("Balance: $6.17") as the last resort. TypeSafe only has the identity
+    line. Neither carries a numeric field. Returns None when no amount parses.
     """
     details = usage.get("details")
     for section in details if isinstance(details, list) else []:
@@ -163,7 +167,11 @@ def _normalize_record(provider: str, record: dict) -> dict:
                     "resetDescription": f"${monthly:.2f} / ${key_limit:.0f}",
                 }
         if primary is None:
-            balance_text = _openrouter_balance_text(usage)
+            balance_text = _balance_text(usage)
+    elif provider == "typesafe":
+        # Spend and credit balance only; the CLI emits no rate window.
+        primary = None
+        balance_text = _balance_text(usage)
     elif provider == "kilo" and isinstance(primary, dict):
         # Kilo reports used/total credits. With auto-topup off this is a
         # balance, not a recurring window, so show the amount in the header.
@@ -299,6 +307,10 @@ FORECAST_MAX_BODY_BYTES = 256 * 1024
 FORECAST_CACHE_TTL = 900.0
 FORECAST_CACHE_PATH = "~/.codexbar/forecast_cache.json"
 FORECAST_MAX_MEDIAN_DAYS = 365.0
+# Same origin as the forecast. Open Codex incidents precede compensation
+# resets, so the status feed rides along with the forecast fetch.
+FORECAST_STATUS_PATH = "/api/status-history"
+FORECAST_STATUS_TIMEOUT = 4.0
 
 
 def _as_float(value) -> float | None:
@@ -440,6 +452,30 @@ def _normalize_forecast(data: dict) -> dict:
         ):
             alert_summary = summary.strip()
     teased = data.get("teased_window")
+    signal = _forecast_signal(data, last_reset)
+    hint = None
+    raw_hint = data.get("latest_hint")
+    if isinstance(raw_hint, dict):
+        hint_at = _parse_iso(raw_hint.get("at"))
+        quote = raw_hint.get("quote")
+        if hint_at is not None and hint_at > last_reset and isinstance(quote, str) and quote.strip():
+            hint = {
+                "at": hint_at.isoformat(),
+                "quote": quote.strip(),
+                "url": str(raw_hint.get("url") or "") or None,
+            }
+    wait = None
+    raw_wait = _obj("wait_comparison")
+    wait_days = _as_float(raw_wait.get("wait_days"))
+    if wait_days is not None and wait_days >= 0:
+        share = _as_float(raw_wait.get("shorter_share"))
+        wait = {
+            "days": wait_days,
+            "shorterShare": share if share is not None and 0 <= share <= 1 else None,
+            "sample": _as_float(raw_wait.get("sample")),
+            "medianDays": _as_float(raw_wait.get("median_days")),
+            "longestDays": _as_float(raw_wait.get("longest_days")),
+        }
     return {
         "ok": True,
         "stale": False,
@@ -452,6 +488,10 @@ def _normalize_forecast(data: dict) -> dict:
         "windowStartHour": window_start_hour,
         "windowEndHour": window_end_hour,
         "teasedWindow": teased if isinstance(teased, str) and teased.strip() else None,
+        "signal": signal,
+        "hint": hint,
+        "wait": wait,
+        "incident": None,
         "prob24h": _percent("rounded_24h", "raw_24h"),
         "prob48h": _percent("rounded_48h", "raw_48h"),
         "confidence": str(data.get("confidence") or ""),
@@ -460,6 +500,48 @@ def _normalize_forecast(data: dict) -> dict:
         "medianDays": median_days,
         "error": None,
     }
+
+
+def _forecast_signal(data: dict, last_reset: _dt.datetime) -> dict | None:
+    """An announced reset (e.g. a dated commitment on X) that postdates the last
+    recorded reset. `official_signal` is the scored announcement; `latest_alert`
+    carries the same window when the site has only an alert. None when the site
+    is in plain model mode or the announcement predates the recorded reset.
+    """
+    for key, at_key in (("official_signal", "at"), ("latest_alert", "source_at")):
+        raw = data.get(key)
+        if not isinstance(raw, dict):
+            continue
+        at = _parse_iso(raw.get(at_key))
+        if at is None or at <= last_reset:
+            continue
+        window = raw.get("window")
+        window = window if isinstance(window, dict) else {}
+        score = raw.get("score")
+        percent = None
+        if isinstance(score, dict):
+            percent = _as_float(score.get("value"))
+        elif score is not None:
+            percent = _as_float(score)
+        if percent is None:
+            probs = data.get("probabilities")
+            if isinstance(probs, dict):
+                percent = _as_float(probs.get("signal_percent"))
+        if percent is not None and not 0 <= percent <= 100:
+            percent = None
+        deadline = _parse_iso(window.get("target_at")) or _parse_iso(window.get("end_at"))
+        label = window.get("label")
+        summary = raw.get("summary")
+        return {
+            "percent": percent,
+            "band": str(raw.get("signal_type") or data.get("signal_tier") or ""),
+            "windowLabel": label.strip() if isinstance(label, str) and label.strip() else None,
+            "deadlineAt": deadline.isoformat() if deadline is not None else None,
+            "summary": summary.strip() if isinstance(summary, str) and summary.strip() else None,
+            "url": str(raw.get("url") or "") or None,
+            "at": at.isoformat(),
+        }
+    return None
 
 
 def _forecast_worker() -> int:
@@ -521,6 +603,49 @@ def _forecast_failure(exc: Exception) -> dict:
     }
 
 
+def _normalize_incident(data: dict) -> dict | None:
+    """Open Codex incident from codex-reset.com's status feed, else None."""
+    current = data.get("current")
+    if not isinstance(current, dict):
+        return None
+    active = current.get("active_incident")
+    codex_status = str(current.get("codex") or "")
+    open_incident = (
+        isinstance(active, dict)
+        or current.get("degraded") is True
+        or (codex_status != "" and codex_status != "operational")
+    )
+    if not open_incident:
+        return None
+    surfaces = current.get("surfaces")
+    degraded = [
+        str(surface.get("label") or surface.get("id") or "")
+        for surface in (surfaces if isinstance(surfaces, list) else [])
+        if isinstance(surface, dict) and surface.get("status") not in (None, "operational")
+    ]
+    name = active.get("name") if isinstance(active, dict) else None
+    return {
+        "open": True,
+        "name": name.strip() if isinstance(name, str) and name.strip() else None,
+        "codexStatus": codex_status or None,
+        "surfaces": [label for label in degraded if label],
+    }
+
+
+def _fetch_incident(forecast_url: str, timeout: float) -> dict | None:
+    """Status feed is best effort: any failure just means no incident line."""
+    try:
+        parts = urllib.parse.urlsplit(forecast_url)
+        url = urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, FORECAST_STATUS_PATH, "", "")
+        )
+        body = _read_forecast_body(url, timeout).decode("utf-8", "replace").strip()
+        data = json.loads(body) if body else None
+        return _normalize_incident(data) if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 - the endpoint cannot break usage
+        return None
+
+
 def _fetch_forecast(url: str, timeout: float) -> dict:
     """Fetch and normalize the reset forecast without raising."""
     try:
@@ -536,6 +661,7 @@ def _fetch_forecast(url: str, timeout: float) -> dict:
         payload = _normalize_forecast(data)
     except Exception as exc:  # noqa: BLE001 - the endpoint cannot break usage
         return _forecast_failure(exc)
+    payload["incident"] = _fetch_incident(url, min(timeout, FORECAST_STATUS_TIMEOUT))
     _forecast_cache_write(payload)
     return payload
 
@@ -552,7 +678,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--cli-path", required=True)
     parser.add_argument(
         "--providers",
-        default="codex,claude,zai,opencodego,openrouter,kilo",
+        default="codex,claude,zai,opencodego,openrouter,kilo,typesafe",
         help="Comma-separated provider ids to query.",
     )
     parser.add_argument("--timeout", type=_positive_timeout, default=30.0)
