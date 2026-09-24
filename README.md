@@ -42,10 +42,15 @@ provider is enabled, each request runs a new command rather than replaying a
 cached source; a call that lands while a fetch is already in flight is
 skipped. On the Agents tab, `r` types into the filter instead of refreshing.
 
-**Codex saved resets.** Each Codex account's weekly (7d) row appends its
+**Saved resets.** Each Codex account's and Claude's weekly (7d) row appends its
 usable reset credits to the reset line, e.g. `· 2 saved resets · soonest
-expires in 16d 8h (2026-10-04)`. Only credits with status `available` count;
-the expiry shown is the earliest one. Accounts without credits show nothing.
+expires in 16d 8h (2026-10-04)`. The expiry shown is the earliest one;
+accounts without credits show nothing. Codex counts credits with status
+`available`. Claude counts `resets_left` of unpaused grants inside their
+validity window, read from the `cedar_ember` block of Anthropic's
+`/api/oauth/usage` with the token in `~/.claude/.credentials.json` (the
+CodexBar CLI drops that block). An expired token or failed request just hides
+the suffix.
 
 **Codex reset forecast.** Below the last Codex account, the usage tab shows an
 auxiliary forecast

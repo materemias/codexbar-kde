@@ -162,6 +162,28 @@ class ResetCreditTests(unittest.TestCase):
         record = fetch._normalize_record("codex", {"usage": {"primary": {"usedPercent": 1}}})
         self.assertIsNone(record["resetCredits"])
 
+    def test_claude_counts_only_active_unpaused_grants(self) -> None:
+        now = dt.datetime(2026, 9, 23, tzinfo=dt.timezone.utc)
+        credits = fetch._claude_reset_credits({"eligible": True, "grants": [
+            {"resets_left": 2, "starts_at": "2026-09-22T16:00:00+00:00",
+             "ends_at": "2026-10-22T16:00:00+00:00"},
+            {"resets_left": 1, "ends_at": "2026-10-01T00:00:00+00:00"},
+            {"resets_left": 1, "paused": True, "ends_at": "2026-09-24T00:00:00+00:00"},
+            {"resets_left": 1, "starts_at": "2026-09-30T00:00:00+00:00"},
+            {"resets_left": 1, "ends_at": "2026-09-22T00:00:00+00:00"},
+            {"resets_left": 0, "ends_at": "2026-09-25T00:00:00+00:00"},
+        ]}, now)
+        self.assertEqual(credits, {
+            "count": 3,
+            "soonestExpiresAt": "2026-10-01T00:00:00+00:00",
+        })
+
+    def test_claude_ineligible_status_yields_none(self) -> None:
+        now = dt.datetime(2026, 9, 23, tzinfo=dt.timezone.utc)
+        self.assertIsNone(fetch._claude_reset_credits(
+            {"eligible": False, "ineligible_reason": "surface", "grants": []}, now
+        ))
+
 
 class ForecastTests(unittest.TestCase):
     def test_eta_uses_cadence_and_future_window_start(self) -> None:
@@ -269,7 +291,7 @@ class ForecastTests(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch.object(fetch, "_forecast_cache_read", return_value=None),
-            mock.patch.object(fetch, "_read_forecast_body", return_value=body),
+            mock.patch.object(fetch, "_read_http_body", return_value=body),
             mock.patch("sys.stdout", output),
         ):
             exit_code = fetch.main(
@@ -303,7 +325,7 @@ class ForecastTests(unittest.TestCase):
                 with mock.patch.object(fetch, "FORECAST_CACHE_TTL", -1):
                     with mock.patch.object(
                         fetch,
-                        "_read_forecast_body",
+                        "_read_http_body",
                         side_effect=OSError("offline"),
                     ):
                         result = fetch._fetch_forecast("http://127.0.0.1:9", 1)
@@ -328,7 +350,7 @@ class ForecastTests(unittest.TestCase):
                 with mock.patch.object(fetch, "FORECAST_CACHE_TTL", -1):
                     with mock.patch.object(
                         fetch,
-                        "_read_forecast_body",
+                        "_read_http_body",
                         side_effect=OSError("offline"),
                     ):
                         result = fetch._fetch_forecast("http://127.0.0.1:9", 1)

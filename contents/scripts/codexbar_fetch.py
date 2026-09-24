@@ -122,6 +122,73 @@ def _reset_credits(usage: dict) -> dict | None:
     }
 
 
+# Claude "saved resets" ship in the `cedar_ember` block of Anthropic's OAuth
+# usage endpoint. The CodexBar CLI (0.64.1) drops the block, so it is read
+# directly. The server only answers for Claude Code's client identity; any
+# other User-Agent gets `ineligible_reason: "surface"` and no grants.
+CLAUDE_CREDENTIALS_PATH = "~/.claude/.credentials.json"
+CLAUDE_RESET_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
+CLAUDE_RESET_USER_AGENT = "claude-cli/2.1.280 (external, cli)"
+CLAUDE_RESET_TIMEOUT = 8.0
+
+
+def _claude_reset_credits(status, now: _dt.datetime) -> dict | None:
+    """Usable Claude reset grants in the Codex `resetCredits` shape.
+
+    Counts `resets_left` of every grant that is not paused and whose
+    `starts_at`..`ends_at` window contains now. None when ineligible.
+    """
+    if not isinstance(status, dict) or status.get("eligible") is not True:
+        return None
+    grants = status.get("grants")
+    soonest: _dt.datetime | None = None
+    count = 0
+    for grant in grants if isinstance(grants, list) else []:
+        if not isinstance(grant, dict) or grant.get("paused") is True:
+            continue
+        left = grant.get("resets_left")
+        if isinstance(left, bool) or not isinstance(left, int) or left < 1:
+            continue
+        starts = _parse_iso(grant.get("starts_at"))
+        ends = _parse_iso(grant.get("ends_at"))
+        if (starts is not None and starts > now) or (ends is not None and ends <= now):
+            continue
+        count += left
+        if ends is not None and (soonest is None or ends < soonest):
+            soonest = ends
+    return {
+        "count": count,
+        "soonestExpiresAt": soonest.isoformat() if soonest else None,
+    }
+
+
+def _fetch_claude_reset_credits(timeout: float) -> dict | None:
+    """Best effort: missing or expired credentials, or any failure, yield None."""
+    try:
+        with open(_expand(CLAUDE_CREDENTIALS_PATH), encoding="utf-8") as fh:
+            oauth = json.load(fh).get("claudeAiOauth") or {}
+        token = oauth.get("accessToken")
+        expires_ms = _as_float(oauth.get("expiresAt"))
+        if not isinstance(token, str) or not token:
+            return None
+        if expires_ms is not None and expires_ms <= time.time() * 1000:
+            return None
+        body = _read_http_body(CLAUDE_RESET_URL, timeout, {
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": CLAUDE_RESET_USER_AGENT,
+        })
+        data = json.loads(body.decode("utf-8", "replace"))
+        if not isinstance(data, dict):
+            return None
+        return _claude_reset_credits(
+            data.get("cedar_ember"), _dt.datetime.now(_dt.timezone.utc)
+        )
+    except Exception:  # noqa: BLE001 - the endpoint cannot break usage
+        return None
+
+
+
 def _normalize_record(provider: str, record: dict) -> dict:
     raw_usage = record.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -264,12 +331,17 @@ def _run_cli(cli: str, provider: str, source: str | None, timeout: float) -> lis
 def _fetch_provider(cli: str, provider: str, timeout: float) -> list[dict]:
     primary_source = PROVIDER_SOURCE.get(provider)
     results = _run_cli(cli, provider, primary_source, timeout)
-    if any(result.get("ok") for result in results):
-        return results
-    for fallback in PROVIDER_FALLBACK_SOURCES.get(provider, []):
-        retries = _run_cli(cli, provider, fallback, timeout)
-        if any(retry.get("ok") for retry in retries):
-            return retries
+    if not any(result.get("ok") for result in results):
+        for fallback in PROVIDER_FALLBACK_SOURCES.get(provider, []):
+            retries = _run_cli(cli, provider, fallback, timeout)
+            if any(retry.get("ok") for retry in retries):
+                results = retries
+                break
+    if provider == "claude" and any(result.get("ok") for result in results):
+        credits = _fetch_claude_reset_credits(CLAUDE_RESET_TIMEOUT)
+        for result in results:
+            if result.get("ok"):
+                result["resetCredits"] = credits
     return results
 
 
@@ -437,8 +509,18 @@ def _normalize_forecast(data: dict) -> dict:
     eta = _forecast_eta(
         last_reset, median_days, window_start_hour, window_end_hour, now
     )
-    # The latest alert only explains the *next* reset when it postdates the last
-    # one; otherwise it is just the announcement of the reset already recorded.
+    # Announcements outlive the reset they promise when it is delivered as a
+    # banked reset, which never moves `last_reset_at`. Once one lapses, its
+    # post also settles every earlier alert and hint.
+    cutoff = last_reset
+    for key, at_key in (("official_signal", "at"), ("latest_alert", "source_at")):
+        raw = data.get(key)
+        if isinstance(raw, dict) and _announcement_lapsed(raw, now):
+            at = _parse_iso(raw.get(at_key))
+            if at is not None and at > cutoff:
+                cutoff = at
+    # The latest alert only explains the *next* reset when it postdates the
+    # cutoff; otherwise it announced a reset already recorded or settled.
     alert = data.get("latest_alert")
     alert_summary = None
     if isinstance(alert, dict):
@@ -446,19 +528,19 @@ def _normalize_forecast(data: dict) -> dict:
         summary = alert.get("summary")
         if (
             alert_at is not None
-            and alert_at > last_reset
+            and alert_at > cutoff
             and isinstance(summary, str)
             and summary.strip()
         ):
             alert_summary = summary.strip()
     teased = data.get("teased_window")
-    signal = _forecast_signal(data, last_reset)
+    signal = _forecast_signal(data, cutoff, now)
     hint = None
     raw_hint = data.get("latest_hint")
     if isinstance(raw_hint, dict):
         hint_at = _parse_iso(raw_hint.get("at"))
         quote = raw_hint.get("quote")
-        if hint_at is not None and hint_at > last_reset and isinstance(quote, str) and quote.strip():
+        if hint_at is not None and hint_at > cutoff and isinstance(quote, str) and quote.strip():
             hint = {
                 "at": hint_at.isoformat(),
                 "quote": quote.strip(),
@@ -502,21 +584,34 @@ def _normalize_forecast(data: dict) -> dict:
     }
 
 
-def _forecast_signal(data: dict, last_reset: _dt.datetime) -> dict | None:
-    """An announced reset (e.g. a dated commitment on X) that postdates the last
-    recorded reset. `official_signal` is the scored announcement; `latest_alert`
-    carries the same window when the site has only an alert. None when the site
-    is in plain model mode or the announcement predates the recorded reset.
+def _announcement_window(raw: dict) -> tuple[dict, _dt.datetime | None]:
+    window = raw.get("window")
+    window = window if isinstance(window, dict) else {}
+    deadline = _parse_iso(window.get("target_at")) or _parse_iso(window.get("end_at"))
+    return window, deadline
+
+
+def _announcement_lapsed(raw: dict, now: _dt.datetime) -> bool:
+    _, deadline = _announcement_window(raw)
+    return raw.get("state") == "expired" or (deadline is not None and deadline <= now)
+
+
+def _forecast_signal(
+    data: dict, cutoff: _dt.datetime, now: _dt.datetime
+) -> dict | None:
+    """An announced reset (e.g. a dated commitment on X) that postdates the
+    cutoff and whose window is still open. `official_signal` is the scored
+    announcement; `latest_alert` carries the same window when the site has
+    only an alert. None in plain model mode or once the announcement lapsed.
     """
     for key, at_key in (("official_signal", "at"), ("latest_alert", "source_at")):
         raw = data.get(key)
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or _announcement_lapsed(raw, now):
             continue
         at = _parse_iso(raw.get(at_key))
-        if at is None or at <= last_reset:
+        if at is None or at <= cutoff:
             continue
-        window = raw.get("window")
-        window = window if isinstance(window, dict) else {}
+        window, deadline = _announcement_window(raw)
         score = raw.get("score")
         percent = None
         if isinstance(score, dict):
@@ -529,7 +624,6 @@ def _forecast_signal(data: dict, last_reset: _dt.datetime) -> dict | None:
                 percent = _as_float(probs.get("signal_percent"))
         if percent is not None and not 0 <= percent <= 100:
             percent = None
-        deadline = _parse_iso(window.get("target_at")) or _parse_iso(window.get("end_at"))
         label = window.get("label")
         summary = raw.get("summary")
         return {
@@ -544,41 +638,43 @@ def _forecast_signal(data: dict, last_reset: _dt.datetime) -> dict | None:
     return None
 
 
-def _forecast_worker() -> int:
+def _http_worker() -> int:
     """Private HTTP worker: request on stdin, bounded body on stdout."""
     try:
         request_data = json.load(sys.stdin)
-        request = urllib.request.Request(
-            request_data["url"],
-            headers={"User-Agent": "codexbar-kde", "Accept": "application/json"},
-        )
+        headers = {"User-Agent": "codexbar-kde", "Accept": "application/json"}
+        headers.update(request_data.get("headers") or {})
+        request = urllib.request.Request(request_data["url"], headers=headers)
         with urllib.request.urlopen(
             request, timeout=request_data["timeout"]
         ) as response:
             body = response.read(FORECAST_MAX_BODY_BYTES + 1)
         if len(body) > FORECAST_MAX_BODY_BYTES:
-            sys.stdout.write("forecast response exceeds the body size limit")
+            sys.stdout.write("response exceeds the body size limit")
             return 1
         sys.stdout.buffer.write(body)
         return 0
     except Exception:  # noqa: BLE001 - never echo URLs or credentials
-        sys.stdout.write("forecast request failed")
+        sys.stdout.write("request failed")
         return 1
 
 
-def _read_forecast_body(url: str, timeout: float) -> bytes:
+def _read_http_body(url: str, timeout: float, headers: dict | None = None) -> bytes:
     # Socket timeouts cannot stop a slow-drip response or bound DNS lookup.
     # Exec a disposable worker, including startup in its wall-clock budget.
+    # Headers travel over stdin so credentials never reach argv.
     deadline = time.monotonic() + timeout
     with subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__), "--forecast-worker"],
+        [sys.executable, os.path.abspath(__file__), "--http-worker"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     ) as proc:
         try:
             body, _ = proc.communicate(
-                json.dumps({"url": url, "timeout": timeout}).encode("utf-8"),
+                json.dumps(
+                    {"url": url, "timeout": timeout, "headers": headers or {}}
+                ).encode("utf-8"),
                 timeout=max(0.0, deadline - time.monotonic()),
             )
         except BaseException:
@@ -586,7 +682,7 @@ def _read_forecast_body(url: str, timeout: float) -> bytes:
             proc.communicate()
             raise
     if proc.returncode != 0:
-        raise ValueError(body.decode("utf-8", "replace") or "forecast worker failed")
+        raise ValueError(body.decode("utf-8", "replace") or "http worker failed")
     return body
 
 
@@ -639,7 +735,7 @@ def _fetch_incident(forecast_url: str, timeout: float) -> dict | None:
         url = urllib.parse.urlunsplit(
             (parts.scheme, parts.netloc, FORECAST_STATUS_PATH, "", "")
         )
-        body = _read_forecast_body(url, timeout).decode("utf-8", "replace").strip()
+        body = _read_http_body(url, timeout).decode("utf-8", "replace").strip()
         data = json.loads(body) if body else None
         return _normalize_incident(data) if isinstance(data, dict) else None
     except Exception:  # noqa: BLE001 - the endpoint cannot break usage
@@ -652,7 +748,7 @@ def _fetch_forecast(url: str, timeout: float) -> dict:
         fresh = _forecast_cache_read(FORECAST_CACHE_TTL)
         if fresh is not None:
             return fresh
-        body = _read_forecast_body(url, timeout).decode("utf-8", "replace").strip()
+        body = _read_http_body(url, timeout).decode("utf-8", "replace").strip()
         if not body:
             raise ValueError("empty response body")
         data = json.loads(body)
@@ -749,6 +845,6 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--forecast-worker"]:
-        sys.exit(_forecast_worker())
+    if sys.argv[1:] == ["--http-worker"]:
+        sys.exit(_http_worker())
     sys.exit(main(sys.argv[1:]))
