@@ -90,6 +90,14 @@ ColumnLayout {
         }
 
         PC3.Label {
+            text: section.record.error ? "" : root.accountAvailabilityIndicator(section.record)
+            visible: text.length > 0
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            verticalAlignment: Text.AlignVCenter
+            Layout.alignment: Qt.AlignVCenter
+        }
+
+        PC3.Label {
             visible: text.length > 0
             opacity: 0.55
             font.pixelSize: Kirigami.Theme.smallFont.pixelSize

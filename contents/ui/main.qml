@@ -144,7 +144,7 @@ PlasmoidItem {
             if (!allowedSlots) continue
             var name = labels[rec.id] || rec.id
             if (rec.id === "codex" && rec.accountEmail) {
-                var account = String(rec.accountEmail)
+                var account = root.accountDisplayName(rec)
                     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
                 name += " · " + account
             }
@@ -746,6 +746,22 @@ PlasmoidItem {
         if (mins === 10080) return "7d"
         if (mins === 43200) return "Monthly"
         return slot
+    }
+
+    function accountAvailabilityIndicator(rec) {
+        var email = rec.accountEmail || ""
+        if (rec.id !== "codex" || !email) return ""
+        var rotation = root.snapshot.codexRotation
+        var availability = rotation && rotation.accountAvailability
+            ? rotation.accountAvailability[email] : ""
+        if (availability === "open") return "🟢"
+        if (availability === "blocked") return "🔒"
+        return ""
+    }
+
+    function accountDisplayName(rec) {
+        var indicator = accountAvailabilityIndicator(rec)
+        return (indicator ? indicator + " " : "") + (rec.accountEmail || "")
     }
 
     function providerDisplayName(id) {

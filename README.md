@@ -60,6 +60,14 @@ refreshes, even when the Agents tab is disabled, without changing either file.
 A missing operating mode defaults to `confirm`; missing or unusable rotation
 state hides the status. Invalid or unreadable mode configuration also hides it.
 
+Account emails in the usage header and tray tooltip show 🟢 when open for omp
+or 🔒 when blocked by omp. Header indicators stay at full opacity while account
+text remains dimmed. The widget matches each email exactly to an
+`accounts[].label` in `state.json`. An account is blocked when its numeric
+`credentialId` appears as a key in `owned`, otherwise it is open. These badges
+show availability, not which account is currently handling traffic.
+Unmatched emails or missing, malformed, or ambiguous account data show no badge.
+
 - `FILL`: Pros share traffic, stop at 85%.
 - `TARGET`: One Pro drains to 100%, redeems.
 - `EXPIRY-BURN`: Burn accounts whose resets expire soon.

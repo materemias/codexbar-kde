@@ -243,8 +243,60 @@ class CodexRotationTests(unittest.TestCase):
                 self.assertIsNone(fetch._read_codex_rotation())
                 path.rmdir()
 
+    def test_account_availability_uses_owned_keys_only(self) -> None:
+        state = {
+            "mode": "FILL",
+            "owned": {"16": {"until": "2000-01-01T00:00:00Z"}, "18": None},
+            "accounts": [
+                {"credentialId": 14, "label": "a@example.com"},
+                {"credentialId": 16, "label": "b@example.com", "openReason": "target"},
+                {"credentialId": 18, "label": "c@example.com"},
+            ],
+        }
+        self.write_state(state)
+        self.assertEqual(fetch._read_codex_rotation()["accountAvailability"], {
+            "a@example.com": "open",
+            "b@example.com": "blocked",
+            "c@example.com": "blocked",
+        })
+        state["owned"] = {}
+        self.write_state(state)
+        self.assertEqual(fetch._read_codex_rotation()["accountAvailability"], {
+            "a@example.com": "open",
+            "b@example.com": "open",
+            "c@example.com": "open",
+        })
+
+    def test_unknown_or_malformed_accounts_have_no_availability(self) -> None:
+        account = {"credentialId": 14, "label": "a@example.com"}
+        for fields in (
+            {"accounts": [account]},
+            {"owned": {}, "accounts": None},
+            {"owned": {}, "accounts": {}},
+            {"owned": {}, "accounts": []},
+            *({"owned": owned, "accounts": [account]} for owned in (
+                None, [], ["14"], "14", False, {"not-an-id": {}}, {"014": {}},
+            )),
+            *({"owned": {}, "accounts": accounts} for accounts in (
+                [None],
+                [{"credentialId": 14}],
+                [{"credentialId": 14, "label": ""}],
+                [{"credentialId": 14, "label": 123}],
+                [{"credentialId": "14", "label": "a@example.com"}],
+                [{"credentialId": True, "label": "a@example.com"}],
+                [account, {"credentialId": 16, "label": "a@example.com"}],
+                [account, {"credentialId": 14, "label": "b@example.com"}],
+            )),
+        ):
+            with self.subTest(fields=fields):
+                self.write_state({"mode": "FILL", **fields})
+                rotation = fetch._read_codex_rotation()
+                self.assertEqual(rotation["mode"], "FILL")
+                self.assertNotIn("accountAvailability", rotation)
+
     def test_snapshot_refresh_reads_changes_and_removal(self) -> None:
-        self.write_state({"mode": "FILL"})
+        accounts = [{"credentialId": 14, "label": "a@example.com"}]
+        self.write_state({"mode": "FILL", "owned": {"14": {}}, "accounts": accounts})
 
         def snapshot() -> dict:
             output = io.StringIO()
@@ -261,11 +313,20 @@ class CodexRotationTests(unittest.TestCase):
                 ]), 0)
             return json.loads(output.getvalue())
 
-        self.assertEqual(snapshot()["codexRotation"]["mode"], "FILL")
-        self.write_state({"mode": "BURN", "stalled": True})
+        rotation = snapshot()["codexRotation"]
+        self.assertEqual(rotation["mode"], "FILL")
+        self.assertEqual(rotation["accountAvailability"], {"a@example.com": "blocked"})
+        self.write_state({
+            "mode": "BURN", "stalled": True, "owned": {}, "accounts": accounts,
+        })
         rotation = snapshot()["codexRotation"]
         self.assertEqual(rotation["mode"], "BURN")
         self.assertTrue(rotation["stalled"])
+        self.assertEqual(rotation["accountAvailability"], {"a@example.com": "open"})
+        self.write_state({"mode": "BURN", "owned": [], "accounts": accounts})
+        self.assertNotIn("accountAvailability", snapshot()["codexRotation"])
+        self.write_state({"mode": "BURN"})
+        self.assertNotIn("accountAvailability", snapshot()["codexRotation"])
         (self.directory / "state.json").unlink()
         result = snapshot()
         self.assertIsNone(result["codexRotation"])

@@ -65,6 +65,37 @@ def _expand(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
+def _codex_rotation_accounts(state: dict) -> dict:
+    """Match unambiguous account labels to omp's owned-key block list."""
+    owned = state.get("owned")
+    accounts = state.get("accounts")
+    if (
+        not isinstance(owned, dict)
+        or any(not re.fullmatch(r"0|[1-9][0-9]*", key) for key in owned)
+        or not isinstance(accounts, list)
+    ):
+        return {}
+    availability = {}
+    credential_ids = set()
+    for account in accounts:
+        if not isinstance(account, dict):
+            return {}
+        credential_id = account.get("credentialId")
+        label = account.get("label")
+        if (
+            type(credential_id) is not int
+            or credential_id < 0
+            or not isinstance(label, str)
+            or not label.strip()
+            or label in availability
+            or credential_id in credential_ids
+        ):
+            return {}
+        credential_ids.add(credential_id)
+        availability[label] = "blocked" if str(credential_id) in owned else "open"
+    return availability
+
+
 def _read_codex_rotation() -> dict | None:
     """Read omp's rotation status without changing its state or mode."""
     directory = _expand("~/.omp/agent/codex-rotation")
@@ -93,12 +124,16 @@ def _read_codex_rotation() -> dict | None:
             return None
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    return {
+    result = {
         "mode": mode,
         "description": CODEX_ROTATION_DESCRIPTIONS[mode],
         "operatingMode": operating_mode,
         "stalled": stalled,
     }
+    accounts = _codex_rotation_accounts(state)
+    if accounts:
+        result["accountAvailability"] = accounts
+    return result
 
 
 def _result_error(provider: str, code: str, message: str, source: str | None = None) -> dict:
