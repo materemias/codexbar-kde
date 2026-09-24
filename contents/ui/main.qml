@@ -35,6 +35,7 @@ PlasmoidItem {
         providers: [],
         fatal: null,
         forecast: null,
+        codexRotation: null,
         cliVersion: null
     })
     property var agentSnapshot: ({
@@ -443,6 +444,7 @@ PlasmoidItem {
                 providers: [],
                 fatal: null,
                 forecast: null,
+                codexRotation: null,
                 cliVersion: null
             }
             return
@@ -648,6 +650,15 @@ PlasmoidItem {
                 + ": \u201c" + forecast.hint.quote.trim() + "\u201d"
         }
         return ""
+    }
+
+    function firstCodexIndex() {
+        var records = root.snapshot && Array.isArray(root.snapshot.providers)
+            ? root.snapshot.providers : []
+        for (var i = 0; i < records.length; i++) {
+            if (records[i] && records[i].id === "codex") return i
+        }
+        return -1
     }
 
     function lastCodexIndex() {

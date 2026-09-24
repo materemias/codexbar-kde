@@ -143,6 +143,138 @@ class ProviderFailureTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 2)
 
 
+class CodexRotationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        home = mock.patch.dict(fetch.os.environ, {"HOME": directory.name})
+        home.start()
+        self.addCleanup(home.stop)
+        self.directory = Path(directory.name) / ".omp" / "agent" / "codex-rotation"
+
+    def write_state(self, state: object) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        (self.directory / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    def test_missing_directory_or_state_hides_rotation(self) -> None:
+        self.assertIsNone(fetch._read_codex_rotation())
+        self.directory.mkdir(parents=True)
+        (self.directory / "mode.json").write_text('{"operatingMode":"auto"}', encoding="utf-8")
+        self.assertIsNone(fetch._read_codex_rotation())
+
+    def test_all_rules_with_missing_mode_default_to_confirm(self) -> None:
+        rules = {
+            "FILL": "Pros share traffic, stop at 85%.",
+            "TARGET": "One Pro drains to 100%, redeems.",
+            "EXPIRY-BURN": "Burn accounts whose resets expire soon.",
+            "BURN": "Global reset announced; Pros stop 95%.",
+            "NO-BANK": "No banked resets; Pros stop 95%.",
+            "IDLE": "No Pro accounts logged in.",
+        }
+        for mode, description in rules.items():
+            with self.subTest(mode=mode):
+                self.write_state({"mode": mode})
+                self.assertEqual(fetch._read_codex_rotation(), {
+                    "mode": mode,
+                    "description": description,
+                    "operatingMode": "confirm",
+                    "stalled": False,
+                })
+
+    def test_operating_modes_and_stalled_are_read_without_writes(self) -> None:
+        for operating_mode in ("auto", "confirm"):
+            for stalled in (False, True):
+                with self.subTest(operating_mode=operating_mode, stalled=stalled):
+                    self.write_state({"mode": "TARGET", "stalled": stalled})
+                    mode_file = self.directory / "mode.json"
+                    mode_file.write_text(
+                        json.dumps({"operatingMode": operating_mode}), encoding="utf-8"
+                    )
+                    state_bytes = (self.directory / "state.json").read_bytes()
+                    mode_bytes = mode_file.read_bytes()
+                    rotation = fetch._read_codex_rotation()
+                    self.assertEqual(rotation["operatingMode"], operating_mode)
+                    self.assertEqual(rotation["stalled"], stalled)
+                    self.assertEqual((self.directory / "state.json").read_bytes(), state_bytes)
+                    self.assertEqual(mode_file.read_bytes(), mode_bytes)
+
+    def test_missing_operating_mode_field_defaults_to_confirm(self) -> None:
+        self.write_state({"mode": "FILL"})
+        (self.directory / "mode.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(fetch._read_codex_rotation()["operatingMode"], "confirm")
+
+    def test_invalid_state_hides_rotation_instead_of_inventing_idle(self) -> None:
+        for state in (
+            None, [], "FILL", 1, {}, {"mode": None}, {"mode": []},
+            {"mode": "UNKNOWN"}, {"mode": "fill"},
+            {"mode": "FILL", "stalled": "false"},
+            {"mode": "FILL", "stalled": 1},
+            {"mode": "FILL", "stalled": None},
+        ):
+            with self.subTest(state=state):
+                self.write_state(state)
+                self.assertIsNone(fetch._read_codex_rotation())
+
+    def test_invalid_operating_mode_hides_rotation(self) -> None:
+        self.write_state({"mode": "FILL"})
+        for config in (
+            None, [], "auto", 1, {"operatingMode": None},
+            {"operatingMode": []}, {"operatingMode": True},
+            {"operatingMode": "AUTO"}, {"operatingMode": "unknown"},
+        ):
+            with self.subTest(config=config):
+                (self.directory / "mode.json").write_text(json.dumps(config), encoding="utf-8")
+                self.assertIsNone(fetch._read_codex_rotation())
+
+    def test_corrupt_or_unreadable_files_hide_rotation(self) -> None:
+        for filename in ("state.json", "mode.json"):
+            for contents in (b"{", b"\xff"):
+                with self.subTest(filename=filename, contents=contents):
+                    self.write_state({"mode": "FILL"})
+                    path = self.directory / filename
+                    path.write_bytes(contents)
+                    self.assertIsNone(fetch._read_codex_rotation())
+                    path.unlink()
+            with self.subTest(filename=filename, contents="directory"):
+                self.write_state({"mode": "FILL"})
+                path = self.directory / filename
+                path.unlink(missing_ok=True)
+                path.mkdir()
+                self.assertIsNone(fetch._read_codex_rotation())
+                path.rmdir()
+
+    def test_snapshot_refresh_reads_changes_and_removal(self) -> None:
+        self.write_state({"mode": "FILL"})
+
+        def snapshot() -> dict:
+            output = io.StringIO()
+            with (
+                mock.patch.object(fetch, "_fetch_provider", return_value=[
+                    {"id": "codex", "ok": True, "accountEmail": "a@example.com"},
+                    {"id": "codex", "ok": True, "accountEmail": "b@example.com"},
+                ]),
+                mock.patch.object(fetch, "_cli_version", return_value=None),
+                mock.patch("sys.stdout", output),
+            ):
+                self.assertEqual(fetch.main([
+                    "--cli-path", "/bin/true", "--providers", "codex",
+                ]), 0)
+            return json.loads(output.getvalue())
+
+        self.assertEqual(snapshot()["codexRotation"]["mode"], "FILL")
+        self.write_state({"mode": "BURN", "stalled": True})
+        rotation = snapshot()["codexRotation"]
+        self.assertEqual(rotation["mode"], "BURN")
+        self.assertTrue(rotation["stalled"])
+        (self.directory / "state.json").unlink()
+        result = snapshot()
+        self.assertIsNone(result["codexRotation"])
+        self.assertEqual(
+            [record["accountEmail"] for record in result["providers"]],
+            ["a@example.com", "b@example.com"],
+        )
+
+
 class ResetCreditTests(unittest.TestCase):
     def test_counts_available_credits_and_soonest_expiry(self) -> None:
         record = fetch._normalize_record("codex", {"usage": {

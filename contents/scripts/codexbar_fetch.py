@@ -51,9 +51,54 @@ PROVIDER_FALLBACK_SOURCES: dict[str, list[str]] = {
     "opencodego": ["local"],
 }
 
+CODEX_ROTATION_DESCRIPTIONS = {
+    "FILL": "Pros share traffic, stop at 85%.",
+    "TARGET": "One Pro drains to 100%, redeems.",
+    "EXPIRY-BURN": "Burn accounts whose resets expire soon.",
+    "BURN": "Global reset announced; Pros stop 95%.",
+    "NO-BANK": "No banked resets; Pros stop 95%.",
+    "IDLE": "No Pro accounts logged in.",
+}
+
 
 def _expand(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
+
+
+def _read_codex_rotation() -> dict | None:
+    """Read omp's rotation status without changing its state or mode."""
+    directory = _expand("~/.omp/agent/codex-rotation")
+    try:
+        with open(os.path.join(directory, "state.json"), encoding="utf-8") as stream:
+            state = json.load(stream)
+        if not isinstance(state, dict):
+            return None
+        mode = state.get("mode")
+        stalled = state.get("stalled", False)
+        if (
+            not isinstance(mode, str)
+            or mode not in CODEX_ROTATION_DESCRIPTIONS
+            or not isinstance(stalled, bool)
+        ):
+            return None
+        try:
+            with open(os.path.join(directory, "mode.json"), encoding="utf-8") as stream:
+                config = json.load(stream)
+        except FileNotFoundError:
+            config = {}
+        if not isinstance(config, dict):
+            return None
+        operating_mode = config.get("operatingMode", "confirm")
+        if operating_mode not in ("auto", "confirm"):
+            return None
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return {
+        "mode": mode,
+        "description": CODEX_ROTATION_DESCRIPTIONS[mode],
+        "operatingMode": operating_mode,
+        "stalled": stalled,
+    }
 
 
 def _result_error(provider: str, code: str, message: str, source: str | None = None) -> dict:
@@ -795,6 +840,7 @@ def main(argv: list[str]) -> int:
             },
             "providers": [],
             "forecast": None,
+            "codexRotation": None,
             "cliVersion": None,
         }
         json.dump(out, sys.stdout)
@@ -837,6 +883,7 @@ def main(argv: list[str]) -> int:
         "providers": results,
         "fatal": None,
         "forecast": forecast,
+        "codexRotation": _read_codex_rotation() if "codex" in providers else None,
         "cliVersion": _cli_version(cli),
     }
     json.dump(out, sys.stdout)

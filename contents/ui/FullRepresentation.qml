@@ -188,6 +188,84 @@ Item {
                         required property var modelData
                         required property int index
 
+                        Rectangle {
+                            id: rotationCard
+                            readonly property var rotationState: root.snapshot.codexRotation
+                            readonly property color stateColor: rotationState && rotationState.stalled
+                                ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
+                            Layout.fillWidth: true
+                            Layout.topMargin: Kirigami.Units.smallSpacing / 2
+                            implicitHeight: rotationContent.implicitHeight
+                                + Kirigami.Units.smallSpacing * 2
+                            radius: 5
+                            color: Kirigami.Theme.alternateBackgroundColor
+                            border.width: 1
+                            border.color: Qt.rgba(stateColor.r, stateColor.g, stateColor.b,
+                                rotationState && rotationState.stalled ? 0.6 : 0.3)
+                            visible: parent.modelData.id === "codex"
+                                && parent.index === root.firstCodexIndex()
+                                && !!rotationState
+
+                            ColumnLayout {
+                                id: rotationContent
+                                anchors.fill: parent
+                                anchors.margins: Kirigami.Units.smallSpacing
+                                spacing: 1
+
+                                PC3.Label {
+                                    Layout.fillWidth: true
+                                    text: "omp Codex rotation"
+                                        + (rotationCard.rotationState ? " · " + rotationCard.rotationState.operatingMode : "")
+                                    wrapMode: Text.WordWrap
+                                    font.weight: Font.DemiBold
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Kirigami.Units.smallSpacing
+
+                                    Rectangle {
+                                        Layout.alignment: Qt.AlignTop
+                                        Layout.topMargin: 1
+                                        implicitWidth: rotationModeLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
+                                        implicitHeight: rotationModeLabel.implicitHeight + 2
+                                        radius: height / 2
+                                        color: Qt.rgba(rotationCard.stateColor.r, rotationCard.stateColor.g,
+                                            rotationCard.stateColor.b, 0.18)
+                                        border.width: 1
+                                        border.color: rotationCard.stateColor
+
+                                        PC3.Label {
+                                            id: rotationModeLabel
+                                            anchors.centerIn: parent
+                                            text: rotationCard.rotationState ? rotationCard.rotationState.mode : ""
+                                            color: rotationCard.stateColor
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 2
+                                        }
+                                    }
+
+                                    PC3.Label {
+                                        Layout.fillWidth: true
+                                        text: rotationCard.rotationState ? rotationCard.rotationState.description : ""
+                                        wrapMode: Text.WordWrap
+                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                                        opacity: 0.72
+                                    }
+                                }
+
+                                PC3.Label {
+                                    Layout.fillWidth: true
+                                    visible: !!rotationCard.rotationState && rotationCard.rotationState.stalled
+                                    text: "STALLED (all accounts closed)"
+                                    wrapMode: Text.WordWrap
+                                    color: Kirigami.Theme.negativeTextColor
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                                }
+                            }
+                        }
+
                         ProviderSection {
                             Layout.fillWidth: true
                             record: parent.modelData

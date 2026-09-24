@@ -52,6 +52,21 @@ validity window, read from the `cedar_ember` block of Anthropic's
 CodexBar CLI drops that block). An expired token or failed request just hides
 the suffix.
 
+**omp Codex rotation.** A compact card above the first Codex account matches
+the reset forecast styling, with a rule badge, description, and `auto` or `confirm`
+operating mode. `STALLED` means all accounts are closed. It reads
+`~/.omp/agent/codex-rotation/state.json` and `mode.json` during provider
+refreshes, even when the Agents tab is disabled, without changing either file.
+A missing operating mode defaults to `confirm`; missing or unusable rotation
+state hides the status. Invalid or unreadable mode configuration also hides it.
+
+- `FILL`: Pros share traffic, stop at 85%.
+- `TARGET`: One Pro drains to 100%, redeems.
+- `EXPIRY-BURN`: Burn accounts whose resets expire soon.
+- `BURN`: Global reset announced; Pros stop 95%.
+- `NO-BANK`: No banked resets; Pros stop 95%.
+- `IDLE`: No Pro accounts logged in.
+
 **Codex reset forecast.** Below the last Codex account, the usage tab shows an
 auxiliary forecast
 from [codex-reset.com](https://codex-reset.com). A coloured badge names the
