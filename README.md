@@ -27,6 +27,14 @@ A reset timestamp that is past or outside the declared window is treated as
 broken data and renders without a tick. Balance-only meters (OpenRouter limit,
 Kilo credits, TypeSafe balance) have no time window and never show the tick.
 
+Bar and tray-ring colors follow the same pace. A meter at or under its pace
+tick is green, whatever the absolute percentage. Once usage passes the tick it
+turns yellow, then orange at one third and red at two thirds of the way from
+the tick to 100%. For example, 4 hours into a 5-hour window the tick sits at
+80%: 79% is green, 81% yellow, 87% orange, 94% red. Meters without a pace
+(no reset time, or under 3% elapsed) use fixed thresholds: yellow from 50%,
+orange from 70%, red from 90%.
+
 Countdowns and pace indicators update while the popup or tray tooltip is
 visible, independently of the provider polling interval.
 

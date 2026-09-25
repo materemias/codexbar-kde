@@ -20,7 +20,7 @@ Item {
     readonly property var overPaceOnly: Plasmoid.configuration.trayOverPaceOnly || []
 
     // Provider-grouped indicator records:
-    //   [{ providerId, icon, windows: [{ slot, pct, hasData, ok, projected }] }, ...]
+    //   [{ providerId, icon, windows: [{ slot, pct, pace, hasData, ok, projected }] }, ...]
     // Grouping is in first-appearance order from the configured list, so the
     // user's ordering ("codex:primary, claude:primary, codex:secondary") still
     // produces a clean group-by-provider layout.
@@ -71,7 +71,7 @@ Item {
             group.windowKeys[slot] = true
 
             var records = byId[pid] || []
-            var win = { slot: slot, pct: 0, hasData: false, ok: false, projected: -1 }
+            var win = { slot: slot, pct: 0, pace: -1, hasData: false, ok: false, projected: -1 }
             for (var ri = 0; ri < records.length; ri++) {
                 var rec = records[ri]
                 var recAccount = rec.accountEmail
@@ -82,7 +82,10 @@ Item {
                 var w = windowFor(rec, slot)
                 if (w && w.usedPercent !== undefined && w.usedPercent !== null) {
                     var pct = Math.max(0, Math.min(100, w.usedPercent))
-                    if (!win.hasData || pct > win.pct) win.pct = pct
+                    if (!win.hasData || pct > win.pct) {
+                        win.pct = pct
+                        win.pace = root.pacePercent(w, now)
+                    }
                     win.hasData = true
                     win.projected = Math.max(win.projected, root.projectedPercent(w, now))
                 }
@@ -275,7 +278,7 @@ Item {
                         readonly property real pct: indicatorRoot.modelData.pct
                         readonly property bool active: indicatorRoot.modelData.ok && indicatorRoot.modelData.hasData
                         readonly property color tint: indicatorRoot.active
-                            ? root.colorFor(pct)
+                            ? root.colorFor(pct, indicatorRoot.modelData.pace)
                             : Kirigami.Theme.disabledTextColor
 
                         implicitWidth: ring.visible

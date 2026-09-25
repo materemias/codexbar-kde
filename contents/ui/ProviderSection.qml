@@ -165,7 +165,7 @@ ColumnLayout {
             required property int index
             readonly property var rec: modelData.rec
             readonly property real pct: Math.max(0, Math.min(100, rec.usedPercent || 0))
-            readonly property color tint: root.colorFor(pct)
+            readonly property color tint: root.colorFor(pct, paceSettled ? pacePct : -1)
             readonly property string resetText: root.formatReset(rec, root.nowMs)
             // Codex and Claude "saved reset" credits ride on the weekly row's
             // reset line (they restore the 7d + 5h windows), falling back to

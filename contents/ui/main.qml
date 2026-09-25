@@ -496,8 +496,20 @@ PlasmoidItem {
         root.refresh()
     }
 
-    function colorFor(pct) {
+    // Bar/ring color. With a settled pace (elapsed share of the window, see
+    // pacePercent) usage at or under pace is green; any usage above it leaves
+    // green immediately and walks yellow → orange → red across the headroom
+    // between the pace mark and 100%. Without a pace (no reset data, or the
+    // first 3% of a window) fall back to fixed usage thresholds.
+    function colorFor(pct, pacePct) {
         var p = Math.max(0, Math.min(100, pct || 0))
+        if (pacePct !== undefined && pacePct >= 0) {
+            if (p <= pacePct) return "#22c55e"
+            var t = (p - pacePct) / (100 - pacePct)
+            if (t >= 2 / 3) return "#ef4444"
+            if (t >= 1 / 3) return "#f97316"
+            return "#eab308"
+        }
         if (p >= 90) return "#ef4444"
         if (p >= 70) return "#f97316"
         if (p >= 50) return "#eab308"
@@ -711,17 +723,24 @@ PlasmoidItem {
         return ""
     }
 
-    // Projected usage at reset if the current rate holds, or -1 when the
-    // window cannot be projected: no resetsAt/windowMinutes, a reset that is
-    // past or outside the declared window, or less than 3% elapsed (pure
-    // noise). Same rule as the pace tick in ProviderSection.
-    function projectedPercent(win, now) {
+    // Elapsed share of a usage window (0–100), or -1 when the window has no
+    // usable pace: no resetsAt/windowMinutes, a reset that is past or outside
+    // the declared window, or less than 3% elapsed (pure noise). Same rule as
+    // the pace tick in ProviderSection.
+    function pacePercent(win, now) {
         if (!win || !win.resetsAt || !win.windowMinutes) return -1
         var windowMs = win.windowMinutes * 60000
         var remainingMs = new Date(win.resetsAt).getTime() - now
         if (isNaN(remainingMs) || remainingMs <= 0 || remainingMs > windowMs) return -1
         var pacePct = (1 - remainingMs / windowMs) * 100
-        if (pacePct < 3) return -1
+        return pacePct < 3 ? -1 : pacePct
+    }
+
+    // Projected usage at reset if the current rate holds, or -1 when the
+    // window has no pace (see pacePercent).
+    function projectedPercent(win, now) {
+        var pacePct = pacePercent(win, now)
+        if (pacePct < 0) return -1
         return Math.min(999, (win.usedPercent || 0) * 100 / pacePct)
     }
 
