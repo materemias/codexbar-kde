@@ -25,29 +25,24 @@ ctest --test-dir build --output-on-failure
 kpackagetool6 -t Plasma/Applet -i build/package
 
 # Upgrade after edits; stop Plasma before replacing its loaded native library
-kquitapp6 plasmashell
+systemctl --user stop plasma-plasmashell.service
 kpackagetool6 -t Plasma/Applet -u build/package
-kstart plasmashell
+systemctl --user start plasma-plasmashell.service
 
 # Clean reinstall after deleting packaged files
-kquitapp6 plasmashell
+systemctl --user stop plasma-plasmashell.service
 kpackagetool6 -t Plasma/Applet -r org.codexbar.plasmoid
 kpackagetool6 -t Plasma/Applet -i build/package
-kstart plasmashell
-
-# Reload the real panel from the user's session shell
-kquitapp6 plasmashell && kstart plasmashell
+systemctl --user start plasma-plasmashell.service
 ```
 
-Manual `plasmashell` restarts inherit the locale of the launching shell. Run
-the restart from the user's session shell. For Hungarian 24 hour formatting,
-use:
-
-```sh
-kquitapp6 plasmashell \
-  && env LANG=hu_HU.utf8 LC_ALL=hu_HU.utf8 LC_TIME=hu_HU.utf8 \
-       kstart plasmashell
-```
+Confirm with `systemctl --user is-active plasma-plasmashell.service`.
+`kquitapp6 plasmashell` returns before the process exits, so an immediate
+`systemctl --user start` hits a still-active unit, does nothing, and the panel
+stays down; `kstart plasmashell` from an agent's tool shell also left it down.
+`systemctl --user stop` blocks until the unit is inactive. The unit takes its
+locale from `systemctl --user show-environment`, which carries
+`LC_TIME=hu_HU.UTF-8` for 24 hour formatting.
 
 For changed QML, run `qmllint` on the staged files under `build/package`.
 For changed Python, run `uv run python -m py_compile <files>`. Install the
@@ -88,4 +83,4 @@ credentials" for setup.
 
 - Plasma clamps popup height. Keep usage sections compact.
 - Claude OAuth fetches can take about 16 seconds. Keep the provider helper timeout at least 30 seconds.
-- `plasmashell` runs as a transient service. `systemctl --user restart plasma-plasmashell` does not reload it reliably.
+- `systemctl --user restart plasma-plasmashell` does not reload the applet reliably; use the stop, install, start sequence under Development.

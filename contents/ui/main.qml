@@ -664,15 +664,6 @@ PlasmoidItem {
         return ""
     }
 
-    function firstCodexIndex() {
-        var records = root.snapshot && Array.isArray(root.snapshot.providers)
-            ? root.snapshot.providers : []
-        for (var i = 0; i < records.length; i++) {
-            if (records[i] && records[i].id === "codex") return i
-        }
-        return -1
-    }
-
     function lastCodexIndex() {
         var records = root.snapshot && Array.isArray(root.snapshot.providers)
             ? root.snapshot.providers : []
@@ -686,13 +677,15 @@ PlasmoidItem {
         return when.getFullYear() + "-" + pad2(when.getMonth() + 1) + "-" + pad2(when.getDate())
     }
 
-    // "2 saved resets · soonest expires in 16d 8h (2026-10-04)". Empty when
-    // the account has no usable reset credit.
-    function formatResetCredits(credits, now) {
+    // "2 saved resets · soonest expires in 16d 8h (2026-10-04)", or just
+    // "2 saved resets" when brief. Empty when the account has no usable
+    // reset credit.
+    function formatResetCredits(credits, now, brief) {
         if (!credits || typeof credits !== "object") return ""
         var count = Number(credits.count)
         if (!isFinite(count) || count < 1) return ""
         var text = count + " saved reset" + (count === 1 ? "" : "s")
+        if (brief) return text
         if (typeof credits.soonestExpiresAt === "string") {
             var when = new Date(credits.soonestExpiresAt)
             if (!isNaN(when.getTime())) {
@@ -742,6 +735,103 @@ PlasmoidItem {
         var pacePct = pacePercent(win, now)
         if (pacePct < 0) return -1
         return Math.min(999, (win.usedPercent || 0) * 100 / pacePct)
+    }
+
+    // Codex plan allowance relative to Plus. Pro carries 20× the Plus usage
+    // limits; any other or missing plan counts as one Plus allowance.
+    readonly property var _codexPlanWeight: ({ plus: 1, pro: 20 })
+
+    // Pooled 5h/7d window stats across Codex accounts, recomputed per UI
+    // clock tick. Each account contributes its plan weight in Plus-sized
+    // allowances: the fill is the used share of the combined allowance and
+    // the pace mark is the weighted mean elapsed share, i.e. where even
+    // consumption on every account would sit now. An account whose window
+    // already reset counts as 0% used, 0% elapsed. resetsAt is the soonest
+    // upcoming reset, when allowance returns.
+    function compositeStats(windows, windowMinutes, now) {
+        var windowMs = windowMinutes * 60000
+        var used = 0, elapsed = 0, total = 0, paced = true, soonest = NaN
+        for (var i = 0; i < windows.length; i++) {
+            var w = windows[i]
+            var u = w.usedPercent
+            var remainingMs = w.resetsAt ? new Date(w.resetsAt).getTime() - now : NaN
+            if (isNaN(remainingMs) || remainingMs > windowMs) {
+                paced = false
+            } else if (remainingMs <= 0) {
+                u = 0
+            } else {
+                elapsed += w.weight * (1 - remainingMs / windowMs) * 100
+                if (isNaN(soonest) || remainingMs < soonest) soonest = remainingMs
+            }
+            used += w.weight * u
+            total += w.weight
+        }
+        return {
+            usedPercent: used / total,
+            resetsAt: isNaN(soonest) ? null : new Date(now + soonest).toISOString(),
+            total: total,
+            remaining: (total * 100 - used) / 100,
+            pacePct: paced ? elapsed / total : -1
+        }
+    }
+
+    // The Codex accounts' windows of one length with their plan weights, or
+    // null when fewer than two report it. Clock-independent so the popup
+    // keeps stable row delegates; ProviderSection applies compositeStats on
+    // each tick.
+    function _compositeWindow(records, windowMinutes) {
+        var windows = []
+        var used = 0, total = 0
+        for (var i = 0; i < records.length; i++) {
+            var w = records[i].primary && records[i].primary.windowMinutes === windowMinutes
+                ? records[i].primary
+                : records[i].secondary && records[i].secondary.windowMinutes === windowMinutes
+                    ? records[i].secondary : null
+            if (!w || w.usedPercent === undefined || w.usedPercent === null) continue
+            var weight = root._codexPlanWeight[String(records[i].loginMethod || "").toLowerCase()] || 1
+            var u = Math.max(0, Math.min(100, w.usedPercent))
+            windows.push({ usedPercent: u, resetsAt: w.resetsAt, weight: weight })
+            used += weight * u
+            total += weight
+        }
+        if (windows.length < 2) return null
+        return {
+            usedPercent: used / total,
+            windowMinutes: windowMinutes,
+            compositeWindows: windows
+        }
+    }
+
+    function codexCompositeRecord() {
+        var show5h = Plasmoid.configuration.showComposite5h === true
+        var show7d = Plasmoid.configuration.showComposite7d !== false
+        if (!show5h && !show7d) return null
+        var records = (root.snapshot.providers || []).filter(function(rec) {
+            return rec && rec.id === "codex" && rec.ok
+        })
+        if (records.length < 2) return null
+        var primary = show5h ? _compositeWindow(records, 300) : null
+        var secondary = show7d ? _compositeWindow(records, 10080) : null
+        if (!primary && !secondary) return null
+        return {
+            id: "codex",
+            ok: true,
+            composite: true,
+            accountCount: records.length,
+            primary: primary,
+            secondary: secondary,
+            extraRateWindows: [],
+            error: null
+        }
+    }
+
+    function firstProviderIndex(providerId) {
+        var records = root.snapshot && Array.isArray(root.snapshot.providers)
+            ? root.snapshot.providers : []
+        for (var i = 0; i < records.length; i++) {
+            if (records[i] && records[i].id === providerId) return i
+        }
+        return -1
     }
 
     function windowLabel(providerId, slot, rec, extraTitle) {

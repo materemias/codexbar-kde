@@ -188,99 +188,122 @@ Item {
                         required property var modelData
                         required property int index
 
-                        Rectangle {
-                            id: rotationCard
-                            readonly property var rotationState: root.snapshot.codexRotation
-                            readonly property color stateColor: rotationState && rotationState.stalled
-                                ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
-                            Layout.fillWidth: true
-                            Layout.topMargin: Kirigami.Units.smallSpacing / 2
-                            implicitHeight: rotationContent.implicitHeight
-                                + Kirigami.Units.smallSpacing * 2
-                            radius: 5
-                            color: Kirigami.Theme.alternateBackgroundColor
-                            border.width: 1
-                            border.color: Qt.rgba(stateColor.r, stateColor.g, stateColor.b,
-                                rotationState && rotationState.stalled ? 0.6 : 0.3)
-                            visible: parent.modelData.id === "codex"
-                                && parent.index === root.firstCodexIndex()
-                                && !!rotationState
+                        readonly property var providers: root.snapshot.providers || []
+                        readonly property bool isCodex: modelData.id === "codex"
+                        readonly property bool codexFirst: isCodex
+                            && index === root.firstProviderIndex("codex")
+                        readonly property bool nextIsCodex: isCodex && index + 1 < providers.length
+                            && providers[index + 1] && providers[index + 1].id === "codex"
 
-                            ColumnLayout {
-                                id: rotationContent
-                                anchors.fill: parent
-                                anchors.margins: Kirigami.Units.smallSpacing
-                                spacing: 1
+                        // Codex group header: one provider title for all
+                        // accounts, with the omp rotation mode as a chip whose
+                        // tooltip carries the rule description.
+                        RowLayout {
+                            id: codexHeader
+                            readonly property var rotationState: root.snapshot.codexRotation
+                            readonly property bool stalled: !!rotationState && rotationState.stalled === true
+                            readonly property color stateColor: stalled
+                                ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
+                            visible: parent.codexFirst
+                            Layout.fillWidth: true
+                            Layout.minimumHeight: Kirigami.Units.iconSizes.smallMedium
+                            spacing: Kirigami.Units.smallSpacing
+
+                            Kirigami.Icon {
+                                source: Qt.resolvedUrl("../icons/codex.svg")
+                                implicitWidth: Kirigami.Units.iconSizes.smallMedium
+                                implicitHeight: Kirigami.Units.iconSizes.smallMedium
+                                Layout.alignment: Qt.AlignVCenter
+                                smooth: true
+                            }
+                            PC3.Label {
+                                text: root.providerDisplayName("codex")
+                                font.weight: Font.Bold
+                                font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
+                                font.letterSpacing: 0.4
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                            Item { Layout.fillWidth: true }
+
+                            RowLayout {
+                                visible: !!codexHeader.rotationState
+                                spacing: Kirigami.Units.smallSpacing
+                                Layout.alignment: Qt.AlignVCenter
 
                                 PC3.Label {
-                                    Layout.fillWidth: true
-                                    text: "omp Codex rotation"
-                                        + (rotationCard.rotationState ? " · " + rotationCard.rotationState.operatingMode : "")
-                                    wrapMode: Text.WordWrap
-                                    font.weight: Font.DemiBold
+                                    text: codexHeader.rotationState
+                                        ? "omp · " + codexHeader.rotationState.operatingMode : ""
                                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    opacity: 0.6
                                 }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: Kirigami.Units.smallSpacing
-
-                                    Rectangle {
-                                        Layout.alignment: Qt.AlignTop
-                                        Layout.topMargin: 1
-                                        implicitWidth: rotationModeLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
-                                        implicitHeight: rotationModeLabel.implicitHeight + 2
-                                        radius: height / 2
-                                        color: Qt.rgba(rotationCard.stateColor.r, rotationCard.stateColor.g,
-                                            rotationCard.stateColor.b, 0.18)
-                                        border.width: 1
-                                        border.color: rotationCard.stateColor
-
-                                        PC3.Label {
-                                            id: rotationModeLabel
-                                            anchors.centerIn: parent
-                                            text: rotationCard.rotationState ? rotationCard.rotationState.mode : ""
-                                            color: rotationCard.stateColor
-                                            font.weight: Font.DemiBold
-                                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 2
-                                        }
-                                    }
+                                Rectangle {
+                                    implicitWidth: rotationModeLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
+                                    implicitHeight: rotationModeLabel.implicitHeight + 2
+                                    radius: height / 2
+                                    color: Qt.rgba(codexHeader.stateColor.r, codexHeader.stateColor.g,
+                                        codexHeader.stateColor.b, 0.18)
+                                    border.width: 1
+                                    border.color: codexHeader.stateColor
 
                                     PC3.Label {
-                                        Layout.fillWidth: true
-                                        text: rotationCard.rotationState ? rotationCard.rotationState.description : ""
-                                        wrapMode: Text.WordWrap
-                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
-                                        opacity: 0.72
+                                        id: rotationModeLabel
+                                        anchors.centerIn: parent
+                                        text: codexHeader.stalled ? "STALLED"
+                                            : codexHeader.rotationState ? codexHeader.rotationState.mode : ""
+                                        color: codexHeader.stateColor
+                                        font.weight: Font.DemiBold
+                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 2
                                     }
                                 }
 
-                                PC3.Label {
-                                    Layout.fillWidth: true
-                                    visible: !!rotationCard.rotationState && rotationCard.rotationState.stalled
-                                    text: "STALLED (all accounts closed)"
-                                    wrapMode: Text.WordWrap
-                                    color: Kirigami.Theme.negativeTextColor
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                                HoverHandler { id: rotationHover }
+                                PC3.ToolTip {
+                                    visible: rotationHover.hovered && !!codexHeader.rotationState
+                                    delay: 350
+                                    text: !codexHeader.rotationState ? ""
+                                        : "omp Codex rotation (" + codexHeader.rotationState.mode + "): "
+                                          + codexHeader.rotationState.description
+                                          + (codexHeader.stalled ? "\nSTALLED: all accounts closed" : "")
                                 }
                             }
                         }
 
                         ProviderSection {
+                            id: compositeSection
+                            readonly property var compositeRecord: parent.codexFirst
+                                ? root.codexCompositeRecord() : null
                             Layout.fillWidth: true
-                            record: parent.modelData
-                            forecast: showForecast ? root.snapshot.forecast : null
-                            showForecast: root.codexForecastEnabled
-                                && parent.modelData.id === "codex"
-                                && index === root.lastCodexIndex()
+                            visible: !!compositeRecord
+                            record: compositeRecord || ({})
+                            subheading: true
                         }
 
                         Kirigami.Separator {
                             Layout.fillWidth: true
-                            visible: parent.index < (root.snapshot.providers || []).length - 1
-                            Layout.topMargin: Kirigami.Units.smallSpacing
-                            Layout.bottomMargin: Kirigami.Units.smallSpacing / 2
-                            opacity: 0.4
+                            visible: compositeSection.visible
+                            Layout.topMargin: Kirigami.Units.smallSpacing / 2
+                            opacity: 0.2
+                        }
+
+                        ProviderSection {
+                            Layout.fillWidth: true
+                            record: parent.modelData
+                            subheading: parent.isCodex
+                            forecast: showForecast ? root.snapshot.forecast : null
+                            showForecast: root.codexForecastEnabled
+                                && parent.isCodex
+                                && index === root.lastCodexIndex()
+                        }
+
+                        // Accounts inside the Codex group get a faint divider;
+                        // provider boundaries keep the stronger one.
+                        Kirigami.Separator {
+                            Layout.fillWidth: true
+                            visible: parent.index < parent.providers.length - 1
+                            Layout.topMargin: parent.nextIsCodex
+                                ? Kirigami.Units.smallSpacing / 2 : Kirigami.Units.smallSpacing
+                            Layout.bottomMargin: parent.nextIsCodex ? 0 : Kirigami.Units.smallSpacing / 2
+                            opacity: parent.nextIsCodex ? 0.2 : 0.4
                         }
                     }
                 }

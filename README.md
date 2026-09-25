@@ -35,6 +35,20 @@ the tick to 100%. For example, 4 hours into a 5-hour window the tick sits at
 (no reset time, or under 3% elapsed) use fixed thresholds: yellow from 50%,
 orange from 70%, red from 90%.
 
+With two or more Codex accounts, a **combined** section above the per-account
+sections pools their allowances. Allowances are counted in Plus units: a Plus
+account is one, a Pro account twenty, and any other plan one. The fill is the
+used share of the combined total, and the pace tick is the allowance-weighted
+average elapsed share, so it marks where even use of every account would sit
+now. Accounts close to their reset pull the tick forward, since their leftover
+allowance expires soon. The reset line shows the remaining allowance and when
+the next account resets, e.g. `12.9 of 41 Plus allowances left · next reset
+Sep 26, 11:01 (1d 1h) · proj 124%`. An account that does not report a window
+(Codex Pro has no 5h window) is left out of that combined bar, and a combined
+bar needs at least two contributing accounts. The omp rotation state plays no
+part. Settings → Providers → Codex combined bars toggles the 5h (off by
+default) and 7d (on by default) bars.
+
 Countdowns and pace indicators update while the popup or tray tooltip is
 visible, independently of the provider polling interval.
 
@@ -51,8 +65,9 @@ cached source; a call that lands while a fetch is already in flight is
 skipped. On the Agents tab, `r` types into the filter instead of refreshing.
 
 **Saved resets.** Each Codex account's and Claude's weekly (7d) row appends its
-usable reset credits to the reset line, e.g. `· 2 saved resets · soonest
-expires in 16d 8h (2026-10-04)`. The expiry shown is the earliest one;
+usable reset credits to the reset line. Claude shows e.g. `· 2 saved resets ·
+soonest expires in 16d 8h (2026-10-04)`; Codex rows show only `· 2 saved
+resets`, and hovering the line shows the expiry. The expiry shown is the earliest one;
 accounts without credits show nothing. Codex counts credits with status
 `available`. Claude counts `resets_left` of unpaused grants inside their
 validity window, read from the `cedar_ember` block of Anthropic's
@@ -60,16 +75,20 @@ validity window, read from the `cedar_ember` block of Anthropic's
 CodexBar CLI drops that block). An expired token or failed request just hides
 the suffix.
 
-**omp Codex rotation.** A compact card above the first Codex account matches
-the reset forecast styling, with a rule badge, description, and `auto` or `confirm`
-operating mode. `STALLED` means all accounts are closed. It reads
+**Codex group.** All Codex accounts share one `OPENAI CODEX` header. Below it
+come the combined bars (when enabled), then each account under a small
+sub-heading with its email and plan, separated by faint dividers.
+
+**omp Codex rotation.** The Codex header shows `omp · auto` or `omp · confirm`
+and a rule badge on the right; hovering it shows the rule description. A red
+`STALLED` badge means all accounts are closed. It reads
 `~/.omp/agent/codex-rotation/state.json` and `mode.json` during provider
 refreshes, even when the Agents tab is disabled, without changing either file.
 A missing operating mode defaults to `confirm`; missing or unusable rotation
 state hides the status. Invalid or unreadable mode configuration also hides it.
 
-Account emails in the usage header and tray tooltip show 🟢 when open for omp
-or 🔒 when blocked by omp. Header indicators stay at full opacity while account
+Account emails in the Codex sub-headings and tray tooltip show 🟢 when open for
+omp or 🔒 when blocked by omp. Indicators stay at full opacity while account
 text remains dimmed. The widget matches each email exactly to an
 `accounts[].label` in `state.json`. An account is blocked when its numeric
 `credentialId` appears as a key in `owned`, otherwise it is open. These badges
@@ -85,8 +104,8 @@ Unmatched emails or missing, malformed, or ambiguous account data show no badge.
 
 **Codex reset forecast.** Below the last Codex account, the usage tab shows an
 auxiliary forecast
-from [codex-reset.com](https://codex-reset.com). A coloured badge names the
-state, and the card border takes the same colour:
+from [codex-reset.com](https://codex-reset.com) on one `Forecast` line. A
+coloured badge names the state:
 
 - `ANNOUNCED` (green): a dated commitment or alert newer than the last recorded
   reset, e.g. `end of Tuesday (by Sep 23, 09:00, 23h) · 93% chance`, with the

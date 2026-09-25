@@ -25,6 +25,14 @@
             <label>Show the Codex reset forecast</label>
             <default>true</default>
         </entry>
+        <entry name="showComposite5h" type="Bool">
+            <label>Show a combined 5h bar across all Codex accounts</label>
+            <default>false</default>
+        </entry>
+        <entry name="showComposite7d" type="Bool">
+            <label>Show a combined 7d bar across all Codex accounts</label>
+            <default>true</default>
+        </entry>
         <entry name="enableOpenRouter" type="Bool">
             <default>true</default>
         </entry>

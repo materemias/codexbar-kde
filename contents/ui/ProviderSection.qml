@@ -8,6 +8,10 @@ ColumnLayout {
     property var record: ({})
     property var forecast: null
     property bool showForecast: false
+    // Codex renders as one group under a shared header (FullRepresentation):
+    // each account, and the combined pool, gets a compact sub-heading
+    // instead of the full provider header.
+    property bool subheading: false
     spacing: 4
 
     readonly property string iconSource: record && record.id
@@ -67,6 +71,7 @@ ColumnLayout {
     // Explicit Layout.minimumHeight on the row prevents the section header
     // from collapsing if any inner Label transiently has empty text.
     RowLayout {
+        visible: !section.subheading
         Layout.fillWidth: true
         Layout.minimumHeight: Kirigami.Units.iconSizes.smallMedium
         spacing: Kirigami.Units.smallSpacing
@@ -90,14 +95,6 @@ ColumnLayout {
         }
 
         PC3.Label {
-            text: section.record.error ? "" : root.accountAvailabilityIndicator(section.record)
-            visible: text.length > 0
-            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-            verticalAlignment: Text.AlignVCenter
-            Layout.alignment: Qt.AlignVCenter
-        }
-
-        PC3.Label {
             visible: text.length > 0
             opacity: 0.55
             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
@@ -106,12 +103,6 @@ ColumnLayout {
             text: {
                 var rec = section.record || {}
                 if (rec.error) return ""
-                if (rec.id === "codex") {
-                    var parts = []
-                    if (rec.accountEmail) parts.push(rec.accountEmail)
-                    if (rec.loginMethod) parts.push(rec.loginMethod)
-                    return parts.length > 0 ? "· " + parts.join(" · ") : ""
-                }
                 if (rec.id === "claude" && rec.loginMethod) return "· " + rec.loginMethod
                 if (rec.accountEmail) return "· " + rec.accountEmail
                 return ""
@@ -139,8 +130,39 @@ ColumnLayout {
         }
     }
 
+    // Sub-heading: availability indicator + account + plan, or the pool size.
+    // Indented past the window-label column so the row starts at the same x
+    // as the bars below it.
+    RowLayout {
+        visible: section.subheading
+        Layout.fillWidth: true
+        Layout.leftMargin: section.labelColumnWidth + Kirigami.Units.smallSpacing
+        spacing: Kirigami.Units.smallSpacing
+
+        PC3.Label {
+            text: section.record.error ? "" : root.accountAvailabilityIndicator(section.record)
+            visible: text.length > 0
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+        }
+        PC3.Label {
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+            font.weight: Font.DemiBold
+            opacity: 0.85
+            text: {
+                var rec = section.record || {}
+                if (rec.composite) return "Combined · " + rec.accountCount + " accounts"
+                var parts = []
+                if (rec.accountEmail) parts.push(rec.accountEmail)
+                if (rec.loginMethod) parts.push(rec.loginMethod)
+                return parts.join(" · ")
+            }
+        }
+    }
+
     PC3.Label {
-        visible: section.record && section.record.error
+        visible: !!(section.record && section.record.error)
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: Kirigami.Theme.negativeTextColor
@@ -164,19 +186,35 @@ ColumnLayout {
             required property var modelData
             required property int index
             readonly property var rec: modelData.rec
-            readonly property real pct: Math.max(0, Math.min(100, rec.usedPercent || 0))
+            // Composite (pooled) windows are recomputed per clock tick from the
+            // accounts' raw windows and describe the pool in Plus-sized
+            // allowances: "12.4 of 41 Plus allowances left · next reset …".
+            readonly property bool isComposite: !!rec.compositeWindows
+            readonly property var pool: isComposite
+                ? root.compositeStats(rec.compositeWindows, rec.windowMinutes, root.nowMs) : null
+            readonly property real pct: Math.max(0, Math.min(100,
+                (isComposite ? pool.usedPercent : rec.usedPercent) || 0))
             readonly property color tint: root.colorFor(pct, paceSettled ? pacePct : -1)
-            readonly property string resetText: root.formatReset(rec, root.nowMs)
+            readonly property string resetText: {
+                if (!isComposite) return root.formatReset(rec, root.nowMs)
+                var reset = pool.resetsAt ? root.formatReset({ resetsAt: pool.resetsAt }, root.nowMs) : ""
+                var line = pool.remaining.toFixed(1) + " of " + pool.total + " Plus allowances left"
+                return reset.length > 0 ? line + " · next reset " + reset : line
+            }
             // Codex and Claude "saved reset" credits ride on the weekly row's
             // reset line (they restore the 7d + 5h windows), falling back to
-            // the last row.
-            readonly property string creditsSuffix: {
+            // the last row. Grouped Codex rows show only the count; the
+            // expiry moves into the reset line's tooltip.
+            readonly property string creditsText: {
                 if (!section.record) return ""
                 if (section.record.id !== "codex" && section.record.id !== "claude") return ""
                 if (index !== section.creditsRowIndex) return ""
-                var txt = root.formatResetCredits(section.record.resetCredits, root.nowMs)
-                return txt.length > 0 ? " · " + txt : ""
+                return root.formatResetCredits(section.record.resetCredits, root.nowMs)
             }
+            readonly property string creditsSuffix: creditsText.length === 0 ? ""
+                : " · " + (section.subheading
+                    ? root.formatResetCredits(section.record.resetCredits, root.nowMs, true)
+                    : creditsText)
 
             // Window pace: elapsed share of this usage window, assuming even
             // consumption. Needs resetsAt + windowMinutes; balance-only rows
@@ -186,13 +224,15 @@ ColumnLayout {
             readonly property real paceWindowMs: (rec.windowMinutes || 0) * 60000
             readonly property real paceRemainingMs: rec.resetsAt
                 ? new Date(rec.resetsAt).getTime() - root.nowMs : NaN
-            readonly property bool paceValid: !isNaN(paceRemainingMs)
-                && paceWindowMs > 0 && paceRemainingMs > 0
-                && paceRemainingMs <= paceWindowMs
-            readonly property real pacePct: paceValid
-                ? (1 - paceRemainingMs / paceWindowMs) * 100 : -1
+            readonly property bool paceValid: isComposite ? pool.pacePct >= 0
+                : !isNaN(paceRemainingMs)
+                  && paceWindowMs > 0 && paceRemainingMs > 0
+                  && paceRemainingMs <= paceWindowMs
+            readonly property real pacePct: !paceValid ? -1
+                : isComposite ? pool.pacePct
+                : (1 - paceRemainingMs / paceWindowMs) * 100
             readonly property real paceElapsedMs: paceValid
-                ? paceWindowMs - paceRemainingMs : 0
+                ? paceWindowMs * pacePct / 100 : 0
             // Status and projection need a settled window: in the first
             // minutes elapsed is dominated by noise, so the tick stays
             // neutral and no "proj" number is emitted yet.
@@ -214,7 +254,7 @@ ColumnLayout {
                 }
                 var elapsedTxt = paceElapsedMs >= 60000
                     ? root.relativeMs(paceElapsedMs).replace(/^in /, "") : "<1m"
-                var line = elapsedTxt + " elapsed of " + windowTxt
+                var line = (isComposite ? "Average " : "") + elapsedTxt + " elapsed of " + windowTxt
                     + " (" + Math.round(pacePct) + "%)"
                 if (overPace) {
                     var msToFull = pct > 0
@@ -301,12 +341,22 @@ ColumnLayout {
                 opacity: 0.55
                 horizontalAlignment: Text.AlignLeft
                 elide: Text.ElideRight
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: section.subheading && rowItem.creditsText.length > 0
+                    hoverEnabled: enabled
+                    PC3.ToolTip.visible: enabled && containsMouse
+                    PC3.ToolTip.delay: 350
+                    PC3.ToolTip.text: rowItem.creditsText
+                }
             }
         }
     }
 
-    Rectangle {
-        id: forecastCard
+    // Reset forecast: one line (label, state badge, text) at the end of the
+    // Codex group, plus incident and alert lines when present.
+    ColumnLayout {
+        id: forecastLine
         readonly property string forecastState: root.codexForecastState(section.forecast)
         readonly property color stateColor: forecastState === "announced"
             ? Kirigami.Theme.positiveTextColor
@@ -318,80 +368,66 @@ ColumnLayout {
         visible: section.showForecast && forecastText.length > 0
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.smallSpacing / 2
-        implicitHeight: forecastContent.implicitHeight
-            + Kirigami.Units.smallSpacing * 2
-        radius: 5
-        color: Kirigami.Theme.alternateBackgroundColor
-        border.width: 1
-        // The border carries the state colour so the card reads at a glance;
-        // unknown stays neutral so it does not compete with the usage bars.
-        border.color: Qt.rgba(stateColor.r, stateColor.g, stateColor.b,
-                              forecastState === "unknown" ? 0.3 : 0.6)
+        spacing: 1
 
-        ColumnLayout {
-            id: forecastContent
-            anchors.fill: parent
-            anchors.margins: Kirigami.Units.smallSpacing
-            spacing: 1
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
 
             PC3.Label {
-                text: "Codex reset forecast"
+                Layout.alignment: Qt.AlignTop
+                text: "Forecast"
                 font.weight: Font.DemiBold
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                opacity: 0.85
             }
 
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
-
-                Rectangle {
-                    id: statePill
-                    Layout.alignment: Qt.AlignTop
-                    Layout.topMargin: 1
-                    implicitWidth: stateLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
-                    implicitHeight: stateLabel.implicitHeight + 2
-                    radius: height / 2
-                    color: Qt.rgba(forecastCard.stateColor.r, forecastCard.stateColor.g,
-                                   forecastCard.stateColor.b, 0.18)
-                    border.width: 1
-                    border.color: forecastCard.stateColor
-
-                    PC3.Label {
-                        id: stateLabel
-                        anchors.centerIn: parent
-                        text: forecastCard.forecastState.toUpperCase()
-                        color: forecastCard.stateColor
-                        font.weight: Font.DemiBold
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 2
-                    }
-                }
+            Rectangle {
+                Layout.alignment: Qt.AlignTop
+                Layout.topMargin: 1
+                implicitWidth: stateLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
+                implicitHeight: stateLabel.implicitHeight + 2
+                radius: height / 2
+                color: Qt.rgba(forecastLine.stateColor.r, forecastLine.stateColor.g,
+                               forecastLine.stateColor.b, 0.18)
+                border.width: 1
+                border.color: forecastLine.stateColor
 
                 PC3.Label {
-                    Layout.fillWidth: true
-                    text: forecastCard.forecastText
-                    wrapMode: Text.WordWrap
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
-                    opacity: 0.72
+                    id: stateLabel
+                    anchors.centerIn: parent
+                    text: forecastLine.forecastState.toUpperCase()
+                    color: forecastLine.stateColor
+                    font.weight: Font.DemiBold
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 2
                 }
             }
+
             PC3.Label {
                 Layout.fillWidth: true
-                text: forecastCard.incidentText
-                visible: text.length > 0
+                text: forecastLine.forecastText
                 wrapMode: Text.WordWrap
-                color: Kirigami.Theme.negativeTextColor
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+                opacity: 0.72
             }
-            PC3.Label {
-                Layout.fillWidth: true
-                text: forecastCard.alertText
-                visible: text.length > 0
-                wrapMode: Text.WordWrap
-                maximumLineCount: 3
-                elide: Text.ElideRight
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
-                opacity: 0.6
-            }
+        }
+        PC3.Label {
+            Layout.fillWidth: true
+            text: forecastLine.incidentText
+            visible: text.length > 0
+            wrapMode: Text.WordWrap
+            color: Kirigami.Theme.negativeTextColor
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+        }
+        PC3.Label {
+            Layout.fillWidth: true
+            text: forecastLine.alertText
+            visible: text.length > 0
+            wrapMode: Text.WordWrap
+            maximumLineCount: 3
+            elide: Text.ElideRight
+            font.pixelSize: Kirigami.Theme.smallFont.pixelSize - 1
+            opacity: 0.6
         }
     }
 }
