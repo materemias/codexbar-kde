@@ -221,7 +221,7 @@ ColumnLayout {
             // (OpenRouter, Kilo) carry neither and render without a tick. A
             // reset that is past or outside the declared window is treated as
             // broken data — no tick rather than a confident fake position.
-            readonly property real paceWindowMs: (rec.windowMinutes || 0) * 60000
+            readonly property real paceWindowMs: rec.windowMinutes ? root.windowSpanMs(rec) : 0
             readonly property real paceRemainingMs: rec.resetsAt
                 ? new Date(rec.resetsAt).getTime() - root.nowMs : NaN
             readonly property bool paceValid: isComposite ? pool.pacePct >= 0
@@ -245,7 +245,8 @@ ColumnLayout {
             readonly property string paceTip: {
                 if (!paceValid) return ""
                 var wm = rec.windowMinutes || 0
-                var windowTxt = wm === 300 ? "5h" : wm === 1440 ? "1d"
+                var windowTxt = rec.startsAt ? root.relativeMs(paceWindowMs).replace(/^in /, "")
+                    : wm === 300 ? "5h" : wm === 1440 ? "1d"
                     : wm === 10080 ? "7d"
                     : root.relativeMs(paceWindowMs).replace(/^in /, "")
                 if (!paceSettled) {

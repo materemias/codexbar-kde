@@ -336,6 +336,26 @@ class CodexRotationTests(unittest.TestCase):
         )
 
 
+class SessionWindowClampTests(unittest.TestCase):
+    def _primary(self, weekly_reset: str) -> dict:
+        return fetch._normalize_record("claude", {"usage": {
+            "primary": {"usedPercent": 64, "windowMinutes": 300,
+                        "resetsAt": "2026-09-26T21:49:00Z"},
+            "secondary": {"usedPercent": 71, "windowMinutes": 10080,
+                          "resetsAt": weekly_reset},
+        }})["primary"]
+
+    def test_earlier_weekly_reset_ends_session_window(self) -> None:
+        primary = self._primary("2026-09-26T20:00:00Z")
+        self.assertEqual(primary["resetsAt"], "2026-09-26T20:00:00Z")
+        self.assertEqual(primary["startsAt"], "2026-09-26T16:49:00Z")
+
+    def test_later_weekly_reset_leaves_session_window(self) -> None:
+        primary = self._primary("2026-09-30T20:00:00Z")
+        self.assertEqual(primary["resetsAt"], "2026-09-26T21:49:00Z")
+        self.assertNotIn("startsAt", primary)
+
+
 class ResetCreditTests(unittest.TestCase):
     def test_counts_available_credits_and_soonest_expiry(self) -> None:
         record = fetch._normalize_record("codex", {"usage": {

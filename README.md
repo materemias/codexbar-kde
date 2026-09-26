@@ -27,6 +27,11 @@ A reset timestamp that is past or outside the declared window is treated as
 broken data and renders without a tick. Balance-only meters (OpenRouter limit,
 Kilo credits, TypeSafe balance) have no time window and never show the tick.
 
+The weekly reset also resets the 5h session window. When the weekly reset
+comes before the session's own end, the 5h row shows the weekly reset time,
+and its pace and projection span the shortened window from the session start
+to that reset.
+
 Bar and tray-ring colors follow the same pace. A meter at or under its pace
 tick is green, whatever the absolute percentage. Once usage passes the tick it
 turns yellow, then orange at one third and red at two thirds of the way from

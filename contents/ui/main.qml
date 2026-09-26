@@ -716,13 +716,21 @@ PlasmoidItem {
         return ""
     }
 
+    // Length of a usage window in ms: the declared windowMinutes, or from
+    // startsAt to resetsAt when an earlier weekly reset truncates it.
+    function windowSpanMs(win) {
+        if (win.startsAt && win.resetsAt)
+            return new Date(win.resetsAt).getTime() - new Date(win.startsAt).getTime()
+        return (win.windowMinutes || 0) * 60000
+    }
+
     // Elapsed share of a usage window (0–100), or -1 when the window has no
     // usable pace: no resetsAt/windowMinutes, a reset that is past or outside
     // the declared window, or less than 3% elapsed (pure noise). Same rule as
     // the pace tick in ProviderSection.
     function pacePercent(win, now) {
         if (!win || !win.resetsAt || !win.windowMinutes) return -1
-        var windowMs = win.windowMinutes * 60000
+        var windowMs = windowSpanMs(win)
         var remainingMs = new Date(win.resetsAt).getTime() - now
         if (isNaN(remainingMs) || remainingMs <= 0 || remainingMs > windowMs) return -1
         var pacePct = (1 - remainingMs / windowMs) * 100
@@ -749,12 +757,12 @@ PlasmoidItem {
     // already reset counts as 0% used, 0% elapsed. resetsAt is the soonest
     // upcoming reset, when allowance returns.
     function compositeStats(windows, windowMinutes, now) {
-        var windowMs = windowMinutes * 60000
         var used = 0, elapsed = 0, total = 0, paced = true, soonest = NaN
         for (var i = 0; i < windows.length; i++) {
             var w = windows[i]
             var u = w.usedPercent
             var remainingMs = w.resetsAt ? new Date(w.resetsAt).getTime() - now : NaN
+            var windowMs = w.startsAt ? windowSpanMs(w) : windowMinutes * 60000
             if (isNaN(remainingMs) || remainingMs > windowMs) {
                 paced = false
             } else if (remainingMs <= 0) {
@@ -790,7 +798,7 @@ PlasmoidItem {
             if (!w || w.usedPercent === undefined || w.usedPercent === null) continue
             var weight = root._codexPlanWeight[String(records[i].loginMethod || "").toLowerCase()] || 1
             var u = Math.max(0, Math.min(100, w.usedPercent))
-            windows.push({ usedPercent: u, resetsAt: w.resetsAt, weight: weight })
+            windows.push({ usedPercent: u, resetsAt: w.resetsAt, startsAt: w.startsAt, weight: weight })
             used += weight * u
             total += weight
         }

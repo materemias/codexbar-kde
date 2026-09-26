@@ -269,6 +269,32 @@ def _fetch_claude_reset_credits(timeout: float) -> dict | None:
 
 
 
+def _clamp_to_account_reset(primary, secondary):
+    """End the session window at an earlier weekly reset.
+
+    The weekly reset also resets the session window, so a 5h window whose
+    natural end falls after it actually ends at the weekly reset. The copy
+    keeps the natural start in `startsAt` so pace spans the truncated window.
+    """
+    if not isinstance(primary, dict) or not isinstance(secondary, dict):
+        return primary
+    end = _parse_iso(primary.get("resetsAt"))
+    weekly = _parse_iso(secondary.get("resetsAt"))
+    minutes = primary.get("windowMinutes")
+    if end is None or weekly is None or weekly >= end:
+        return primary
+    if not isinstance(minutes, (int, float)) or minutes <= 0:
+        return primary
+    start = end - _dt.timedelta(minutes=minutes)
+    if weekly <= start:
+        return primary
+    return {
+        **primary,
+        "resetsAt": secondary["resetsAt"],
+        "startsAt": start.isoformat().replace("+00:00", "Z"),
+    }
+
+
 def _normalize_record(provider: str, record: dict) -> dict:
     raw_usage = record.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -345,6 +371,7 @@ def _normalize_record(provider: str, record: dict) -> dict:
             and str(extra.get("id", "")).startswith("codex-spark")
         )
     ]
+    secondary = usage.get("secondary")
     return {
         "id": provider,
         "ok": True,
@@ -352,8 +379,8 @@ def _normalize_record(provider: str, record: dict) -> dict:
         "identity": identity,
         "loginMethod": login_method,
         "accountEmail": account_email,
-        "primary": primary,
-        "secondary": usage.get("secondary"),
+        "primary": _clamp_to_account_reset(primary, secondary),
+        "secondary": secondary,
         "tertiary": usage.get("tertiary"),
         "extraRateWindows": extra_rate_windows,
         "resetCredits": _reset_credits(usage) if provider == "codex" else None,
