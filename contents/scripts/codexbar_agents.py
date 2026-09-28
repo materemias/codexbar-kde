@@ -787,6 +787,27 @@ def _session_dir_of(pid: int) -> str:
     return ""
 
 
+def _resume_arg(pid: int, flag: str) -> str:
+    """The session id a process was started to resume, or ""."""
+    argv = _argv_of(pid)
+    value = ""
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            value = argv[i + 1]
+        elif a.startswith(flag + "="):
+            value = a.split("=", 1)[1]
+    ok = value and len(value) <= 256 and all(c.isalnum() or c == "-" for c in value)
+    return value if ok else ""
+
+
+def _rollout_named(session_id: str) -> str:
+    """The root rollout whose file name ends in `_<session_id>.jsonl`."""
+    for base in (Path.home() / ".pi" / "agent" / "sessions",
+                 Path.home() / ".omp" / "agent" / "sessions"):
+        for path in base.glob(f"*/*_{session_id}.jsonl"):
+            return str(path)
+    return ""
+
 
 def _pi_info(pid: int) -> dict:
     """pi and omp share the same JSONL layout. omp keeps the active file open
@@ -800,6 +821,11 @@ def _pi_info(pid: int) -> dict:
         "state": "working", "identityExact": False, "model": "",
     }
     rollout, direct = _open_jsonl_under(pid, "/.pi/agent/sessions/", "/.omp/agent/sessions/")
+    resume_id = _resume_arg(pid, "--resume")
+    if not direct and resume_id:
+        # A resumed session opens its rollout only after startup; until then
+        # the argv names it, where the slug lookup would pick another session.
+        rollout = _rollout_named(resume_id) or rollout
     if not rollout:
         # A run started with an explicit --session-dir doesn't live under the
         # cwd slug, and the slug lookup would hand it a *different* session's
@@ -812,7 +838,9 @@ def _pi_info(pid: int) -> dict:
         return info
 
     info = _transcript_info(rollout, "pi")
-    info["identityExact"] = direct and bool(info["sessionId"])
+    info["identityExact"] = bool(info["sessionId"]) and (
+        direct or info["sessionId"] == resume_id
+    )
     info["cwd"] = info["cwd"] or _cwd_of(pid)
     return info
 
@@ -970,7 +998,7 @@ def _load_payload(path: Path = AGGREGATE_PATH) -> dict:
         payload = {}
     else:
         payload = dict(payload)
-    for field in ("agents", "recovery"):
+    for field in ("agents", "history"):
         value = payload.get(field)
         payload[field] = (
             [record for record in value if isinstance(record, dict)]
@@ -1060,7 +1088,33 @@ def _apply_desktop_map(
     return mapped
 
 
-def _recovery_record(record: dict, active: bool) -> dict:
+# Sessions that ended while this boot kept running. Sessions cut off by a
+# reboot stay until they run again, however many there are.
+HISTORY_LIMIT = 20
+_CLOSED_BY = ("reboot", "exit")
+
+
+def _history_turns(value: object) -> list[dict]:
+    """Keep the peek turns a live record carried, bounded like the peek."""
+    if not isinstance(value, list):
+        return []
+    turns: list[dict] = []
+    for entry in value[-_PEEK_MSGS:]:
+        if (
+            isinstance(entry, dict)
+            and entry.get("role") in ("user", "assistant")
+            and entry.get("kind") in ("text", "tools")
+            and isinstance(entry.get("text"), str)
+        ):
+            turns.append({
+                "role": entry["role"],
+                "kind": entry["kind"],
+                "text": entry["text"][:_PEEK_CHARS],
+            })
+    return turns
+
+
+def _history_record(record: dict, active: bool, closed_by: str = "") -> dict:
     key = _record_key(record)
     if key is None:
         return {}
@@ -1083,6 +1137,10 @@ def _recovery_record(record: dict, active: bool) -> dict:
         saved_command = text("resumeCommand")
         command = saved_command if saved_command == expected_command else ""
     desktop = record.get("desktop")
+    if not active:
+        closed_by = record.get("closedBy")
+    if closed_by not in _CLOSED_BY:
+        closed_by = "reboot"
     return {
         "provider": provider,
         "sessionId": session_id,
@@ -1095,6 +1153,8 @@ def _recovery_record(record: dict, active: bool) -> dict:
         "lastSeenAt": timestamp,
         "model": _model_text(record.get("model")),
         "resumeCommand": command,
+        "closedBy": closed_by,
+        "recent": _history_turns(record.get("recent")),
     }
 
 
@@ -1151,28 +1211,56 @@ def _merge_snapshot(
             identity_exact,
         )
 
-    recovery_by_key: dict[tuple[str, str], dict] = {}
-    previous_recovery = previous.get("recovery", [])
-    if isinstance(previous_recovery, list):
-        for record in previous_recovery:
+    history_by_key: dict[tuple[str, str], dict] = {}
+    previous_history = previous.get("history", [])
+    if isinstance(previous_history, list):
+        for record in previous_history:
             if not isinstance(record, dict):
                 continue
             key = _record_key(record)
             if key is not None:
-                recovery_by_key[key] = _recovery_record(record, active=False)
-    if boot_changed:
-        previous_agents = previous.get("agents", [])
-        if isinstance(previous_agents, list):
-            for record in previous_agents:
-                if not isinstance(record, dict):
-                    continue
-                key = _record_key(record)
-                if key is not None:
-                    recovery_by_key[key] = _recovery_record(record, active=True)
+                history_by_key[key] = _history_record(record, active=False)
+    current_keys = {
+        key for key in (_record_key(record) for record in current)
+        if key is not None
+    }
+    # A process still running under another session id changed identity
+    # (for example, the first scan of a resume); it did not exit.
+    current_pids = {
+        (record.get("provider"), record.get("pid")) for record in current
+        if isinstance(record.get("pid"), int)
+    }
+    # A reboot ends every previous session. On the same boot, a session
+    # missing from this scan has exited; untracked processes carry no
+    # session identity, so their exits are not history.
+    if boot_changed or same_boot:
+        for record in previous_agents:
+            if not isinstance(record, dict):
+                continue
+            key = _record_key(record)
+            if key is None or key in current_keys:
+                continue
+            if same_boot and (
+                record.get("state") == "untracked"
+                or (record.get("provider"), record.get("pid")) in current_pids
+            ):
+                continue
+            history_by_key[key] = _history_record(
+                record, active=True,
+                closed_by="reboot" if boot_changed else "exit",
+            )
     for record in current:
         key = _record_key(record)
-        if key is not None:
-            recovery_by_key.pop(key, None)
+        ended = history_by_key.pop(key, None) if key is not None else None
+        # A resumed session opens where its history row was placed until
+        # the window lookup reports its desktop; a short run keeps it.
+        if ended and ended["desktop"] and "desktop" not in record:
+            record["desktop"] = ended["desktop"]
+    rebooted = [r for r in history_by_key.values() if r["closedBy"] == "reboot"]
+    exited = sorted(
+        (r for r in history_by_key.values() if r["closedBy"] == "exit"),
+        key=lambda r: r["lastSeenAt"], reverse=True,
+    )[:HISTORY_LIMIT]
 
     counts = {
         "working": 0, "blocked": 0, "idle": 0, "untracked": 0, "total": 0
@@ -1195,7 +1283,7 @@ def _merge_snapshot(
         "updatedAt": now_ms,
         "counts": counts,
         "agents": current,
-        "recovery": list(recovery_by_key.values()),
+        "history": rebooted + exited,
     }
 
 

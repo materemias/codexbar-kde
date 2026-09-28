@@ -28,10 +28,13 @@ Item {
         if (!s || !s.counts) return 0
         return s.counts.total || 0
     }
-    readonly property int recoveryCount: {
+    readonly property var historyList: {
         var s = root.agentSnapshot
-        return s && Array.isArray(s.recovery) ? s.recovery.length : 0
+        return s && Array.isArray(s.history) ? s.history : []
     }
+    readonly property int rebootCount: historyList.filter(function(r) {
+        return r && r.closedBy === "reboot"
+    }).length
 
     // Header sits outside the tab area so it stays pinned.
     ColumnLayout {
@@ -94,7 +97,8 @@ Item {
             visible: full.agentsTabVisible
             currentIndex: root.requestedTab === "agents" ? 1
                 : root.requestedTab === "usage" ? 0
-                : (full.blockedCount > 0 || full.recoveryCount > 0 ? 1 : 0)
+                : full.blockedCount > 0 ? 1
+                : full.rebootCount > 0 ? 2 : 0
 
             // A manual user click on a TabButton breaks the binding above.
             // Re-establish it explicitly whenever requestedTab changes (e.g.
@@ -112,18 +116,15 @@ Item {
                 width: implicitWidth
             }
             QQC2.TabButton {
-                text: {
-                    if (full.recoveryCount === 0) {
-                        return full.agentTotalCount > 0
-                            ? "Agents (" + full.agentTotalCount + ")"
-                            : "Agents"
-                    }
-                    if (full.agentTotalCount === 0) {
-                        return "Agents (" + full.recoveryCount + " restore)"
-                    }
-                    return "Agents (" + full.agentTotalCount + " live, "
-                        + full.recoveryCount + " restore)"
-                }
+                text: full.agentTotalCount > 0
+                    ? "Agents (" + full.agentTotalCount + ")"
+                    : "Agents"
+                width: implicitWidth
+            }
+            QQC2.TabButton {
+                text: full.rebootCount > 0
+                    ? "History (" + full.rebootCount + " to restore)"
+                    : "History"
                 width: implicitWidth
             }
         }
@@ -328,6 +329,24 @@ Item {
                 }
             }
         }
+
+        // --- History tab ---
+        QQC2.ScrollView {
+            anchors.fill: parent
+            visible: tabHost.activeTab === 2 && full.agentsTabVisible
+            contentWidth: availableWidth
+            clip: true
+
+            ColumnLayout {
+                width: parent.width
+                spacing: Kirigami.Units.smallSpacing
+
+                HistorySection {
+                    agentsView: agentsSection
+                    Layout.fillWidth: true
+                }
+            }
+        }
     }
 
     // Keyboard navigation: up/down moves the agent selection, Enter
@@ -380,8 +399,9 @@ Item {
         } else if (event.text.length > 0
             && !/[\u0000-\u001f\u007f]/.test(event.text)
             && (event.modifiers & ~Qt.ShiftModifier) === Qt.NoModifier) {
-            // Type-to-filter: any printable key starts/extends the query.
-            root.requestedTab = "agents"
+            // Type-to-filter: any printable key starts/extends the query,
+            // which filters both the Agents and History tabs.
+            if (tabHost.activeTab !== 2) root.requestedTab = "agents"
             agentsSection.filterText += event.text
             event.accepted = true
         }

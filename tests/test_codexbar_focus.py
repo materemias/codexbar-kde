@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import io
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "contents" / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+import codexbar_focus as focus  # noqa: E402
+
+
+def entry(**changes: object) -> dict:
+    record = {
+        "provider": "omp",
+        "sessionId": "sid-1",
+        "cwd": "/work/project",
+        "host": "kitty",
+        "desktop": "3",
+        "closedBy": "exit",
+        "resumeCommand": "cd -- /work/project && omp --resume sid-1",
+    }
+    record.update(changes)
+    return record
+
+
+class LaunchTests(unittest.TestCase):
+    def launch(self, payload: dict, desktops: int = 6):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agents.json"
+            path.write_text(json.dumps(payload))
+            popen = mock.MagicMock()
+            popen.return_value.pid = 4242
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(focus, "AGGREGATE_PATH", path),
+                mock.patch.object(focus.subprocess, "Popen", popen),
+                mock.patch.object(focus, "_desktop_count", return_value=desktops),
+                mock.patch.object(focus, "_kwin_place", return_value=True) as place,
+                mock.patch.object(focus, "_set_current_desktop") as switch,
+                mock.patch.object(focus.sys, "stderr", stderr),
+            ):
+                code = focus.launch("omp", "sid-1")
+        return code, popen, place, switch, stderr.getvalue()
+
+    def test_verified_kitty_record_switches_desktop_then_launches_in_scope(self) -> None:
+        code, popen, place, switch, _ = self.launch({"agents": [], "history": [entry()]})
+        self.assertEqual(code, 0)
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[:4], ["systemd-run", "--user", "--scope", "--quiet"])
+        kitty = argv.index("kitty")
+        self.assertEqual(argv[kitty + 1:kitty + 3], ["--directory", "/work/project"])
+        self.assertIn("omp --resume sid-1", argv[-1])
+        switch.assert_called_once_with(3)
+        place.assert_called_once_with(4242, "3")
+
+    def test_refusals_never_spawn_or_switch(self) -> None:
+        cases = {
+            5: {"agents": [{"provider": "omp", "sessionId": "sid-1"}],
+                "history": [entry()]},
+            2: {"agents": [], "history": []},
+            6: {"agents": [], "history": [entry(resumeCommand="rm -rf /")]},
+            7: {"agents": [], "history": [entry(host="konsole")]},
+        }
+        for expected, payload in cases.items():
+            with self.subTest(expected=expected):
+                code, popen, place, switch, _ = self.launch(payload)
+                self.assertEqual(code, expected)
+                popen.assert_not_called()
+                place.assert_not_called()
+                switch.assert_not_called()
+
+    def test_missing_desktop_opens_on_current_and_reports_it(self) -> None:
+        code, popen, place, switch, err = self.launch(
+            {"agents": [], "history": [entry(desktop="9")]}, desktops=6
+        )
+        self.assertEqual(code, 0)
+        popen.assert_called_once()
+        place.assert_not_called()
+        switch.assert_not_called()
+        self.assertIn("desktop 9 no longer exists", err)
+
+
+if __name__ == "__main__":
+    unittest.main()

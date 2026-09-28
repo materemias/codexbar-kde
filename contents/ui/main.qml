@@ -42,7 +42,7 @@ PlasmoidItem {
         updatedAt: "",
         counts: { working: 0, blocked: 0, idle: 0, untracked: 0, total: 0 },
         agents: [],
-        recovery: []
+        history: []
     })
     property bool loading: false
     property bool agentsLoading: false
@@ -229,6 +229,56 @@ PlasmoidItem {
     readonly property string aggregatorScriptPath: Command.localPath(
         Qt.resolvedUrl("../scripts/codexbar_agents.py"))
 
+    // History-record launches. Keys are agentKey() JSON; values are the
+    // launch start time. A launched record leaves History once the
+    // aggregator sees it live; the cooldown only re-enables a launch whose
+    // agent never came up.
+    readonly property string focusScriptPath: Command.localPath(
+        Qt.resolvedUrl("../scripts/codexbar_focus.py"))
+    readonly property int historyLaunchCooldownMs: 60000
+    property var historyLaunches: ({})
+    property string historyLaunchError: ""
+    property var _launchCommands: ({})
+
+    function historyLaunchAllowed(key) {
+        var started = root.historyLaunches[key]
+        return !started || root.nowMs - started > root.historyLaunchCooldownMs
+    }
+
+    function launchHistory(record) {
+        if (!record || !record.provider || !record.sessionId) return
+        var key = JSON.stringify([record.provider, record.sessionId])
+        if (!root.historyLaunchAllowed(key)) return
+        var launches = Object.assign({}, root.historyLaunches)
+        launches[key] = Date.now()
+        root.historyLaunches = launches
+        root.historyLaunchError = ""
+        var cmd = "python3 " + Command.shellQuote(root.focusScriptPath)
+            + " --launch " + Command.shellQuote(record.provider)
+            + " " + Command.shellQuote(record.sessionId)
+        root._launchCommands[cmd] = key
+        launchRunner.run(cmd)
+    }
+
+    Process.CommandRunner {
+        id: launchRunner
+        onFinished: function(command, exitCode, standardOutput, standardError) {
+            var key = root._launchCommands[command]
+            delete root._launchCommands[command]
+            if (exitCode === 0) {
+                if (standardError.trim()) root.historyLaunchError = standardError.trim()
+                root.runAggregator()
+                return
+            }
+            root.historyLaunchError = standardError.trim()
+                || "launch failed (exit " + exitCode + ")"
+            if (key === undefined) return
+            var launches = Object.assign({}, root.historyLaunches)
+            delete launches[key]
+            root.historyLaunches = launches
+        }
+    }
+
     // Plasma's task model supplies the live window PID and desktop roles.
     // Keep it at the root so desktop data remains available while another
     // popup tab is active and can be saved on every aggregator request.
@@ -395,13 +445,13 @@ PlasmoidItem {
             }
             try {
                 var parsed = JSON.parse(text)
-                if (!Array.isArray(parsed.recovery)) parsed.recovery = []
+                if (!Array.isArray(parsed.history)) parsed.history = []
                 parsed.agents = Array.isArray(parsed.agents) ? parsed.agents : []
                 parsed.agents = parsed.agents.filter(function(a) {
                     return a && (root.includeUntrackedAgents || a.state !== "untracked")
                 })
                 if (!root.includeUntrackedAgents) {
-                    parsed.recovery = parsed.recovery.filter(function(r) {
+                    parsed.history = parsed.history.filter(function(r) {
                         if (!r) return false
                         var sid = String(r.sessionId || "")
                         var prefix = "untracked-" + String(r.provider || "") + "-"
@@ -433,7 +483,7 @@ PlasmoidItem {
             updatedAt: "",
             counts: { working: 0, blocked: 0, idle: 0, untracked: 0, total: 0 },
             agents: [],
-            recovery: []
+            history: []
         }
     }
 

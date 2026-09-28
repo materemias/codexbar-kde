@@ -78,6 +78,20 @@ credentials" for setup.
 - `codexbar://focus/<sessionId>` dispatches to `codexbar_focus.py`. It walks
   process ancestors, tries Kitty remote control, then falls back to KWin
   activation. `install_integration.py` registers the handler.
+- `agents.json` `history` holds ended sessions with `closedBy`: `reboot`
+  rows (every session of the previous boot, kept until live again) and
+  `exit` rows (same-boot exits, newest 20, untracked excluded). The History
+  tab orders reboot rows by desktop and exit rows newest first.
+  A pid still live under another session id changed identity and is not
+  an exit. A relaunched session inherits its history row's desktop until the
+  window lookup reports one. `omp --resume <id>` names its session before
+  the process opens the rollout fd; the cwd slug fallback would pick another.
+- `codexbar_focus.py --launch <provider> <sessionId>` resumes a kitty
+  history record only when its saved resume command matches
+  `_resume_command` and the session is not live. It runs kitty under
+  `systemd-run --user --scope` so a plasmashell stop does not kill it. It
+  switches to the saved desktop before starting kitty, and a self-unloading
+  KWin script keeps the window there by pid and activates it.
 
 ## Plasma constraints
 

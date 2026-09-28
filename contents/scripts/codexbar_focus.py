@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bring the terminal window hosting an agent session to the front.
+"""Bring the terminal window hosting an agent session to the front, or
+relaunch a history record in a new kitty window.
 
 Invoked as a URL handler via Qt.openUrlExternally() from the plasmoid:
   codexbar://focus/<sessionId>
@@ -11,15 +12,26 @@ process ancestry, and tries (in order):
 
 The KWin step works for any window kwin manages — VS Code, plain kitty,
 Konsole, Yakuake, Wezterm, etc.
+
+  codexbar_focus.py --launch <provider> <sessionId>
+
+starts the saved resume command of a history record in a new kitty window,
+in its own systemd scope so a plasmashell restart does not kill it, and
+moves that window to the record's saved virtual desktop.
 """
 from __future__ import annotations
 
 import json
 import os
+import pwd
+import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+import codexbar_agents as agents
 
 AGENTS_DIR = Path.home() / ".codexbar" / "agents"
 AGGREGATE_PATH = Path.home() / ".codexbar" / "agents.json"
@@ -188,6 +200,52 @@ def _caption_hint(record: dict) -> str:
     return "".join(ch for ch in base if ch.isalnum() or ch in ("-", "_", ".", " "))
 
 
+def _load_kwin_script(script: str, name: str | None = None) -> str:
+    """Load and start a KWin script; return its id, or "" on failure."""
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False)
+    tmp.write(script)
+    tmp.close()
+    try:
+        load = subprocess.run(
+            ["qdbus6", "org.kde.KWin", "/Scripting",
+             "org.kde.kwin.Scripting.loadScript", tmp.name,
+             *([name] if name else [])],
+            capture_output=True, text=True, timeout=4.0, check=False,
+        )
+        sid = (load.stdout or "").strip()
+        if not sid.isdigit():
+            return ""
+        subprocess.run(
+            ["qdbus6", "org.kde.KWin", "/Scripting",
+             "org.kde.kwin.Scripting.start"],
+            capture_output=True, timeout=4.0, check=False,
+        )
+        return sid
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def _stop_kwin_script(sid: str, name: str | None = None) -> None:
+    try:
+        subprocess.run(
+            ["qdbus6", "org.kde.KWin", f"/Scripting/Script{sid}", "stop"],
+            capture_output=True, timeout=2.0, check=False,
+        )
+        if name:
+            subprocess.run(
+                ["qdbus6", "org.kde.KWin", "/Scripting",
+                 "org.kde.kwin.Scripting.unloadScript", name],
+                capture_output=True, timeout=2.0, check=False,
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
 def _kwin_activate(candidate_pids: list[int], record: dict | None = None) -> bool:
     """Use KWin scripting to activate the right window. Pid-only match isn't
     enough for Electron apps where many windows share one main pid; we also
@@ -197,38 +255,150 @@ def _kwin_activate(candidate_pids: list[int], record: dict | None = None) -> boo
     script = (KWIN_SCRIPT_TEMPLATE
               .replace("%PIDS%", ",".join(str(p) for p in candidate_pids))
               .replace("%HINT%", _caption_hint(record or {})))
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False)
-    tmp.write(script)
-    tmp.close()
+    sid = _load_kwin_script(script)
+    if not sid:
+        return False
+    # Run + immediately stop so kwin doesn't keep the script registered.
+    _stop_kwin_script(sid)
+    return True
+
+
+# Keeps the window of one new pid on a saved desktop and activates it there,
+# even if the user switched away while kitty started. The script unloads
+# itself once it placed the window; the launcher unloads it after
+# PLACE_TIMEOUT if the window never appeared.
+KWIN_PLACE_TEMPLATE = """
+const pid = %PID%;
+const want = "%DESKTOP%";
+const name = "%NAME%";
+let placed = false;
+function place(w) {
+    if (placed || !w || w.pid !== pid) return;
+    placed = true;
+    if (want === "all") {
+        w.onAllDesktops = true;
+    } else {
+        const d = workspace.desktops[Number(want) - 1];
+        if (d) {
+            w.desktops = [d];
+            workspace.currentDesktop = d;
+        }
+    }
+    try { workspace.activeWindow = w; } catch (e) {}
+    callDBus("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting",
+             "unloadScript", name);
+}
+workspace.windowAdded.connect(place);
+for (const w of workspace.windowList()) place(w);
+"""
+PLACE_TIMEOUT = 15.0
+
+
+def _desktop_count() -> int:
     try:
-        # Load (returns the script id)
-        load = subprocess.run(
-            ["qdbus6", "org.kde.KWin", "/Scripting",
-             "org.kde.kwin.Scripting.loadScript", tmp.name],
-            capture_output=True, text=True, timeout=4.0, check=False,
-        )
-        sid = (load.stdout or "").strip()
-        if not sid.lstrip("-").isdigit():
-            return False
-        # Run + immediately stop so kwin doesn't keep the script registered.
+        out = subprocess.run(
+            ["qdbus6", "org.kde.KWin", "/VirtualDesktopManager",
+             "org.kde.KWin.VirtualDesktopManager.count"],
+            capture_output=True, text=True, timeout=2.0, check=False,
+        ).stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return 0
+    return int(out) if out.isdigit() else 0
+
+
+def _set_current_desktop(number: int) -> None:
+    try:
         subprocess.run(
-            ["qdbus6", "org.kde.KWin", "/Scripting",
-             "org.kde.kwin.Scripting.start"],
-            capture_output=True, timeout=4.0, check=False,
-        )
-        subprocess.run(
-            ["qdbus6", "org.kde.KWin", f"/Scripting/Script{sid}",
-             "stop"],
+            ["qdbus6", "org.kde.KWin", "/KWin",
+             "org.kde.KWin.setCurrentDesktop", str(number)],
             capture_output=True, timeout=2.0, check=False,
         )
-        return True
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
+def _kwin_place(pid: int, desktop: str) -> bool:
+    name = f"codexbar-restore-{pid}"
+    script = (KWIN_PLACE_TEMPLATE
+              .replace("%PID%", str(pid))
+              .replace("%DESKTOP%", desktop)
+              .replace("%NAME%", name))
+    sid = _load_kwin_script(script, name)
+    if not sid:
         return False
-    finally:
+    deadline = time.monotonic() + PLACE_TIMEOUT
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
         try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+            loaded = subprocess.run(
+                ["qdbus6", "org.kde.KWin", "/Scripting",
+                 "org.kde.kwin.Scripting.isScriptLoaded", name],
+                capture_output=True, text=True, timeout=2.0, check=False,
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            break
+        if loaded == "false":
+            return True
+    _stop_kwin_script(sid, name)
+    return False
+
+
+def launch(provider: str, session_id: str) -> int:
+    """Resume one history record in a new kitty window on its saved desktop."""
+    payload = agents._load_payload(AGGREGATE_PATH)
+    key = (provider, session_id)
+    if any(agents._record_key(r) == key for r in payload["agents"]):
+        sys.stderr.write("codexbar_focus: session is already running\n")
+        return 5
+    record = next(
+        (r for r in payload["history"] if agents._record_key(r) == key), None
+    )
+    if record is None:
+        sys.stderr.write("codexbar_focus: no history record for session\n")
+        return 2
+    cwd = record.get("cwd") if isinstance(record.get("cwd"), str) else ""
+    command = record.get("resumeCommand")
+    if not command or command != agents._resume_command(
+        provider, session_id, cwd, True
+    ):
+        sys.stderr.write("codexbar_focus: no verified resume command\n")
+        return 6
+    if record.get("host") != "kitty":
+        sys.stderr.write("codexbar_focus: only kitty history records launch\n")
+        return 7
+    shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell
+    shell = shell or "/bin/sh"
+    # An interactive shell loads the user's PATH; the trailing shell keeps
+    # the window open after the agent exits, like the original terminal.
+    argv = [
+        "systemd-run", "--user", "--scope", "--quiet", "--collect", "--",
+        "kitty", "--directory", cwd or str(Path.home()), "--",
+        shell, "-ic", f"{command}; exec {shlex.quote(shell)} -i",
+    ]
+    desktop = record.get("desktop")
+    if not agents._valid_desktop(desktop):
+        desktop = ""
+    elif desktop != "all" and int(desktop) > _desktop_count():
+        sys.stderr.write(
+            f"codexbar_focus: desktop {desktop} no longer exists; "
+            "opened on the current desktop\n"
+        )
+        desktop = ""
+    elif desktop != "all":
+        # Switch first, so the user watches the window open where it lands.
+        _set_current_desktop(int(desktop))
+    try:
+        # systemd-run --scope execs kitty, so this pid is the window's pid.
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError as exc:
+        sys.stderr.write(f"codexbar_focus: launch failed: {exc}\n")
+        return 8
+    if desktop and not _kwin_place(proc.pid, desktop):
+        sys.stderr.write("codexbar_focus: launched, but could not move window\n")
+    return 0
 
 
 def focus(session_id: str) -> int:
@@ -260,6 +430,10 @@ def focus(session_id: str) -> int:
 def main(argv: list[str]) -> int:
     if not argv:
         return 1
+    if argv[0] == "--launch":
+        if len(argv) != 3:
+            return 1
+        return launch(argv[1], argv[2])
     arg = argv[0]
     prefix = "codexbar://focus/"
     if arg.startswith(prefix):

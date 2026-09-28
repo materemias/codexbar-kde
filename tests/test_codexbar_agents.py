@@ -26,7 +26,7 @@ agents = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(agents)
 
 
-RECOVERY_FIELDS = {
+HISTORY_FIELDS = {
     "provider",
     "sessionId",
     "cwd",
@@ -38,6 +38,8 @@ RECOVERY_FIELDS = {
     "lastSeenAt",
     "model",
     "resumeCommand",
+    "closedBy",
+    "recent",
 }
 
 
@@ -66,7 +68,7 @@ def active(provider: str, session_id: str, **changes: object) -> dict:
     return record
 
 
-def recovery(provider: str, session_id: str, **changes: object) -> dict:
+def history(provider: str, session_id: str, **changes: object) -> dict:
     record = {
         "provider": provider,
         "sessionId": session_id,
@@ -79,6 +81,7 @@ def recovery(provider: str, session_id: str, **changes: object) -> dict:
         "lastState": "idle",
         "lastSeenAt": 100,
         "resumeCommand": f"{provider} resume {session_id}",
+        "closedBy": "reboot",
     }
     record.update(changes)
     return record
@@ -220,18 +223,19 @@ class SnapshotMergeTests(unittest.TestCase):
             cwd="/work/O'Brien project",
             desktop="4",
         )
-        previous = {"bootId": "boot-a", "agents": [old], "recovery": []}
+        previous = {"bootId": "boot-a", "agents": [old], "history": []}
 
         snapshot = agents._merge_snapshot([], previous, "boot-b", 200)
 
         self.assertEqual(
-            set(snapshot), {"bootId", "updatedAt", "counts", "agents", "recovery"}
+            set(snapshot), {"bootId", "updatedAt", "counts", "agents", "history"}
         )
         self.assertEqual(snapshot["bootId"], "boot-b")
         self.assertEqual(snapshot["agents"], [])
-        self.assertEqual(len(snapshot["recovery"]), 1)
-        restored = snapshot["recovery"][0]
-        self.assertEqual(set(restored), RECOVERY_FIELDS)
+        self.assertEqual(len(snapshot["history"]), 1)
+        restored = snapshot["history"][0]
+        self.assertEqual(set(restored), HISTORY_FIELDS)
+        self.assertEqual(restored["closedBy"], "reboot")
         self.assertEqual(restored["cwd"], "/work/O'Brien project")
         self.assertEqual(restored["desktop"], "4")
         self.assertEqual(restored["lastSeenAt"], 100)
@@ -241,25 +245,44 @@ class SnapshotMergeTests(unittest.TestCase):
             f"{shlex.join(['omp', '--resume', old['sessionId']])}",
         )
         self.assertTrue(
-            {"pid", "hostPid", "ancestorPids", "tty", "recent", "identityExact"}
+            {"pid", "hostPid", "ancestorPids", "tty", "identityExact"}
             .isdisjoint(restored)
         )
 
         live = active("omp", old["sessionId"], updatedAt=250)
         resumed = agents._merge_snapshot([live], snapshot, "boot-b", 250)
-        self.assertEqual(resumed["recovery"], [])
+        self.assertEqual(resumed["history"], [])
         self.assertEqual(len(resumed["agents"]), 1)
 
-    def test_unresolved_recovery_survives_reboots_and_unions_new_active(self) -> None:
+    def test_history_keeps_bounded_peek_turns(self) -> None:
+        turns = [
+            {"role": "user", "kind": "text", "text": f"turn {n}", "ts": n}
+            for n in range(10)
+        ]
+        turns[-1] = {"role": "assistant", "kind": "text", "text": "x" * 999, "ts": 9}
+        turns[-2] = {"role": "system", "kind": "text", "text": "dropped", "ts": 8}
+        previous = {
+            "bootId": "boot-a",
+            "agents": [active("omp", "peek", recent=turns)],
+            "history": [],
+        }
+        row = agents._merge_snapshot([], previous, "boot-a", 200)["history"][0]
+        self.assertEqual(
+            [turn["text"] for turn in row["recent"]],
+            [f"turn {n}" for n in range(2, 8)] + ["x" * 320],
+        )
+        self.assertEqual(set(row["recent"][0]), {"role", "kind", "text"})
+
+    def test_unresolved_reboot_history_survives_reboots_and_unions_new_active(self) -> None:
         first = agents._merge_snapshot(
             [],
-            {"bootId": "boot-a", "agents": [active("omp", "old")], "recovery": []},
+            {"bootId": "boot-a", "agents": [active("omp", "old")], "history": []},
             "boot-b",
             200,
         )
         second = agents._merge_snapshot([], first, "boot-c", 300)
         self.assertEqual(
-            [(row["provider"], row["sessionId"]) for row in second["recovery"]],
+            [(row["provider"], row["sessionId"]) for row in second["history"]],
             [("omp", "old")],
         )
 
@@ -268,11 +291,11 @@ class SnapshotMergeTests(unittest.TestCase):
         )
         later = agents._merge_snapshot([], with_new_live, "boot-d", 400)
         self.assertEqual(
-            {(row["provider"], row["sessionId"]) for row in later["recovery"]},
+            {(row["provider"], row["sessionId"]) for row in later["history"]},
             {("omp", "old"), ("claude", "new")},
         )
 
-    def test_just_ended_active_record_wins_recovery_duplicate(self) -> None:
+    def test_just_ended_active_record_wins_history_duplicate(self) -> None:
         previous = {
             "bootId": "boot-a",
             "agents": [
@@ -280,56 +303,99 @@ class SnapshotMergeTests(unittest.TestCase):
                     "omp", "same", cwd="/new cwd", desktop="5", updatedAt=200
                 )
             ],
-            "recovery": [
-                recovery(
+            "history": [
+                history(
                     "omp", "same", cwd="/old cwd", desktop="2", lastSeenAt=100
                 )
             ],
         }
         snapshot = agents._merge_snapshot([], previous, "boot-b", 300)
-        self.assertEqual(len(snapshot["recovery"]), 1)
-        self.assertEqual(snapshot["recovery"][0]["cwd"], "/new cwd")
-        self.assertEqual(snapshot["recovery"][0]["desktop"], "5")
-        self.assertEqual(snapshot["recovery"][0]["lastSeenAt"], 200)
+        self.assertEqual(len(snapshot["history"]), 1)
+        self.assertEqual(snapshot["history"][0]["cwd"], "/new cwd")
+        self.assertEqual(snapshot["history"][0]["desktop"], "5")
+        self.assertEqual(snapshot["history"][0]["lastSeenAt"], 200)
 
-    def test_same_boot_disappearance_does_not_create_recovery(self) -> None:
+    def test_same_boot_exit_enters_history_newest_first_and_capped(self) -> None:
+        ended = [
+            active("omp", f"exit-{n}", updatedAt=1000 + n)
+            for n in range(agents.HISTORY_LIMIT + 3)
+        ]
         previous = {
             "bootId": "boot-a",
-            "agents": [active("omp", "same-boot")],
-            "recovery": [],
+            "agents": [
+                *ended,
+                active("omp", "untracked-omp-7", state="untracked"),
+            ],
+            "history": [history("omp", "rebooted", lastSeenAt=1)],
         }
-        snapshot = agents._merge_snapshot([], previous, "boot-a", 200)
-        self.assertEqual(snapshot["recovery"], [])
+        snapshot = agents._merge_snapshot([], previous, "boot-a", 5000)
+        rows = [(row["sessionId"], row["closedBy"]) for row in snapshot["history"]]
+        newest = agents.HISTORY_LIMIT + 2
+        self.assertEqual(
+            rows,
+            [("rebooted", "reboot")]
+            + [(f"exit-{n}", "exit")
+               for n in range(newest, newest - agents.HISTORY_LIMIT, -1)],
+        )
+
+    def test_identity_change_of_a_live_process_is_not_an_exit(self) -> None:
+        previous = {
+            "bootId": "boot-a",
+            "agents": [active("omp", "startup-guess", pid=77, identityExact=False)],
+            "history": [],
+        }
+        snapshot = agents._merge_snapshot(
+            [active("omp", "resumed", pid=77)], previous, "boot-a", 200
+        )
+        self.assertEqual(snapshot["history"], [])
+
+    def test_relaunched_session_keeps_history_desktop_through_a_short_run(self) -> None:
+        previous = {
+            "bootId": "boot-a",
+            "agents": [],
+            "history": [history("omp", "again", closedBy="exit", desktop="3")],
+        }
+        live = active("omp", "again", pid=88)
+        live.pop("desktop")
+        running = agents._merge_snapshot([live], previous, "boot-a", 200)
+        self.assertEqual(running["history"], [])
+        self.assertEqual(running["agents"][0]["desktop"], "3")
+
+        closed = agents._merge_snapshot([], running, "boot-a", 300)
+        self.assertEqual(
+            [(row["sessionId"], row["desktop"]) for row in closed["history"]],
+            [("again", "3")],
+        )
 
     def test_cross_provider_session_ids_remain_distinct(self) -> None:
         previous = {
             "bootId": "boot-a",
             "agents": [active("claude", "shared"), active("omp", "shared")],
-            "recovery": [],
+            "history": [],
         }
         snapshot = agents._merge_snapshot([], previous, "boot-b", 200)
         self.assertEqual(
-            {(row["provider"], row["sessionId"]) for row in snapshot["recovery"]},
+            {(row["provider"], row["sessionId"]) for row in snapshot["history"]},
             {("claude", "shared"), ("omp", "shared")},
         )
 
-    def test_legacy_payload_records_boot_without_inventing_recovery(self) -> None:
-        previous = {"agents": [active("omp", "legacy")], "recovery": []}
+    def test_legacy_payload_records_boot_without_inventing_history(self) -> None:
+        previous = {"agents": [active("omp", "legacy")], "history": []}
         snapshot = agents._merge_snapshot([], previous, "boot-a", 200)
         self.assertEqual(snapshot["bootId"], "boot-a")
-        self.assertEqual(snapshot["recovery"], [])
+        self.assertEqual(snapshot["history"], [])
 
-    def test_unreadable_boot_id_keeps_saved_boot_and_only_existing_recovery(self) -> None:
-        existing = recovery("omp", "unresolved")
+    def test_unreadable_boot_id_keeps_saved_boot_and_only_existing_history(self) -> None:
+        existing = history("omp", "unresolved")
         previous = {
             "bootId": "known-boot",
             "agents": [active("claude", "active-before-unknown")],
-            "recovery": [existing],
+            "history": [existing],
         }
         snapshot = agents._merge_snapshot([], previous, "", 200)
         self.assertEqual(snapshot["bootId"], "known-boot")
         self.assertEqual(
-            [(row["provider"], row["sessionId"]) for row in snapshot["recovery"]],
+            [(row["provider"], row["sessionId"]) for row in snapshot["history"]],
             [("omp", "unresolved")],
         )
 
@@ -343,11 +409,11 @@ class SnapshotMergeTests(unittest.TestCase):
                 {"provider": 3, "sessionId": "bad"},
                 active("omp", "valid"),
             ],
-            "recovery": [None, {"provider": "omp", "sessionId": []}],
+            "history": [None, {"provider": "omp", "sessionId": []}],
         }
         snapshot = agents._merge_snapshot([], previous, "boot-b", 200)
         self.assertEqual(
-            [(row["provider"], row["sessionId"]) for row in snapshot["recovery"]],
+            [(row["provider"], row["sessionId"]) for row in snapshot["history"]],
             [("omp", "valid")],
         )
 
@@ -359,7 +425,7 @@ class SnapshotMergeTests(unittest.TestCase):
             "omp", "carry", desktop=None, model="", startedAt=0, stateChangedAt=100
         )
         current.pop("desktop")
-        previous = {"bootId": "boot-a", "agents": [old], "recovery": []}
+        previous = {"bootId": "boot-a", "agents": [old], "history": []}
 
         same = agents._merge_snapshot([current], previous, "boot-a", 200)
         self.assertEqual(same["agents"][0]["desktop"], "6")
@@ -379,21 +445,21 @@ class BoundaryParsingTests(unittest.TestCase):
             path = Path(directory) / "agents.json"
             path.write_text("[]")
             self.assertEqual(
-                agents._load_payload(path), {"agents": [], "recovery": []}
+                agents._load_payload(path), {"agents": [], "history": []}
             )
 
             path.write_text(json.dumps({
                 "bootId": "boot-a",
                 "agents": [None, {"provider": "omp", "sessionId": "ok"}, "bad"],
-                "recovery": "not-a-list",
+                "history": "not-a-list",
             }))
             payload = agents._load_payload(path)
             self.assertEqual(payload["agents"], [{"provider": "omp", "sessionId": "ok"}])
-            self.assertEqual(payload["recovery"], [])
+            self.assertEqual(payload["history"], [])
 
             path.write_text("{not json")
             self.assertEqual(
-                agents._load_payload(path), {"agents": [], "recovery": []}
+                agents._load_payload(path), {"agents": [], "history": []}
             )
 
     def test_boot_id_reader_returns_empty_for_missing_and_empty_files(self) -> None:
@@ -490,7 +556,7 @@ class ResumeAndIdentityTests(unittest.TestCase):
                     cwd="/tmp",
                 ),
             ],
-            {"bootId": "boot-a", "agents": [], "recovery": []},
+            {"bootId": "boot-a", "agents": [], "history": []},
             "boot-a",
             100,
         )
@@ -498,14 +564,14 @@ class ResumeAndIdentityTests(unittest.TestCase):
             [row["resumeCommand"] for row in snapshot["agents"]], ["", ""]
         )
 
-    def test_saved_recovery_command_must_match_canonical_command(self) -> None:
-        valid = recovery(
+    def test_saved_history_command_must_match_canonical_command(self) -> None:
+        valid = history(
             "omp",
             "safe-session",
             cwd="/work/project",
             resumeCommand="cd -- /work/project && omp --resume safe-session",
         )
-        tampered = recovery(
+        tampered = history(
             "omp",
             "tampered-session",
             cwd="/work/project",
@@ -516,14 +582,14 @@ class ResumeAndIdentityTests(unittest.TestCase):
             {
                 "bootId": "boot-a",
                 "agents": [],
-                "recovery": [valid, tampered],
+                "history": [valid, tampered],
             },
             "boot-a",
             100,
         )
         commands = {
             row["sessionId"]: row["resumeCommand"]
-            for row in snapshot["recovery"]
+            for row in snapshot["history"]
         }
         self.assertEqual(
             commands["safe-session"],
@@ -604,6 +670,26 @@ class ResumeAndIdentityTests(unittest.TestCase):
             ):
                 self.assertFalse(agents._pi_info(42)["identityExact"])
 
+    def test_resuming_omp_is_named_by_argv_before_it_opens_its_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            slug = home / ".omp" / "agent" / "sessions" / "-work"
+            slug.mkdir(parents=True)
+            resumed = slug / "2026-09-28T10-00-00-000Z_01a0-resumed.jsonl"
+            resumed.write_text(json.dumps({"type": "session", "id": "01a0-resumed", "cwd": "/work"}) + "\n")
+            other = slug / "2026-09-28T11-00-00-000Z_01a0-other.jsonl"
+            other.write_text(json.dumps({"type": "session", "id": "01a0-other", "cwd": "/work"}) + "\n")
+            with (
+                mock.patch.object(agents.Path, "home", return_value=home),
+                mock.patch.object(agents, "_open_jsonl_under", return_value=("", False)),
+                mock.patch.object(agents, "_argv_of", return_value=["omp", "--resume", "01a0-resumed"]),
+                mock.patch.object(agents, "_find_pi_rollout", return_value=str(other)),
+                mock.patch.object(agents, "_cwd_of", return_value="/work"),
+            ):
+                info = agents._pi_info(42)
+        self.assertEqual(info["sessionId"], "01a0-resumed")
+        self.assertTrue(info["identityExact"])
+
     def test_live_dedup_identity_remains_session_id_only(self) -> None:
         info = lambda _pid: {
             "sessionId": "shared",
@@ -653,7 +739,7 @@ class PersistenceTests(unittest.TestCase):
             agents._write_aggregate(
                 agents._merge_snapshot(
                     [],
-                    {"bootId": "boot-old", "agents": [], "recovery": []},
+                    {"bootId": "boot-old", "agents": [], "history": []},
                     "boot-old",
                     200,
                 ),
@@ -697,7 +783,7 @@ class PersistenceTests(unittest.TestCase):
                     "updatedAt": 100,
                     "counts": {},
                     "agents": [],
-                    "recovery": [],
+                    "history": [],
                 },
                 path,
             )

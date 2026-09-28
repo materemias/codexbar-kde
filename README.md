@@ -27,10 +27,11 @@ A reset timestamp that is past or outside the declared window is treated as
 broken data and renders without a tick. Balance-only meters (OpenRouter limit,
 Kilo credits, TypeSafe balance) have no time window and never show the tick.
 
-The weekly reset also resets the 5h session window. When the weekly reset
-comes before the session's own end, the 5h row shows the weekly reset time,
-and its pace and projection span the shortened window from the session start
-to that reset.
+For Codex, the weekly reset also resets the 5h session window. When the
+weekly reset comes before the session's own end, the 5h row shows the weekly
+reset time, and its pace and projection span the shortened window from the
+session start to that reset. Claude's weekly rollover leaves the running 5h
+session alone, so Claude's 5h row always shows its own reset time.
 
 Bar and tray-ring colors follow the same pace. A meter at or under its pace
 tick is green, whatever the absolute percentage. Once usage passes the tick it
@@ -150,24 +151,43 @@ your machine, grouped by project folder:
   desktop its terminal window is on. Sessions on the current desktop get a
   highlighted badge, so you can see which agent is one switch away. Windows
   pinned to all desktops show "all".
-- **Restart recovery.** After a Linux boot change, unresolved sessions from
-  the last sample appear in a separate restore list with their project,
-  desktop, host, identifying text, and last-seen time. CodexBar shows a
-  copyable resume command only when it can prove the exact provider session.
-  It never launches recovery commands.
 - **Conversation peek.** Click the arrow on a session row or press `Space` to
   expand its last eight user and assistant turns. Color-coded cards separate
   user, assistant, and tool turns.
   Selection and the expanded preview follow the same session when polling
   reorders the list.
-- **Type-to-filter search.** Start typing on the Agents tab. The filter fuzzy
-  matches the session title, last prompt, working directory, and provider.
-  Recent conversation text uses exact case-insensitive substring matching.
-- **Auto-tab.** The popup opens directly to Agents when `Super+A` is pressed,
-  an agent is blocked, or restore records exist.
+- **Type-to-filter search.** Start typing on the Agents or History tab. The
+  filter fuzzy matches the session title, last prompt, working directory, and
+  provider. Recent conversation text uses exact case-insensitive substring
+  matching.
+- **Auto-tab.** The popup opens directly to Agents when `Super+A` is pressed
+  or an agent is blocked, and to History when sessions cut off by a restart
+  are waiting to be restored.
 - **Tray presence** — colored count dots (working/blocked/idle) beside the
   usage rings, optional featured-task label, and a red badge when agents need
   attention.
+
+**History tab** — Sessions that ended, with one-click restore:
+
+- **Interrupted by restart.** After a Linux boot change, every session from
+  the last sample before the reboot appears here, ordered by virtual desktop.
+  These rows stay until the session runs again.
+- **Recently closed.** Sessions that exit during the current boot, newest
+  first, capped at the 20 most recent. Rows look like Agents rows: one line
+  with title, model, project folder, time since close, and desktop. Click a
+  row or its arrow to peek at the last turns and the resume command; the play
+  button launches it. Untracked processes have no session identity and are
+  not recorded.
+- **Restore.** Each row shows its project, desktop, host, identifying text,
+  and last-seen time. CodexBar shows a copyable resume command only when it
+  can prove the exact provider session. Rows that ran in kitty also get a
+  **Launch** button: it opens a new kitty window in its own systemd scope,
+  runs the resume command in your interactive shell, and switches to the
+  saved desktop first so you watch the window open there. The button
+  stays disabled for a minute after a click, and a session that is already
+  running is refused. A row leaves History once its session is live again.
+  Desktops are saved by position; if the saved desktop no longer exists, the
+  window opens on the current one and the tab says so.
 
 The aggregator scans `/proc` to discover running agent processes and writes
 `~/.codexbar/agents.json`. The widget reads it after each successful scan, with
