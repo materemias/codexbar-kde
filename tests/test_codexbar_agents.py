@@ -10,6 +10,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import datetime, timezone
 from unittest import mock
 from urllib.parse import quote
 
@@ -38,6 +39,7 @@ HISTORY_FIELDS = {
     "lastSeenAt",
     "model",
     "resumeCommand",
+    "codexHome",
     "closedBy",
     "recent",
 }
@@ -718,6 +720,117 @@ class ResumeAndIdentityTests(unittest.TestCase):
                 mock.patch.object(agents, "_cwd_of", return_value="/work"),
             ):
                 info = agents._pi_info(42)
+        self.assertEqual(info["sessionId"], "01a0-resumed")
+        self.assertTrue(info["identityExact"])
+
+    def test_codex_tuis_match_threads_loaded_by_shared_app_server(self) -> None:
+        start = 1_790_000_000_000
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "codex-work"
+            day = home / "sessions" / "2026" / "09" / "28"
+            day.mkdir(parents=True)
+
+            def thread(sid: str, cwd: str, created: int) -> str:
+                path = day / f"rollout-x-{sid}.jsonl"
+                iso = datetime.fromtimestamp(created / 1000, timezone.utc).isoformat()
+                path.write_text(json.dumps({"type": "session_meta", "payload": {
+                    "id": sid, "cwd": cwd, "timestamp": iso}}) + "\n")
+                return str(path)
+
+            pool = {
+                thread("mine", "/work", start + 5000),
+                # Closed a minute ago but still loaded by the server.
+                thread("stale", "/work", start - 60_000),
+                thread("elsewhere", "/other", start + 1000),
+            }
+            (home / "session_index.jsonl").write_text(
+                json.dumps({"id": "mine", "thread_name": "First"}) + "\n"
+                + json.dumps({"id": "other", "thread_name": "Nope"}) + "\n"
+                + json.dumps({"id": "mine", "thread_name": "Renamed"}) + "\n"
+            )
+            argv = {42: ["codex"], 43: ["codex"], 44: ["codex", "resume", "stale"]}
+            tuis = [42, 44]
+
+            def run(pid: int) -> dict:
+                with (
+                    mock.patch.object(agents, "_environ_value", return_value=str(home)),
+                    mock.patch.object(agents, "_pgrep", side_effect=lambda _n, services=False:
+                                      [77] if services else list(tuis)),
+                    mock.patch.object(agents, "_held_rollouts", side_effect=lambda server, _n:
+                                      set(pool) if server == 77 else set()),
+                    mock.patch.object(agents, "_open_jsonl_under", return_value=("", False)),
+                    mock.patch.object(agents, "_argv_of", side_effect=lambda p: argv[p]),
+                    mock.patch.object(agents, "_cwd_of", return_value="/work"),
+                    mock.patch.object(agents, "_start_ms", return_value=start),
+                    mock.patch.object(agents, "_transcript_info", side_effect=lambda path, _p: {
+                        "sessionId": agents._codex_meta(path)[0], "cwd": "/work",
+                        "windowTitle": "", "lastPrompt": "", "state": "idle", "model": ""}),
+                ):
+                    return agents._codex_info(pid)
+
+            fresh = run(42)
+            resumed = run(44)
+            tuis.append(43)
+            crowded = run(42)
+        self.assertEqual((fresh["sessionId"], fresh["identityExact"]), ("mine", True))
+        self.assertEqual(fresh["windowTitle"], "Renamed")
+        self.assertEqual((resumed["sessionId"], resumed["identityExact"]), ("stale", True))
+        # A second fresh TUI in the same folder could own that thread too.
+        self.assertEqual((crowded["sessionId"], crowded["identityExact"]), ("mine", False))
+        self.assertEqual(
+            agents._resume_command("codex", "mine", "/work", True, fresh["codexHome"]),
+            f"cd -- /work && CODEX_HOME={shlex.quote(str(home))} codex resume mine",
+        )
+        # The home only ever prefixes Codex, and a malformed one is dropped.
+        self.assertEqual(agents._resume_command("claude", "s", "", True, str(home)),
+                         "claude --resume s")
+        self.assertEqual(agents._resume_command("codex", "s", "", True, "rel/home"),
+                         "codex resume s")
+
+    def test_pi_launched_by_a_shell_is_named_by_that_command(self) -> None:
+        script = "cd -- /work && pi --session 01a0-launched; exec /usr/bin/zsh -i"
+        with mock.patch.object(agents, "_argv_of", return_value=["/usr/bin/zsh", "-ic", script]):
+            self.assertEqual(agents._shell_resume_arg(42, "pi", "--session"), "01a0-launched")
+            self.assertEqual(agents._shell_resume_arg(42, "omp", "--session"), "")
+        with mock.patch.object(agents, "_argv_of", return_value=["zsh", "-i"]):
+            self.assertEqual(agents._shell_resume_arg(42, "pi", "--session"), "")
+        self.assertEqual(agents._flag_value(["codex", "resume", "--last"], "resume"), "")
+
+    def test_fresh_pi_session_is_exact_only_when_alone_in_its_start_window(self) -> None:
+        start = 1_790_000_000_000
+
+        def header(sid: str, at_ms: int) -> str:
+            iso = datetime.fromtimestamp(at_ms / 1000, timezone.utc).isoformat()
+            return json.dumps({"type": "session", "id": sid, "timestamp": iso, "cwd": "/work"}) + "\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            slug = Path(directory)
+            mine = slug / "a_mine.jsonl"
+            mine.write_text(header("mine", start + 1100))
+            old = slug / "b_old.jsonl"
+            old.write_text(header("old", start - 3_600_000))
+            with mock.patch.object(agents, "_start_ms", return_value=start):
+                self.assertTrue(agents._created_by(42, str(mine)))
+                self.assertFalse(agents._created_by(42, str(old)))
+                # A second run started in the same folder at the same time
+                # makes the pick ambiguous.
+                (slug / "c_twin.jsonl").write_text(header("twin", start + 4000))
+                self.assertFalse(agents._created_by(42, str(mine)))
+
+    def test_pi_resumed_with_session_flag_is_named_by_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            slug = home / ".pi" / "agent" / "sessions" / "--work--"
+            slug.mkdir(parents=True)
+            resumed = slug / "2026-09-28T10-00-00-000Z_01a0-resumed.jsonl"
+            resumed.write_text(json.dumps({"type": "session", "id": "01a0-resumed", "cwd": "/work"}) + "\n")
+            with (
+                mock.patch.object(agents.Path, "home", return_value=home),
+                mock.patch.object(agents, "_open_jsonl_under", return_value=("", False)),
+                mock.patch.object(agents, "_argv_of", return_value=["pi", "--session", "01a0-resumed"]),
+                mock.patch.object(agents, "_cwd_of", return_value="/work"),
+            ):
+                info = agents._INFO_FN["pi"](42)
         self.assertEqual(info["sessionId"], "01a0-resumed")
         self.assertTrue(info["identityExact"])
 

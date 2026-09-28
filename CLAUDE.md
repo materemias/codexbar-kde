@@ -86,6 +86,16 @@ credentials" for setup.
   an exit. A relaunched session inherits its history row's desktop until the
   window lookup reports one. `omp --resume <id>` names its session before
   the process opens the rollout fd; the cwd slug fallback would pick another.
+- Codex 0.15x loads threads in one `codex app-server` per `CODEX_HOME`
+  that all TUIs share, and it keeps a closed thread loaded for about a
+  minute. A TUI owns a loaded thread named by its `resume <id>` argv, or the
+  only thread in its folder created after it started when no other fresh TUI
+  runs there. Resume commands carry a non-default `CODEX_HOME`.
+- pi overwrites its process title, so `--session <id>` is read from the
+  parent shell's `-c` command (how Launch starts it). A fresh pi owns the
+  only rollout in its slug whose header falls in its first 30 seconds.
+- Claude Code's agent view runs tasks as `kind: "bg"` sessions under
+  `claude daemon`, with no terminal ancestor; they are not listed.
 - `codexbar_focus.py --launch <provider> <sessionId>` resumes a kitty
   history record only when its saved resume command matches
   `_resume_command` and the session is not live. It runs kitty under

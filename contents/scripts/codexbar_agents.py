@@ -138,6 +138,34 @@ def _argv_of(pid: int) -> list[str]:
         return []
 
 
+def _environ_value(pid: int, name: str) -> str:
+    """One variable from a process's environment, or ""."""
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return ""
+    prefix = name.encode() + b"="
+    for entry in raw.split(b"\0"):
+        if entry.startswith(prefix):
+            return entry[len(prefix):].decode("utf-8", "replace")
+    return ""
+
+
+def _start_ms(pid: int) -> int:
+    """Process start as epoch milliseconds, or 0."""
+    stat = _read_text(f"/proc/{pid}/stat")
+    try:
+        ticks = int(stat.rsplit(")", 1)[1].split()[19])
+        btime = next(
+            int(line.split()[1])
+            for line in _read_text("/proc/stat").splitlines()
+            if line.startswith("btime ")
+        )
+    except (IndexError, ValueError, StopIteration):
+        return 0
+    return int((btime + ticks / os.sysconf("SC_CLK_TCK")) * 1000)
+
+
 def _parent_walk_for_host(start_pid: int) -> tuple[str, int, list[int]]:
     """Walk up the proc tree from start_pid; return (host_name, host_pid,
     ancestor_chain) where the chain runs [start_pid, ..., host_pid]. The
@@ -204,7 +232,9 @@ def _is_service_argv(argv: list[str]) -> bool:
     return any(a in _HEADLESS_FLAGS for a in rest)
 
 
-def _pgrep(name: str) -> list[int]:
+def _pgrep(name: str, services: bool = False) -> list[int]:
+    """Interactive processes named `name`, or with `services` only the
+    background ones (app servers, daemons) that the scan otherwise skips."""
     try:
         proc = subprocess.run(
             ["pgrep", "-x", name],
@@ -218,7 +248,7 @@ def _pgrep(name: str) -> list[int]:
         if not pid_s.isdigit():
             continue
         pid = int(pid_s)
-        if _is_service_argv(_argv_of(pid)):
+        if _is_service_argv(_argv_of(pid)) != services:
             continue
         out.append(pid)
     return out
@@ -598,17 +628,135 @@ def _claude_info(pid: int) -> dict:
     return info
 
 
+def _codex_home(pid: int) -> str:
+    """The CODEX_HOME a codex process runs with; ~/.codex by default."""
+    home = _environ_value(pid, "CODEX_HOME").rstrip("/")
+    return home if home.startswith("/") else str(Path.home() / ".codex")
+
+
+def _codex_thread_name(home: str, session_id: str) -> str:
+    """The thread name Codex shows for a session. session_index.jsonl is
+    append-only, so the last line for the id reflects any rename."""
+    name = ""
+    try:
+        with open(f"{home}/session_index.jsonl", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if session_id not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and entry.get("id") == session_id:
+                    name = _text(entry.get("thread_name")).strip() or name
+    except OSError:
+        return ""
+    return name[:200]
+
+
+def _codex_meta(path: str) -> tuple[str, str, int]:
+    """(id, cwd, creation ms) from a Codex rollout's session_meta line."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            rec = json.loads(f.readline() or "{}")
+    except (OSError, ValueError):
+        return "", "", 0
+    payload = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "session_meta" else None
+    if not isinstance(payload, dict):
+        return "", "", 0
+    return _text(payload.get("id")), _text(payload.get("cwd")), _ts_ms(payload.get("timestamp"))
+
+
+def _held_rollouts(pid: int, needle: str) -> set[str]:
+    """Every rollout under `needle` that `pid` holds open."""
+    fd_dir = f"/proc/{pid}/fd"
+    out: set[str] = set()
+    try:
+        entries = os.listdir(fd_dir)
+    except OSError:
+        return out
+    for entry in entries:
+        try:
+            target = os.readlink(os.path.join(fd_dir, entry))
+        except OSError:
+            continue
+        if needle in target and target.endswith(".jsonl"):
+            out.add(target)
+    return out
+
+
+def _codex_rollout_named(home: str, session_id: str) -> str:
+    for path in Path(home, "sessions").glob(f"*/*/*/rollout-*-{session_id}.jsonl"):
+        return str(path)
+    return ""
+
+
+def _codex_fresh_rollout(pid: int, home: str, pool: set[str]) -> tuple[str, bool]:
+    """The loaded thread a fresh TUI started, and whether that is certain.
+
+    Threads are created on the first prompt, in the TUI's folder. It is
+    certain when exactly one loaded thread in that folder was created after
+    the TUI started and no other fresh TUI runs there. The app server keeps
+    a closed thread loaded for about a minute, but that thread predates any
+    TUI started after it."""
+    cwd, start = _cwd_of(pid), _start_ms(pid)
+    if not cwd or not start:
+        return "", False
+    mine = []
+    for path in pool:
+        _sid, thread_cwd, created = _codex_meta(path)
+        if thread_cwd == cwd and created >= start - 2000:
+            mine.append(path)
+    if not mine:
+        return "", False
+    try:
+        newest = max(mine, key=os.path.getmtime)
+    except OSError:
+        return "", False
+    peers = [
+        other for other in _pgrep("codex")
+        if other != pid and _codex_home(other) == home
+        and _cwd_of(other) == cwd and not _resume_arg(other, "resume")
+    ]
+    return newest, len(mine) == 1 and not peers
+
+
 def _codex_info(pid: int) -> dict:
+    """Older Codex holds its rollout in the TUI. Newer Codex loads threads
+    in one `codex app-server` per CODEX_HOME that every TUI shares, so a TUI
+    is matched to a loaded thread by its `resume <id>` argv, or by folder
+    and creation time."""
     info = {
         "sessionId": "", "cwd": "", "windowTitle": "", "lastPrompt": "",
         "state": "working", "identityExact": False, "model": "",
     }
-    rollout, direct = _open_jsonl_under(pid, "/.codex/sessions/")
+    home = _codex_home(pid)
+    needle = home + "/sessions/"
+    rollout, exact = _open_jsonl_under(pid, needle)
+    resume_id = _resume_arg(pid, "resume")
+    if not rollout:
+        pool: set[str] = set()
+        for server in _pgrep("codex", services=True):
+            if _codex_home(server) == home:
+                pool |= _held_rollouts(server, needle)
+        if resume_id:
+            rollout = next(
+                (p for p in pool if p.endswith(f"-{resume_id}.jsonl")), ""
+            ) or _codex_rollout_named(home, resume_id)
+            exact = bool(rollout)
+        else:
+            rollout, exact = _codex_fresh_rollout(pid, home, pool)
     if not rollout:
         return info
     info = _transcript_info(rollout, "codex")
-    info["identityExact"] = direct and bool(info["sessionId"])
+    info["identityExact"] = exact and bool(info["sessionId"]) and (
+        not resume_id or info["sessionId"] == resume_id
+    )
     info["cwd"] = info["cwd"] or _cwd_of(pid)
+    if info["sessionId"] and not info.get("windowTitle"):
+        info["windowTitle"] = _codex_thread_name(home, info["sessionId"])
+    if home != str(Path.home() / ".codex"):
+        info["codexHome"] = home
     return info
 
 
@@ -788,17 +936,54 @@ def _session_dir_of(pid: int) -> str:
     return ""
 
 
-def _resume_arg(pid: int, flag: str) -> str:
-    """The session id a process was started to resume, or ""."""
-    argv = _argv_of(pid)
+def _flag_value(argv: list[str], flag: str) -> str:
+    """The session id given to `flag` in `argv`, or ""."""
     value = ""
     for i, a in enumerate(argv):
         if a == flag and i + 1 < len(argv):
             value = argv[i + 1]
         elif a.startswith(flag + "="):
             value = a.split("=", 1)[1]
-    ok = value and len(value) <= 256 and all(c.isalnum() or c == "-" for c in value)
+    ok = (
+        value and len(value) <= 256 and not value.startswith("-")
+        and all(c.isalnum() or c == "-" for c in value)
+    )
     return value if ok else ""
+
+
+def _resume_arg(pid: int, flag: str) -> str:
+    """The session id a process was started to resume, or ""."""
+    return _flag_value(_argv_of(pid), flag)
+
+
+def _shell_resume_arg(pid: int, program: str, flag: str) -> str:
+    """pi overwrites its process title, which hides its flags. When a shell
+    ran it through `-c`, as CodexBar's Launch does, they are still in that
+    shell's command string: the last `program` command there names them."""
+    argv = _argv_of(_ppid_of(pid))
+    script = next(
+        (argv[i + 1] for i, a in enumerate(argv[:-1])
+         if a.startswith("-") and not a.startswith("--") and "c" in a),
+        "",
+    )
+    if not script:
+        return ""
+    lexer = shlex.shlex(script, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return ""
+    command: list[str] = []
+    current: list[str] = []
+    for word in words + [";"]:
+        if word and set(word) <= set(";&|()"):
+            if current and os.path.basename(current[0]) == program:
+                command = current
+            current = []
+        else:
+            current.append(word)
+    return _flag_value(command, flag)
 
 
 def _rollout_named(session_id: str) -> str:
@@ -810,7 +995,47 @@ def _rollout_named(session_id: str) -> str:
     return ""
 
 
-def _pi_info(pid: int) -> dict:
+# pi writes a new session's header right after startup and never keeps the
+# rollout open, so the header time is what ties a rollout to its process.
+_FRESH_SESSION_MS = 30_000
+
+
+def _header_ms(path: str) -> int:
+    """Creation time from a pi/omp rollout's session header, or 0."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = json.loads(f.readline() or "{}")
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(head, dict) or head.get("type") != "session":
+        return 0
+    return _ts_ms(head.get("timestamp"))
+
+
+def _created_by(pid: int, rollout: str) -> bool:
+    """True when `rollout` is the only session in its folder created during
+    the first seconds of `pid`. Two runs started together in one folder,
+    `/new`, and `--continue` all fail this and stay unproven."""
+    start = _start_ms(pid)
+    if not start:
+        return False
+
+    def fresh(path: str) -> bool:
+        return start - 2000 <= _header_ms(path) <= start + _FRESH_SESSION_MS
+
+    if not fresh(rollout):
+        return False
+    try:
+        siblings = [
+            str(p) for p in Path(rollout).parent.glob("*.jsonl")
+            if str(p) != rollout and p.stat().st_mtime * 1000 >= start - 2000
+        ]
+    except OSError:
+        return False
+    return not any(fresh(p) for p in siblings)
+
+
+def _pi_info(pid: int, resume_flags: tuple[str, ...] = ("--resume",)) -> dict:
     """pi and omp share the same JSONL layout. omp keeps the active file open
     on an fd (so we can see it via /proc/<pid>/fd); pi closes it between
     writes, so we fall back to the cwd → slug lookup.
@@ -822,7 +1047,15 @@ def _pi_info(pid: int) -> dict:
         "state": "working", "identityExact": False, "model": "",
     }
     rollout, direct = _open_jsonl_under(pid, "/.pi/agent/sessions/", "/.omp/agent/sessions/")
-    resume_id = _resume_arg(pid, "--resume")
+    resume_id = next(
+        (value for value in (_resume_arg(pid, flag) for flag in resume_flags) if value),
+        "",
+    ) or next(
+        (value for value in (
+            _shell_resume_arg(pid, _comm_of(pid), flag) for flag in resume_flags
+        ) if value),
+        "",
+    )
     if not direct and resume_id:
         # A resumed session opens its rollout only after startup; until then
         # the argv names it, where the slug lookup would pick another session.
@@ -840,7 +1073,9 @@ def _pi_info(pid: int) -> dict:
 
     info = _transcript_info(rollout, "pi")
     info["identityExact"] = bool(info["sessionId"]) and (
-        direct or info["sessionId"] == resume_id
+        direct
+        or info["sessionId"] == resume_id
+        or (not resume_id and _created_by(pid, rollout))
     )
     info["cwd"] = info["cwd"] or _cwd_of(pid)
     return info
@@ -894,7 +1129,7 @@ _INFO_FN = {
     "claude": _claude_info,
     "codex": _codex_info,
     "opencode": _opencode_info,
-    "pi": _pi_info,
+    "pi": lambda pid: _pi_info(pid, ("--session", "--session-id")),
     "omp": _pi_info,
 }
 
@@ -911,10 +1146,26 @@ _RESUME_PREFIXES = {
 # Aggregate
 # ---------------------------------------------------------------------------
 
+def _codex_home_value(value: object) -> str:
+    """A saved non-default CODEX_HOME, or "" when absent or unusable."""
+    if (
+        not isinstance(value, str)
+        or not value.startswith("/")
+        or len(value) > 4096
+        or any(c in value for c in "\0\n")
+    ):
+        return ""
+    return value
+
+
 def _resume_command(
-    provider: str, session_id: str, cwd: str, identity_exact: bool
+    provider: str, session_id: str, cwd: str, identity_exact: bool,
+    codex_home: object = "",
 ) -> str:
-    """Build a copyable provider resume command for a proven identity."""
+    """Build a copyable provider resume command for a proven identity.
+
+    A Codex session stored under a non-default CODEX_HOME only resumes with
+    that home set, so the command carries it."""
     if (
         identity_exact is not True
         or not isinstance(provider, str)
@@ -928,6 +1179,9 @@ def _resume_command(
     ):
         return ""
     command = shlex.join([*_RESUME_PREFIXES[provider], session_id])
+    home = _codex_home_value(codex_home) if provider == "codex" else ""
+    if home:
+        command = f"CODEX_HOME={shlex.quote(home)} {command}"
     if cwd:
         command = f"{shlex.join(['cd', '--', cwd])} && {command}"
     return command
@@ -975,8 +1229,9 @@ def _build_records() -> list[dict]:
                 "stateChangedAt": now_ms,
                 "updatedAt": now_ms,
                 "identityExact": identity_exact,
+                "codexHome": _codex_home_value(info.get("codexHome")),
                 "resumeCommand": _resume_command(
-                    provider, sid, cwd, identity_exact
+                    provider, sid, cwd, identity_exact, info.get("codexHome")
                 ),
             })
     return records
@@ -1129,7 +1384,8 @@ def _history_record(record: dict, active: bool, closed_by: str = "") -> dict:
     if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
         timestamp = 0
     cwd = text("cwd")
-    expected_command = _resume_command(provider, session_id, cwd, True)
+    codex_home = _codex_home_value(record.get("codexHome"))
+    expected_command = _resume_command(provider, session_id, cwd, True, codex_home)
     if active:
         command = (
             expected_command if record.get("identityExact") is True else ""
@@ -1154,6 +1410,7 @@ def _history_record(record: dict, active: bool, closed_by: str = "") -> dict:
         "lastSeenAt": timestamp,
         "model": _model_text(record.get("model")),
         "resumeCommand": command,
+        "codexHome": codex_home,
         "closedBy": closed_by,
         "recent": _history_turns(record.get("recent")),
     }
@@ -1210,6 +1467,7 @@ def _merge_snapshot(
             record.get("sessionId"),
             record.get("cwd") if isinstance(record.get("cwd"), str) else "",
             identity_exact,
+            record.get("codexHome"),
         )
 
     history_by_key: dict[tuple[str, str], dict] = {}

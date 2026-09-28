@@ -135,10 +135,18 @@ for GPT models.
 
 | Agent                         | Discovery method                                       |
 | ----------------------------- | ------------------------------------------------------ |
-| **Claude Code**               | `pgrep claude`, transcript parse from `~/.claude/`     |
-| **OpenAI Codex CLI**          | `pgrep codex`, transcript parse from `~/.codex/`       |
+| **Claude Code**               | `pgrep claude`, `~/.claude/sessions/<pid>.json` and the project transcript |
+| **OpenAI Codex CLI**          | `pgrep codex`, rollout under the process's `CODEX_HOME` (default `~/.codex`), title from `session_index.jsonl` |
 | **OpenCode**                  | `pgrep opencode`, session database                     |
 | **pi / omp**                  | `pgrep -x pi` / `omp`, JSONL rollout from `~/.pi/` or `~/.omp/` |
+
+A resume command is offered only when the exact session is known. Codex
+sessions under a non-default `CODEX_HOME` resume with it set, e.g.
+`CODEX_HOME=~/.codex-work codex resume <id>`. Two cases stay untracked
+because one terminal does not map to one session: Claude Code's agent view
+(plain `claude` opening the "describe a task" screen), whose tasks run as
+background sessions of `claude daemon`, and Codex's Agent Command Center
+after switching to another thread.
 
 Sessions are recognised in kitty, Konsole, WezTerm, Alacritty, Ghostty, foot,
 GNOME Terminal, Tilix, Yakuake, xterm, tmux and VS Code terminals. A process

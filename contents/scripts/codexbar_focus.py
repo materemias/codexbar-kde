@@ -359,7 +359,7 @@ def launch(provider: str, session_id: str) -> int:
     cwd = record.get("cwd") if isinstance(record.get("cwd"), str) else ""
     command = record.get("resumeCommand")
     if not command or command != agents._resume_command(
-        provider, session_id, cwd, True
+        provider, session_id, cwd, True, record.get("codexHome")
     ):
         sys.stderr.write("codexbar_focus: no verified resume command\n")
         return 6
