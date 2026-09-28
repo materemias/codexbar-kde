@@ -1,219 +1,120 @@
 # CodexBar for KDE Plasma 6
 
-A system-tray widget that lives inside your KDE panel — showing AI coding-provider
-usage limits at a glance, and a full **Agent View** of every Claude, Codex, pi,
-OpenCode, and omp session running on your machine. One click to jump straight to
-the blocked one.
+A KDE Plasma 6 panel widget for working with AI coding agents. It shows how
+much of each provider's allowance you have left, every agent session running on
+your machine and what it is doing, and the sessions that recently ended, with
+one click to bring them back.
 
-Linux port of the macOS [CodexBar](https://github.com/steipete/CodexBar) menu-bar app.
+It started as a Linux port of the macOS
+[CodexBar](https://github.com/steipete/CodexBar) menu-bar app and uses its
+`codexbar` CLI for usage data. It has since grown into a control surface for
+agents: live sessions across Claude Code, Codex, OpenCode, pi and omp, click to
+focus their terminal, a conversation peek, and a History tab that restores
+sessions after a reboot on the desktops they ran on.
 
-![CodexBar popup and tray indicators](docs/screenshot.png)
+| Usage | Agents | History |
+| :---: | :---: | :---: |
+| ![Usage tab](docs/usage.png) | ![Agents tab](docs/agents.png) | ![History tab](docs/history.png) |
 
-## What it does
+The screenshots use made-up accounts and sessions.
 
-**Usage tab** — Per-provider rate-limit meters with progress bars, percent used,
-and reset countdowns. Supports Claude, Codex, z.ai, OpenCode Go, OpenRouter,
-Kilo, and TypeSafe out of the box.
+## Features
 
-Each meter carries a **pace tick**: a small marker showing where even
-consumption would sit at this point in the window. A white tick ahead of the
-fill means the current pace lasts until the reset; a red tick behind the fill's
-end means the window will run out before it resets at this rate. Once a window
-is 3% elapsed, its reset line shows a `proj N%` suffix — the projected usage at
-reset if the current rate holds — and hovering a bar details the elapsed time,
-pace, and when the meter would hit 100%. Before that the tick stays neutral and
-no projection is shown, since the numbers are pure noise in the first minutes.
-A reset timestamp that is past or outside the declared window is treated as
-broken data and renders without a tick. Balance-only meters (OpenRouter limit,
-Kilo credits, TypeSafe balance) have no time window and never show the tick.
+### Usage tab
 
-For Codex, the weekly reset also resets the 5h session window. When the
-weekly reset comes before the session's own end, the 5h row shows the weekly
-reset time, and its pace and projection span the shortened window from the
-session start to that reset. Claude's weekly rollover leaves the running 5h
-session alone, so Claude's 5h row always shows its own reset time.
+- **Provider meters.** Rate-limit bars with percent used and reset countdowns
+  for Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo and TypeSafe. Balance
+  providers (OpenRouter, Kilo, TypeSafe) show what is left instead of a bar.
+- **Pace.** Each windowed bar has a tick where even use would sit right now.
+  A white tick ahead of the fill means the current pace lasts until the reset;
+  a red tick behind it means the window runs out first. From 3% into the
+  window, the reset line adds `proj N%`, the usage at reset if the current
+  rate holds, and hovering a bar shows elapsed time, pace, and when it would
+  hit 100%. Broken reset times (in the past or outside the window) get no tick.
+- **Pace colours.** Bars and tray rings stay green while usage is at or under
+  the tick, whatever the percentage. Past the tick they turn yellow, then
+  orange at one third and red at two thirds of the way to 100%. Four hours into
+  a 5h window the tick is at 80%: 79% is green, 81% yellow, 87% orange, 94% red.
+  Bars without a pace use fixed thresholds: yellow from 50%, orange from 70%,
+  red from 90%.
+- **Codex accounts.** All Codex accounts sit under one `OPENAI CODEX` header,
+  each with its email and plan. With two or more accounts, a combined bar pools
+  their allowances in Plus units (Plus is 1, Pro is 20). Its tick is the
+  allowance-weighted average of elapsed time, so accounts about to reset pull
+  it forward, and its reset line shows allowances left and the next reset, for
+  example `12.9 of 41 Plus allowances left · next reset Sep 26, 11:01 (1d 1h)`.
+  The 7d combined bar is on by default, the 5h one off.
+- **Codex 5h window.** A Codex weekly reset also resets the 5h window, so when
+  the weekly reset comes first, the 5h row ends there and its pace spans the
+  shortened window. Claude's weekly rollover leaves the 5h session alone.
+- **Saved resets.** Claude and each Codex account show their usable reset
+  credits on the weekly row, e.g. `· 2 saved resets · soonest expires in 16d
+  8h`. For Claude this comes from Anthropic's usage API with the token in
+  `~/.claude/.credentials.json`; a failed request just hides it.
+- **Account rotation indicator.** If you run the omp Codex account rotation, a
+  script that spreads traffic across several Codex accounts and decides which
+  may be used, the Codex header shows its mode and each account shows 🟢 when
+  open to rotation or 🔒 when held back. Without it, nothing is shown.
+- **Codex reset forecast.** An optional line from
+  [codex-reset.com](https://codex-reset.com) under the Codex accounts:
+  `ANNOUNCED` with the announcement, `LIKELY` with an estimated time and its
+  chance within 48h, or `UNKNOWN` with how long the wait has been against
+  recent gaps. Open Codex incidents and the latest hint appear below it. If the
+  site is down, usage data is unaffected.
+- **Refresh.** The header button, or `R` on the Usage tab, fetches usage and
+  rescans agents immediately. The header also shows the `codexbar` CLI version.
 
-Bar and tray-ring colors follow the same pace. A meter at or under its pace
-tick is green, whatever the absolute percentage. Once usage passes the tick it
-turns yellow, then orange at one third and red at two thirds of the way from
-the tick to 100%. For example, 4 hours into a 5-hour window the tick sits at
-80%: 79% is green, 81% yellow, 87% orange, 94% red. Meters without a pace
-(no reset time, or under 3% elapsed) use fixed thresholds: yellow from 50%,
-orange from 70%, red from 90%.
+### Agents tab
 
-With two or more Codex accounts, a **combined** section above the per-account
-sections pools their allowances. Allowances are counted in Plus units: a Plus
-account is one, a Pro account twenty, and any other plan one. The fill is the
-used share of the combined total, and the pace tick is the allowance-weighted
-average elapsed share, so it marks where even use of every account would sit
-now. Accounts close to their reset pull the tick forward, since their leftover
-allowance expires soon. The reset line shows the remaining allowance and when
-the next account resets, e.g. `12.9 of 41 Plus allowances left · next reset
-Sep 26, 11:01 (1d 1h) · proj 124%`. An account that does not report a window
-(Codex Pro has no 5h window) is left out of that combined bar, and a combined
-bar needs at least two contributing accounts. The omp rotation state plays no
-part. Settings → Providers → Codex combined bars toggles the 5h (off by
-default) and 7d (on by default) bars.
+- **Live sessions.** Every Claude Code, Codex, OpenCode, pi and omp session in
+  a terminal, grouped by project folder, newest first. Each row shows the task
+  title, model, terminal, state and how long it has been in it: working
+  (green), blocked on your input (red), idle (grey), or untracked (blue) when
+  the process has no resolvable session. Freshly idle rows pulse for five
+  minutes.
+- **Desktop badges.** The number of the virtual desktop the session's window
+  is on, highlighted when it is the current one.
+- **Click to focus.** Clicking a row, or `Enter`, raises the terminal hosting
+  the session, switching desktop if needed.
+- **Conversation peek.** The arrow or `Space` expands the last eight user,
+  assistant and tool turns.
+- **Type to filter.** Typing filters by title, prompt, folder, provider and
+  model (fuzzy), and by recent conversation text (exact). Matching lines
+  appear under the row with the query highlighted.
 
-Countdowns and pace indicators update while the popup or tray tooltip is
-visible, independently of the provider polling interval.
+### History tab
 
-The popup header shows the version of the CodexBar CLI next to the title, read
-from `codexbar --version` during the same fetch that collects usage. If the CLI
-is missing or too old to report a version, the label hides and usage data is
-unaffected.
+- **Interrupted by restart.** After a reboot, every session from the last scan
+  before it, ordered by desktop. They stay until the session runs again.
+- **Recently closed.** The 20 most recent sessions that exited during this
+  boot, as compact rows with a peek of their last turns.
+- **Restore.** Each row has a copyable resume command, shown only when the
+  exact provider session is known. Sessions that ran in kitty also get
+  **Launch**: CodexBar switches to the saved desktop, opens a new kitty window
+  there and resumes the session in your shell. **Restore all** does this for
+  every restart row in desktop order, one at a time. Running sessions are never
+  launched twice, and a row leaves History once its session is live again.
+- **Dismiss.** ✕ removes a row; **Dismiss all** clears the restart rows shown.
+- **Keyboard and filter.** `Up`/`Down` select, `Space` peeks, `Enter`
+  launches, and typing filters like on the Agents tab.
 
-**Manual refresh.** The refresh button in the popup header — or pressing `R`
-while the popup is on the Usage tab — requests a fresh provider fetch and
-agent scan immediately, without waiting for the polling interval. When a
-provider is enabled, each request runs a new command rather than replaying a
-cached source; a call that lands while a fetch is already in flight is
-skipped. On the Agents tab, `r` types into the filter instead of refreshing.
+### Panel
 
-**Saved resets.** Each Codex account's and Claude's weekly (7d) row appends its
-usable reset credits to the reset line. Claude shows e.g. `· 2 saved resets ·
-soonest expires in 16d 8h (2026-10-04)`; Codex rows show only `· 2 saved
-resets`, and hovering the line shows the expiry. The expiry shown is the earliest one;
-accounts without credits show nothing. Codex counts credits with status
-`available`. Claude counts `resets_left` of unpaused grants inside their
-validity window, read from the `cedar_ember` block of Anthropic's
-`/api/oauth/usage` with the token in `~/.claude/.credentials.json` (the
-CodexBar CLI drops that block). An expired token or failed request just hides
-the suffix.
+- Usage rings per provider and window, coloured by pace, optionally shown only
+  when a window is projected to run out.
+- Coloured dots counting working, blocked and idle agents, a red badge when an
+  agent is blocked, and an optional label with the current task.
+- `Super+A` opens the popup on Agents. The popup also opens on Agents when an
+  agent is blocked, and on History when sessions wait to be restored.
 
-**Codex group.** All Codex accounts share one `OPENAI CODEX` header. Below it
-come the combined bars (when enabled), then each account under a small
-sub-heading with its email and plan, separated by faint dividers.
+### How agents are found
 
-**omp Codex rotation.** The Codex header shows `omp · auto` or `omp · confirm`
-and a rule badge on the right; hovering it shows the rule description. A red
-`STALLED` badge means all accounts are closed. It reads
-`~/.omp/agent/codex-rotation/state.json` and `mode.json` during provider
-refreshes, even when the Agents tab is disabled, without changing either file.
-A missing operating mode defaults to `confirm`; missing or unusable rotation
-state hides the status. Invalid or unreadable mode configuration also hides it.
-
-Account emails in the Codex sub-headings and tray tooltip show 🟢 when open for
-omp or 🔒 when blocked by omp. Indicators stay at full opacity while account
-text remains dimmed. The widget matches each email exactly to an
-`accounts[].label` in `state.json`. An account is blocked when its numeric
-`credentialId` appears as a key in `owned`, otherwise it is open. These badges
-show availability, not which account is currently handling traffic.
-Unmatched emails or missing, malformed, or ambiguous account data show no badge.
-
-- `FILL`: Pros share traffic, stop at 85%.
-- `TARGET`: One Pro drains to 100%, redeems.
-- `EXPIRY-BURN`: Burn accounts whose resets expire soon.
-- `BURN`: Global reset announced; Pros stop 95%.
-- `NO-BANK`: No banked resets; Pros stop 95%.
-- `IDLE`: No Pro accounts logged in.
-
-**Codex reset forecast.** Below the last Codex account, the usage tab shows an
-auxiliary forecast
-from [codex-reset.com](https://codex-reset.com) on one `Forecast` line. A
-coloured badge names the state:
-
-- `ANNOUNCED` (green): a dated commitment or alert newer than the last recorded
-  reset, e.g. `end of Tuesday (by Sep 23, 09:00, 23h) · 93% chance`, with the
-  announcement text on the next line.
-- `LIKELY` (amber): no announcement, but the model's 48h chance is at least
-  50%; shows an estimate derived from the site's recent cadence and common
-  reset window, e.g. `~ Sep 23, 01:00 (16h) · 62% chance within 48h`.
-- `UNKNOWN` (grey): below that chance a cadence-based timestamp would be
-  noise, so the elapsed wait against recent reset gaps stands in for it:
-  `next reset unknown · waited 10d, longer than 88% of recent gaps`.
-
-An open Codex incident from the site's status feed appears in red on its own
-line (`Codex incident open (Codex API) — compensation reset possible`). The
-last line carries the announcement text, or, without an announcement, Tibo's
-latest soft hint (`Hint Sep 19: "…still coming in Tuesday"`); hints older than
-the last recorded reset are not shown.
-
-The model confidence is appended when no reset is announced. Times use local
-24 hour time. The forecast is optional and enabled by default. If
-codex-reset.com is unavailable, usage data continues to work. Cached forecast
-data can be marked stale. The status feed is fetched with the forecast, with a
-four-second deadline, and its failure only drops the incident line.
-Forecast requests have an eight-second overall deadline and a 256 KiB response
-limit. A timed-out request falls back to cached forecast data when available.
-
-**Agent View tab** — A real-time overview of every active coding-agent session on
-your machine, grouped by project folder:
-
-- **Live state tracking** — working (green), blocked/waiting for input (red),
-  idle (grey), untracked (blue).
-- **One-click focus** — click a session row (or press Enter with keyboard nav)
-  and the widget activates the terminal window hosting that session via KWin
-  scripting. Works with Kitty, Konsole, and other terminal emulators.
-- **Folder grouping** — sessions clustered by project directory, with newest
-  sessions first within each project.
-- **Desktop badges.** Each session row shows the number of the virtual
-  desktop its terminal window is on. Sessions on the current desktop get a
-  highlighted badge, so you can see which agent is one switch away. Windows
-  pinned to all desktops show "all".
-- **Conversation peek.** Click the arrow on a session row or press `Space` to
-  expand its last eight user and assistant turns. Color-coded cards separate
-  user, assistant, and tool turns.
-  Selection and the expanded preview follow the same session when polling
-  reorders the list.
-- **Type-to-filter search.** Start typing on the Agents or History tab. The
-  filter fuzzy matches the session title, last prompt, working directory, and
-  provider. Recent conversation text uses exact case-insensitive substring
-  matching; matching lines appear under the row with the query highlighted.
-- **Auto-tab.** The popup opens directly to Agents when `Super+A` is pressed
-  or an agent is blocked, and to History when sessions cut off by a restart
-  are waiting to be restored.
-- **Tray presence** — colored count dots (working/blocked/idle) beside the
-  usage rings, optional featured-task label, and a red badge when agents need
-  attention.
-
-**History tab** — Sessions that ended, with one-click restore:
-
-- **Interrupted by restart.** After a Linux boot change, every session from
-  the last sample before the reboot appears here, ordered by virtual desktop.
-  These rows stay until the session runs again.
-- **Recently closed.** Sessions that exit during the current boot, newest
-  first, capped at the 20 most recent. Rows look like Agents rows: one line
-  with title, model, project folder, time since close, and desktop. Click a
-  row or its arrow to peek at the last turns and the resume command; the play
-  button launches it. Untracked processes have no session identity and are
-  not recorded.
-- **Restore.** Each row shows its project, desktop, host, identifying text,
-  and last-seen time. CodexBar shows a copyable resume command only when it
-  can prove the exact provider session. Rows that ran in kitty also get a
-  **Launch** button: it opens a new kitty window in its own systemd scope,
-  runs the resume command in your interactive shell, and switches to the
-  saved desktop first so you watch the window open there. The button
-  stays disabled for a minute after a click, and a session that is already
-  running is refused. A row leaves History once its session is live again.
-  Desktops are saved by position; if the saved desktop no longer exists, the
-  window opens on the current one and the tab says so.
-- **Restore all.** The restart section's **Restore all** button launches
-  the kitty rows it counts (only those matching an active filter), one at a
-  time in desktop order, so each desktop switch finishes before the next
-  window opens. A row whose launch fails can be retried right away.
-- **Dismiss.** The ✕ on any row removes it from History; **Dismiss all**
-  clears the restart rows currently shown (respecting an active filter).
-  Dismissed rows do not come back unless that session runs and ends again.
-- **Keyboard.** `Up`/`Down` move the History selection, `Space` opens or
-  closes a recently closed row's peek, and `Enter` launches the selected
-  row, the same as the play button.
-
-The aggregator scans `/proc` to discover running agent processes and writes
-`~/.codexbar/agents.json`. The widget reads it after each successful scan, with
-at most one scan in flight per widget. No background daemon is required.
-Private parser checkpoints in `~/.codexbar/agents.parsers.json`, mode `0600`,
-retain session metadata and bounded recent turns across polls. Unchanged
-transcripts need no parsing; changed files validate the consumed prefix and
-parse only appended complete records. Rewrites, truncation, or file replacement
-reset the checkpoint. Missing or invalid checkpoints rebuild automatically.
-Both reader and writer use the current user's home directory, including homes
-outside `/home` and system-wide applet installations.
-At boot boundaries, the same file carries unresolved recovery records forward
-until the matching provider session becomes live again.
-Hiding the Agents tab does not stop polling while tray dots, the blocked badge,
-or the task label remain enabled. Unidentified processes are classified as
-untracked and can be excluded from both the list and its counts.
+A helper script scans `/proc` for agent processes on every poll, reads their
+session transcripts, and writes `~/.codexbar/agents.json`. No daemon or agent
+hooks are needed. Parsed transcript state is cached in
+`~/.codexbar/agents.parsers.json` (mode `0600`), so unchanged transcripts are
+not reparsed. Polling continues while the tray dots, badge or task label are
+enabled, even with the Agents tab hidden.
 
 ## Supported providers
 
@@ -236,58 +137,58 @@ for GPT models.
 | ----------------------------- | ------------------------------------------------------ |
 | **Claude Code**               | `pgrep claude`, transcript parse from `~/.claude/`     |
 | **OpenAI Codex CLI**          | `pgrep codex`, transcript parse from `~/.codex/`       |
-| **OpenCode**                  | `pgrep opencode`, transcript parse                     |
-| **pi / omp**                  | `pgrep -x pi`, JSONL rollout from `~/.pi/` or `~/.omp/` |
+| **OpenCode**                  | `pgrep opencode`, session database                     |
+| **pi / omp**                  | `pgrep -x pi` / `omp`, JSONL rollout from `~/.pi/` or `~/.omp/` |
 
-Sessions without a hook sentinel file are shown as "untracked" — still visible
-with state and cwd, just no task title.
-
-When a session source records the selected model, the short model name appears
-beside the task title in an accent color. Rows without model metadata keep the
-existing layout.
+Sessions are recognised in kitty, Konsole, WezTerm, Alacritty, Ghostty, foot,
+GNOME Terminal, Tilix, Yakuake, xterm, tmux and VS Code terminals. A process
+whose session cannot be identified is listed as untracked, with its state and
+folder but no title; Settings → Agents can hide these.
 
 ## Requirements
 
-- KDE Plasma **6**
-- The [`codexbar`](https://github.com/steipete/CodexBar) CLI installed. The
-  default path is `/usr/bin/codexbar`, the entry point the `codexbar-cli`
-  package installs, chosen over the `~/.local/bin/codexbar` symlink. It is a
-  small `sh` wrapper that forwards to `/usr/lib/codexbar-cli/codexbar` and
-  survives CLI upgrades, so leave the setting on it unless your install lives
-  elsewhere.
-- Python 3 (already present on every Plasma 6 system)
-- `kpackagetool6` (ships with Plasma 6)
-- Build tools: CMake 3.21+, a C++17 compiler, and Qt 6 Core/QML development
-  files. On Arch, these come from `base-devel`, `cmake`, and `qt6-declarative`.
+| Requirement | Needed for |
+| --- | --- |
+| KDE Plasma **6** (with KWin) | Everything |
+| Python 3 | Everything (bundled with Plasma 6 systems) |
+| CMake 3.21+, a C++17 compiler, Qt 6 Core/QML development files | Building. On Arch: `base-devel`, `cmake`, `qt6-declarative` |
+| [`codexbar`](https://github.com/steipete/CodexBar) CLI | Usage tab and tray rings. Without it, Agents and History still work |
+| `qdbus6` (Plasma's Qt tools) | *Optional:* click to focus and desktop switching |
+| kitty | *Optional:* **Launch** and **Restore all**. Other terminals keep the copyable resume command |
+| systemd user session | *Optional:* **Launch**, so restored terminals survive a plasmashell restart |
+| kitty remote control (`allow_remote_control`, `listen_on`) | *Optional:* faster, exact focus of kitty windows. KWin is used otherwise |
+
+The `codexbar` CLI path defaults to `/usr/bin/codexbar`, which is what the
+Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 
 ## Install
 
-```sh
-git clone https://github.com/materemias/codexbar-kde
-cd codexbar-kde
-cmake -S . -B build
-cmake --build build
-kpackagetool6 -t Plasma/Applet -i build/package
-```
+1. Build and install the widget. The package contains a small native plugin,
+   so build it on the machine that runs it:
 
-Then in Plasma:
+   ```sh
+   git clone https://github.com/materemias/codexbar-kde
+   cd codexbar-kde
+   cmake -S . -B build
+   cmake --build build
+   kpackagetool6 -t Plasma/Applet -i build/package
+   ```
 
-1. Right-click the panel → **Enter Edit Mode** → **Add Widgets…**
-2. Search for **CodexBar** and drag it onto the panel.
-3. Open widget settings → **Agents** tab → click **Install** to set up the
-   agent integration (XHR env scripts + `codexbar://` URL handler for
-   click-to-focus).
+   Install `build/package`, not the source directory. The installed copy lives
+   in `~/.local/share/plasma/plasmoids/org.codexbar.plasmoid/`, so the source
+   checkout can be moved or deleted afterwards.
 
-The installed copy lives at `~/.local/share/plasma/plasmoids/org.codexbar.plasmoid/` —
-it's a self-contained snapshot, so the source directory can live anywhere.
+2. Add it to a panel: right-click the panel → **Enter Edit Mode** →
+   **Add Widgets…**, search for **CodexBar**, and drag it onto the panel.
 
-The build packages a small local `QProcess` plugin alongside the QML.
-Commands run directly through Qt rather than Plasma's executable DataSource,
-avoiding its growing dynamic-property metadata when polling commands change.
-Agent polling still passes a fresh desktop map and request timestamp every tick.
-Build on the target machine; the package contains a native library.
-Install `build/package`, not the source directory; the source tree has no
-compiled plugin.
+3. Enable the agent integration: widget settings → **Agents** → **Install**.
+   This lets the widget read `~/.codexbar/agents.json` and registers the
+   `codexbar://` handler used by click to focus. Agents and History stay empty
+   until it is installed and plasmashell has been restarted once (see
+   [Restarting plasmashell](#restarting-plasmashell)).
+
+4. Set up credentials for any provider beyond Claude and Codex, as described
+   below.
 
 ## Configure provider credentials
 
@@ -366,21 +267,22 @@ cd /path/to/codexbar-kde
 git pull
 cmake -S . -B build
 cmake --build build
-kquitapp6 plasmashell
+systemctl --user stop plasma-plasmashell.service
 kpackagetool6 -t Plasma/Applet -u build/package
-kstart plasmashell
+systemctl --user start plasma-plasmashell.service
 ```
 
-Run this from your desktop session shell. Stop Plasma before replacing the
-native library, then start it again to load the updated package.
+Plasma has to be stopped before the native plugin is replaced. `systemctl
+--user stop` waits until plasmashell has exited; `kquitapp6` returns earlier,
+and an immediate restart can then leave the panel down.
 
 If files were deleted between versions, do a clean reinstall:
 
 ```sh
-kquitapp6 plasmashell
+systemctl --user stop plasma-plasmashell.service
 kpackagetool6 -t Plasma/Applet -r org.codexbar.plasmoid
 kpackagetool6 -t Plasma/Applet -i build/package
-kstart plasmashell
+systemctl --user start plasma-plasmashell.service
 ```
 
 ## Uninstall
@@ -389,25 +291,21 @@ kstart plasmashell
 kpackagetool6 -t Plasma/Applet -r org.codexbar.plasmoid
 ```
 
+Settings → Agents → **Remove** first if you installed the agent integration.
+
 ## Restarting plasmashell
 
-If the widget doesn't pick up changes (new env vars, deleted files, icon
-caches), restart plasmashell:
+If the widget doesn't pick up changes (new environment, deleted files, icon
+caches), restart plasmashell through systemd:
 
 ```sh
-plasmashell --replace
-# or
-kquitapp6 plasmashell && kstart plasmashell
+systemctl --user stop plasma-plasmashell.service
+systemctl --user start plasma-plasmashell.service
 ```
 
-Manual restarts inherit the locale of the launching shell. To keep Hungarian
-24-hour time formatting in the popup, restart from your session shell with:
-
-```sh
-kquitapp6 plasmashell \
-  && env LANG=hu_HU.utf8 LC_ALL=hu_HU.utf8 LC_TIME=hu_HU.utf8 \
-       kstart plasmashell
-```
+This keeps the session's environment and locale, including the time format
+the popup uses. `plasmashell --replace` or `kstart plasmashell` from a terminal
+inherit that terminal's environment instead.
 
 ## Configuration
 
@@ -449,16 +347,17 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 
 ## Keyboard shortcuts
 
-| Shortcut         | Action                                             |
-| ---------------- | -------------------------------------------------- |
-| `Super+A`        | Open popup and switch to Agents tab                |
-| `↑` / `↓`        | Navigate agent rows; an open preview follows selection |
-| `Enter`          | Focus the terminal hosting the selected session    |
-| `Space`          | Expand or collapse the selected conversation peek  |
-| `R`              | Refresh usage (Usage tab only; `r` filters on Agents) |
-| Printable text   | Filter sessions on the Agents tab                   |
-| `Backspace`      | Edit the active filter                              |
-| `Esc`            | Clear the active filter, then close the popup       |
+| Shortcut         | Action                                                        |
+| ---------------- | ------------------------------------------------------------- |
+| `Super+A`        | Open the popup on the Agents tab                              |
+| `←` / `→`        | Switch tabs                                                   |
+| `↑` / `↓`        | Move the selection on Agents or History; an open peek follows |
+| `Space`          | Open or close the selected row's peek                         |
+| `Enter`          | Agents: focus the session's terminal. History: launch it      |
+| `R`              | Refresh (Usage tab only; elsewhere `r` types into the filter) |
+| Printable text   | Filter the Agents and History tabs                            |
+| `Backspace`      | Edit the active filter                                        |
+| `Esc`            | Clear the active filter, then close the popup                 |
 
 ## Layout
 
@@ -473,6 +372,7 @@ contents/
   ui/FullRepresentation.qml     # Popup: header (title, CLI version), tab bar
   ui/ProviderSection.qml        # Per-provider usage section (Usage tab)
   ui/AgentsSection.qml          # Agent list with folder groups (Agents tab)
+  ui/HistorySection.qml         # Ended sessions, restore and dismiss (History tab)
   ui/configBackend.qml          # Settings → Backend tab
   ui/configProviders.qml        # Settings → Providers tab
   ui/configTray.qml             # Settings → Tray tab
@@ -480,7 +380,7 @@ contents/
   ui/process/                   # Local native module metadata
   scripts/codexbar_fetch.py     # Parallel CLI invocation, merges JSON
   scripts/codexbar_agents.py    # Agent state aggregator (/proc scanner)
-  scripts/codexbar_focus.py     # Click-to-focus: KWin + Kitty activation
+  scripts/codexbar_focus.py     # Click to focus, kitty launch and desktop placement
   scripts/install_integration.py # One-shot: env scripts + URL handler + cleanup
   icons/*.svg                   # Per-provider icons
 ```
