@@ -83,6 +83,44 @@ class LaunchTests(unittest.TestCase):
         switch.assert_not_called()
         self.assertIn("desktop 9 no longer exists", err)
 
+    def test_launch_all_restores_reboot_rows_in_desktop_order(self) -> None:
+        def row(sid: str, **changes: object) -> dict:
+            record = entry(sessionId=sid, closedBy="reboot",
+                           resumeCommand=f"cd -- /work/project && omp --resume {sid}")
+            record.update(changes)
+            return record
+        payload = {
+            "agents": [{"provider": "omp", "sessionId": "live"}],
+            "history": [
+                row("unknown", desktop=""), row("d5", desktop="5"),
+                row("d2", desktop="2"), row("live", desktop="1"),
+                row("konsole", desktop="1", host="konsole"),
+                row("no-cmd", desktop="1", resumeCommand=""),
+                entry(sessionId="exit-row", desktop="1", closedBy="exit",
+                      resumeCommand="cd -- /work/project && omp --resume exit-row"),
+                row("hidden", desktop="1"),
+            ],
+        }
+        requested = {("omp", sid) for sid in
+                     ("unknown", "d5", "d2", "live", "konsole", "no-cmd", "exit-row")}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agents.json"
+            path.write_text(json.dumps(payload))
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(focus, "AGGREGATE_PATH", path),
+                mock.patch.object(focus, "launch",
+                                  side_effect=lambda _p, sid: 8 if sid == "d5" else 0) as launch,
+                mock.patch.object(focus.sys, "stdout", stdout),
+            ):
+                code = focus.launch_all(requested)
+        self.assertEqual(code, 0)
+        # Unrequested rows never launch, and a failed launch is not reported.
+        self.assertEqual([c.args[1] for c in launch.call_args_list],
+                         ["d2", "d5", "unknown"])
+        self.assertEqual(json.loads(stdout.getvalue()),
+                         [["omp", "d2"], ["omp", "unknown"]])
+
 
 if __name__ == "__main__":
     unittest.main()

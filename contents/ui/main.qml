@@ -256,26 +256,90 @@ PlasmoidItem {
         var cmd = "python3 " + Command.shellQuote(root.focusScriptPath)
             + " --launch " + Command.shellQuote(record.provider)
             + " " + Command.shellQuote(record.sessionId)
-        root._launchCommands[cmd] = key
+        root._launchCommands[cmd] = { keys: [key], batch: false }
+        launchRunner.run(cmd)
+    }
+
+    // Restores the given launchable restart rows. The helper runs exactly
+    // those, in desktop order, one at a time, so switches never interleave.
+    function launchAllHistory(records) {
+        var keys = []
+        var pairs = []
+        for (var i = 0; i < records.length; i++) {
+            var r = records[i]
+            if (!r || r.closedBy !== "reboot" || r.host !== "kitty" || !r.resumeCommand) continue
+            var key = JSON.stringify([r.provider, r.sessionId])
+            if (!root.historyLaunchAllowed(key)) continue
+            keys.push(key)
+            pairs.push([r.provider, r.sessionId])
+        }
+        if (keys.length === 0) return
+        var launches = Object.assign({}, root.historyLaunches)
+        for (var j = 0; j < keys.length; j++) launches[keys[j]] = Date.now()
+        root.historyLaunches = launches
+        root.historyLaunchError = ""
+        var cmd = "python3 " + Command.shellQuote(root.focusScriptPath) + " --launch-all "
+            + Command.shellQuote(encodeURIComponent(JSON.stringify(pairs)))
+        root._launchCommands[cmd] = { keys: keys, batch: true }
         launchRunner.run(cmd)
     }
 
     Process.CommandRunner {
         id: launchRunner
         onFinished: function(command, exitCode, standardOutput, standardError) {
-            var key = root._launchCommands[command]
+            var pending = root._launchCommands[command] || { keys: [], batch: false }
             delete root._launchCommands[command]
-            if (exitCode === 0) {
-                if (standardError.trim()) root.historyLaunchError = standardError.trim()
-                root.runAggregator()
-                return
+            // A batch reports which sessions started; the rest lose their
+            // cooldown so they can be retried at once.
+            var started = {}
+            if (pending.batch) {
+                try {
+                    var done = JSON.parse(standardOutput.trim() || "[]")
+                    for (var d = 0; d < done.length; d++) started[JSON.stringify(done[d])] = true
+                } catch (err) {}
+            } else if (exitCode === 0) {
+                for (var s = 0; s < pending.keys.length; s++) started[pending.keys[s]] = true
             }
-            root.historyLaunchError = standardError.trim()
-                || "launch failed (exit " + exitCode + ")"
-            if (key === undefined) return
             var launches = Object.assign({}, root.historyLaunches)
-            delete launches[key]
+            for (var i = 0; i < pending.keys.length; i++) {
+                if (!started[pending.keys[i]]) delete launches[pending.keys[i]]
+            }
             root.historyLaunches = launches
+            root.historyLaunchError = standardError.trim()
+                || (exitCode === 0 ? "" : "launch failed (exit " + exitCode + ")")
+            if (Object.keys(started).length > 0) root.runAggregator()
+        }
+    }
+
+    // Removes ended sessions from History. The aggregator owns agents.json,
+    // so it performs the write under its lock; the rows hide immediately.
+    function dismissHistory(records) {
+        var pairs = []
+        var hide = {}
+        for (var i = 0; i < records.length; i++) {
+            var r = records[i]
+            if (!r || !r.provider || !r.sessionId) continue
+            pairs.push([r.provider, r.sessionId])
+            hide[JSON.stringify([r.provider, r.sessionId])] = true
+        }
+        if (pairs.length === 0) return
+        var snap = Object.assign({}, root.agentSnapshot)
+        snap.history = (snap.history || []).filter(function(r) {
+            return !hide[JSON.stringify([r.provider, r.sessionId])]
+        })
+        root.agentSnapshot = snap
+        dismissRunner.run("python3 " + Command.shellQuote(root.aggregatorScriptPath)
+            + " --dismiss " + Command.shellQuote(encodeURIComponent(JSON.stringify(pairs))))
+    }
+
+    Process.CommandRunner {
+        id: dismissRunner
+        onFinished: function(command, exitCode, standardOutput, standardError) {
+            if (exitCode !== 0) {
+                root.historyLaunchError = standardError.trim()
+                    || "dismiss failed (exit " + exitCode + ")"
+            }
+            root.runAggregator()
         }
     }
 

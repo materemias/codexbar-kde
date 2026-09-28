@@ -188,6 +188,13 @@ your machine, grouped by project folder:
   running is refused. A row leaves History once its session is live again.
   Desktops are saved by position; if the saved desktop no longer exists, the
   window opens on the current one and the tab says so.
+- **Restore all.** The restart section's **Restore all** button launches
+  the kitty rows it counts (only those matching an active filter), one at a
+  time in desktop order, so each desktop switch finishes before the next
+  window opens. A row whose launch fails can be retried right away.
+- **Dismiss.** The ✕ on any row removes it from History; **Dismiss all**
+  clears the restart rows currently shown (respecting an active filter).
+  Dismissed rows do not come back unless that session runs and ends again.
 
 The aggregator scans `/proc` to discover running agent processes and writes
 `~/.codexbar/agents.json`. The widget reads it after each successful scan, with

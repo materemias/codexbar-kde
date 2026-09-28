@@ -92,6 +92,11 @@ credentials" for setup.
   `systemd-run --user --scope` so a plasmashell stop does not kill it. It
   switches to the saved desktop before starting kitty, and a self-unloading
   KWin script keeps the window there by pid and activates it.
+  `--launch-all <uri-json [[provider, id]]>` runs `launch` sequentially over
+  exactly those kitty reboot rows in desktop order and prints the pairs that
+  launched; QML keeps the cooldown only for those. `codexbar_agents.py --dismiss <uri-json [[provider, id]]>`
+  removes history rows under the aggregate writer lock; QML never edits
+  `agents.json` itself.
 
 ## Plasma constraints
 

@@ -401,6 +401,41 @@ def launch(provider: str, session_id: str) -> int:
     return 0
 
 
+def _desktop_rank(record: dict) -> tuple[int, int]:
+    """Numbered desktops first, then "all", then unknown, like the UI."""
+    desktop = record.get("desktop")
+    if agents._valid_desktop(desktop) and desktop != "all":
+        return 0, int(desktop)
+    return (1, 0) if desktop == "all" else (2, 0)
+
+
+def launch_all(keys: set[tuple[str, str]]) -> int:
+    """Resume the given launchable restart rows, one desktop after another.
+
+    Each launch waits for its window to be placed, so desktop switches run
+    in order and the user ends on the last desktop restored. Stdout carries
+    the JSON list of [provider, sessionId] pairs that actually launched."""
+    payload = agents._load_payload(AGGREGATE_PATH)
+    live = {agents._record_key(r) for r in payload["agents"]}
+    records = sorted(
+        (r for r in payload["history"]
+         if agents._record_key(r) in keys and agents._record_key(r) not in live
+         and r.get("closedBy") == "reboot" and r.get("host") == "kitty"
+         and r.get("resumeCommand")),
+        key=_desktop_rank,
+    )
+    launched: list[list[str]] = []
+    for record in records:
+        provider, session_id = agents._record_key(record)
+        if launch(provider, session_id) == 0:
+            launched.append([provider, session_id])
+    sys.stdout.write(json.dumps(launched) + "\n")
+    if not launched:
+        sys.stderr.write("codexbar_focus: nothing to restore\n")
+        return 2
+    return 0
+
+
 def focus(session_id: str) -> int:
     record = _find_sentinel(session_id)
     if not record:
@@ -434,6 +469,10 @@ def main(argv: list[str]) -> int:
         if len(argv) != 3:
             return 1
         return launch(argv[1], argv[2])
+    if argv[0] == "--launch-all":
+        if len(argv) != 2:
+            return 1
+        return launch_all(agents._parse_session_keys(argv[1]))
     arg = argv[0]
     prefix = "codexbar://focus/"
     if arg.startswith(prefix):

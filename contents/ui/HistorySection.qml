@@ -97,12 +97,40 @@ ColumnLayout {
         Layout.fillWidth: true
     }
 
-    PC3.Label {
+    readonly property var restorable: history.rebooted.filter(function(r) {
+        return r.host === "kitty" && (r.resumeCommand || "").length > 0
+            && root.historyLaunchAllowed(history.agentsView.agentKey(r))
+    })
+
+    RowLayout {
         visible: history.rebooted.length > 0
-        text: "Interrupted by restart"
-        font.weight: Font.Bold
-        font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
         Layout.fillWidth: true
+        spacing: Kirigami.Units.smallSpacing
+
+        PC3.Label {
+            text: "Interrupted by restart"
+            font.weight: Font.Bold
+            font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
+            Layout.fillWidth: true
+        }
+
+        PC3.ToolButton {
+            visible: history.restorable.length > 0
+            text: "Restore all (" + history.restorable.length + ")"
+            icon.name: "media-playback-start"
+            display: QQC2.AbstractButton.TextBesideIcon
+            onClicked: root.launchAllHistory(history.rebooted)
+            PC3.ToolTip.visible: hovered
+            PC3.ToolTip.text: "Resume every kitty session, desktop by desktop"
+            PC3.ToolTip.delay: 400
+        }
+
+        PC3.ToolButton {
+            text: "Dismiss all"
+            icon.name: "edit-clear-history"
+            display: QQC2.AbstractButton.TextBesideIcon
+            onClicked: root.dismissHistory(history.rebooted)
+        }
     }
 
     Repeater {
@@ -301,6 +329,18 @@ ColumnLayout {
                             + (closedRow.modelData.desktop
                                 ? " on desktop " + closedRow.modelData.desktop : "")
                         : "Launched"
+                    PC3.ToolTip.delay: 400
+                }
+
+                PC3.ToolButton {
+                    icon.name: "window-close"
+                    opacity: closedMouse.containsMouse || closedRow.peekOpen || hovered ? 1 : 0
+                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                    padding: 1
+                    onClicked: root.dismissHistory([closedRow.modelData])
+                    PC3.ToolTip.visible: hovered
+                    PC3.ToolTip.text: "Dismiss from History"
                     PC3.ToolTip.delay: 400
                 }
             }
@@ -512,6 +552,17 @@ ColumnLayout {
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                     opacity: 0.6
                     Layout.alignment: Qt.AlignVCenter
+                }
+
+                PC3.ToolButton {
+                    icon.name: "window-close"
+                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                    padding: 1
+                    onClicked: root.dismissHistory([historyRow.modelData])
+                    PC3.ToolTip.visible: hovered
+                    PC3.ToolTip.text: "Dismiss from History"
+                    PC3.ToolTip.delay: 400
                 }
             }
 

@@ -462,6 +462,37 @@ class BoundaryParsingTests(unittest.TestCase):
                 agents._load_payload(path), {"agents": [], "history": []}
             )
 
+    def test_dismiss_removes_only_named_history_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agents.json"
+            live = active("omp", "keep-live")
+            agents._write_aggregate({
+                "bootId": "boot-a", "agents": [live],
+                "history": [history("omp", "a"), history("claude", "a"),
+                            history("omp", "b", closedBy="exit")],
+            }, path)
+            removed = agents._dismiss_history(
+                agents._parse_session_keys(quote(json.dumps([["omp", "a"], ["omp", "b"]]))),
+                path,
+            )
+            payload = agents._load_payload(path)
+        self.assertEqual(removed, 2)
+        self.assertEqual(
+            [(r["provider"], r["sessionId"]) for r in payload["history"]],
+            [("claude", "a")],
+        )
+        self.assertEqual(payload["agents"], [live])
+
+    def test_dismiss_argument_rejects_malformed_pairs(self) -> None:
+        for value in (None, "", "%7Bnot", quote(json.dumps({"omp": "a"}))):
+            self.assertEqual(agents._parse_session_keys(value), set())
+        self.assertEqual(
+            agents._parse_session_keys(quote(json.dumps(
+                [["omp", "a"], ["unknown", "b"], ["omp", ""], ["omp"], "x"]
+            ))),
+            {("omp", "a")},
+        )
+
     def test_boot_id_reader_returns_empty_for_missing_and_empty_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "boot_id"

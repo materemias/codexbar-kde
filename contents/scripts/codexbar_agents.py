@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import contextlib
 import math
 import fcntl
 import json
@@ -1360,13 +1361,9 @@ def _saved_write_is_newer(
     )
 
 
-def _locked_sweep(
-    desktop_map: dict[tuple[str, str], str] | None = None,
-    requested_at: int | None = None,
-    aggregate_path: Path = AGGREGATE_PATH,
-    lock_path: Path | None = None,
-) -> tuple[dict, bool]:
-    aggregate_path = Path(aggregate_path)
+@contextlib.contextmanager
+def _aggregate_lock(aggregate_path: Path, lock_path: Path | None = None):
+    """Hold the writer lock that serializes every aggregate update."""
     if lock_path is None:
         lock_path = (
             LOCK_PATH
@@ -1384,6 +1381,50 @@ def _locked_sweep(
         raise
     with lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def _dismiss_history(
+    keys: set[tuple[str, str]], aggregate_path: Path = AGGREGATE_PATH
+) -> int:
+    """Drop the given ended sessions from history; return how many went."""
+    aggregate_path = Path(aggregate_path)
+    with _aggregate_lock(aggregate_path):
+        payload = _load_payload(aggregate_path)
+        kept = [r for r in payload["history"] if _record_key(r) not in keys]
+        removed = len(payload["history"]) - len(kept)
+        if removed:
+            payload["history"] = kept
+            _write_aggregate(payload, aggregate_path)
+        return removed
+
+
+def _parse_session_keys(value: str | None) -> set[tuple[str, str]]:
+    """URI-encoded JSON [[provider, sessionId], ...] from a command line."""
+    if not isinstance(value, str) or not value or len(value) > 64 * 1024:
+        return set()
+    try:
+        items = json.loads(unquote(value))
+    except (TypeError, json.JSONDecodeError):
+        return set()
+    if not isinstance(items, list):
+        return set()
+    return {
+        (item[0], item[1]) for item in items
+        if isinstance(item, list) and len(item) == 2
+        and isinstance(item[0], str) and item[0] in _INFO_FN
+        and isinstance(item[1], str) and 0 < len(item[1]) <= 256
+    }
+
+
+def _locked_sweep(
+    desktop_map: dict[tuple[str, str], str] | None = None,
+    requested_at: int | None = None,
+    aggregate_path: Path = AGGREGATE_PATH,
+    lock_path: Path | None = None,
+) -> tuple[dict, bool]:
+    aggregate_path = Path(aggregate_path)
+    with _aggregate_lock(aggregate_path, lock_path):
         boot_id = _read_boot_id()
         previous = _load_payload(aggregate_path)
         now_ms = int(time.time() * 1000)
@@ -1439,10 +1480,14 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--desktop-map")
     parser.add_argument("--requested-at")
+    parser.add_argument("--dismiss")
     args = parser.parse_args(argv)
     desktop_map = _parse_desktop_map(args.desktop_map)
     requested_at = _parse_requested_at(args.requested_at)
 
+    if args.dismiss is not None:
+        _dismiss_history(_parse_session_keys(args.dismiss))
+        return 0
     if args.watch:
         return _watch(args.interval, desktop_map, requested_at)
     if args.once:
