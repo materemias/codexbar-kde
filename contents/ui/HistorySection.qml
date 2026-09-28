@@ -5,8 +5,9 @@ import org.kde.plasma.components as PC3
 import org.kde.kirigami as Kirigami
 
 // Ended sessions: those cut off by a reboot, ordered by desktop, then the
-// most recent exits of this boot, newest first. Rows never join the live
-// agent selection, peek, or focus behavior.
+// most recent exits of this boot, newest first. Rows have their own
+// keyboard selection (Up/Down, Space peeks, Enter launches), separate from
+// the live agent selection.
 ColumnLayout {
     id: history
     spacing: Kirigami.Units.smallSpacing
@@ -56,6 +57,57 @@ ColumnLayout {
         var aKey = String(a.provider || "") + "\n" + String(a.sessionId || "")
         var bKey = String(b.provider || "") + "\n" + String(b.sessionId || "")
         return aKey < bKey ? -1 : aKey > bKey ? 1 : 0
+    }
+
+    // Display order: restart rows, then recently closed rows.
+    readonly property var flatRecords: history.rebooted.concat(history.exited)
+    property string selectedKey: ""
+    readonly property int selectedIndex: indexForKey(selectedKey)
+
+    function indexForKey(key) {
+        if (!key) return -1
+        for (var i = 0; i < flatRecords.length; i++) {
+            if (history.agentsView.agentKey(flatRecords[i]) === key) return i
+        }
+        return -1
+    }
+    function selectAt(index) {
+        if (index < 0 || index >= flatRecords.length) return
+        var followPeek = history.peekKey !== ""
+        selectedKey = history.agentsView.agentKey(flatRecords[index])
+        if (followPeek) history.peekKey = _peekable(flatRecords[index]) ? selectedKey : ""
+    }
+    function selectNext() {
+        if (flatRecords.length === 0) return
+        selectAt((selectedIndex + 1) % flatRecords.length)
+    }
+    function selectPrevious() {
+        if (flatRecords.length === 0) return
+        var n = flatRecords.length
+        selectAt(((selectedIndex < 0 ? 0 : selectedIndex) - 1 + n) % n)
+    }
+    // Restart rows are full cards; only recently closed rows peek.
+    function _peekable(record) {
+        return !!record && record.closedBy === "exit"
+    }
+    function togglePeek() {
+        var index = indexForKey(selectedKey)
+        if (index < 0 || !_peekable(flatRecords[index])) return
+        history.peekKey = history.peekKey === selectedKey ? "" : selectedKey
+    }
+    function activateSelected() {
+        var index = indexForKey(selectedKey)
+        if (index < 0) return
+        var record = flatRecords[index]
+        if (record.host !== "kitty" || !(record.resumeCommand || "")) {
+            root.historyLaunchError = "This session cannot be launched: "
+                + (record.resumeCommand ? "it did not run in kitty." : "its resume command is unknown.")
+            return
+        }
+        root.launchHistory(record)
+    }
+    onFlatRecordsChanged: {
+        if (selectedKey && indexForKey(selectedKey) < 0) selectedKey = ""
     }
 
     PC3.Label {
@@ -179,6 +231,7 @@ ColumnLayout {
         readonly property string command: modelData.resumeCommand || ""
         readonly property bool canLaunch: command.length > 0 && modelData.host === "kitty"
         readonly property bool launchAllowed: root.historyLaunchAllowed(sessionKey)
+        readonly property bool selected: sessionKey !== "" && sessionKey === history.selectedKey
         readonly property color tint: Kirigami.Theme.disabledTextColor
         readonly property string taskLabel: {
             if (modelData.windowTitle) return modelData.windowTitle
@@ -194,7 +247,19 @@ ColumnLayout {
             height: closedLine.implicitHeight + 4
             radius: 4
             color: Kirigami.Theme.alternateBackgroundColor
-            opacity: closedMouse.containsMouse || closedRow.peekOpen ? 0.06 : 0
+            opacity: closedRow.selected ? 0.1
+                : closedMouse.containsMouse || closedRow.peekOpen ? 0.06 : 0
+            Behavior on opacity { NumberAnimation { duration: 120 } }
+        }
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            width: 3
+            height: closedLine.implicitHeight + 4
+            radius: 1
+            color: Kirigami.Theme.highlightColor
+            opacity: closedRow.selected ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 120 } }
         }
 
@@ -206,7 +271,10 @@ ColumnLayout {
             height: closedLine.implicitHeight + 6
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: history.peekKey = closedRow.peekOpen ? "" : closedRow.sessionKey
+            onClicked: {
+                history.selectedKey = closedRow.sessionKey
+                history.peekKey = closedRow.peekOpen ? "" : closedRow.sessionKey
+            }
         }
 
         ColumnLayout {
@@ -345,6 +413,10 @@ ColumnLayout {
                 }
             }
 
+            SnippetPanel {
+                snippets: history.agentsView.filterSnippets(closedRow.modelData)
+            }
+
             Rectangle {
                 visible: closedRow.peekOpen
                 Layout.fillWidth: true
@@ -472,15 +544,58 @@ ColumnLayout {
         }
     }
 
+    // The conversation lines that matched the active filter, query
+    // highlighted, as on Agents rows.
+    component SnippetPanel: Rectangle {
+        id: snippetPanel
+        required property var snippets
+        visible: snippets.length > 0
+        Layout.fillWidth: true
+        Layout.leftMargin: 18
+        Layout.topMargin: 2
+        implicitHeight: snippetCol.implicitHeight + 8
+        radius: 4
+        color: Kirigami.Theme.backgroundColor
+        border.width: 1
+        border.color: Qt.rgba(Kirigami.Theme.textColor.r,
+            Kirigami.Theme.textColor.g,
+            Kirigami.Theme.textColor.b, 0.14)
+
+        ColumnLayout {
+            id: snippetCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 4
+            spacing: 1
+
+            Repeater {
+                model: snippetPanel.snippets
+                delegate: PC3.Label {
+                    required property string modelData
+                    Layout.fillWidth: true
+                    text: modelData
+                    textFormat: Text.StyledText
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                    opacity: 0.85
+                }
+            }
+        }
+    }
+
     component HistoryRow: Rectangle {
         id: historyRow
         required property var modelData
+        readonly property bool selected: history.agentsView.agentKey(modelData) === history.selectedKey
         Layout.fillWidth: true
         implicitHeight: historyCol.implicitHeight + 10
         radius: 4
         color: Kirigami.Theme.alternateBackgroundColor
-        border.width: 1
-        border.color: Qt.rgba(
+        border.width: selected ? 2 : 1
+        border.color: selected ? Kirigami.Theme.highlightColor : Qt.rgba(
             Kirigami.Theme.textColor.r,
             Kirigami.Theme.textColor.g,
             Kirigami.Theme.textColor.b,
@@ -625,6 +740,11 @@ ColumnLayout {
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                 opacity: 0.8
                 Layout.fillWidth: true
+            }
+
+            SnippetPanel {
+                snippets: history.agentsView.filterSnippets(historyRow.modelData)
+                Layout.leftMargin: 0
             }
 
             RowLayout {

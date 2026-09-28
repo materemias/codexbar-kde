@@ -100,6 +100,35 @@ ColumnLayout {
         return false
     }
 
+    // While a filter is active: up to two conversation lines of a record
+    // that contain the query, as StyledText with the query highlighted.
+    // The Agents and History rows both render these under the row.
+    function filterSnippets(record) {
+        var q = filterText.toLowerCase()
+        if (!q || !record) return []
+        var out = []
+        var esc = function(s) {
+            return s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+        }
+        var hl = "<b><font color=\"#ffb300\">"
+        var rec = record.recent || []
+        for (var i = 0; i < rec.length && out.length < 2; i++) {
+            var t = (rec[i].text || "").replace(/\s+/g, " ")
+            var idx = t.toLowerCase().indexOf(q)
+            if (idx === -1) continue
+            var start = Math.max(0, idx - 60)
+            var end = Math.min(t.length, idx + q.length + 100)
+            out.push((rec[i].role === "user" ? "> " : "· ")
+                + (start > 0 ? "… " : "")
+                + esc(t.slice(start, idx))
+                + hl + esc(t.slice(idx, idx + q.length)) + "</font></b>"
+                + esc(t.slice(idx + q.length, end))
+                + (end < t.length ? " …" : ""))
+        }
+        return out
+    }
+
     function _providerName(provider) {
         var names = {
             claude: "Claude",
@@ -297,33 +326,7 @@ ColumnLayout {
             readonly property bool peekOpen: sessionKey !== ""
                 && sessionKey === agents.peekKey
 
-            // While a filter is active: up to two conversation lines that
-            // contain the query, as StyledText with the query highlighted.
-            readonly property var filterSnippets: {
-                var q = agents.filterText.toLowerCase()
-                if (!q || !modelData) return []
-                var out = []
-                var esc = function(s) {
-                    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
-                        .replace(/>/g, "&gt;")
-                }
-                var hl = "<b><font color=\"#ffb300\">"
-                var rec = modelData.recent || []
-                for (var i = 0; i < rec.length && out.length < 2; i++) {
-                    var t = (rec[i].text || "").replace(/\s+/g, " ")
-                    var idx = t.toLowerCase().indexOf(q)
-                    if (idx === -1) continue
-                    var start = Math.max(0, idx - 60)
-                    var end = Math.min(t.length, idx + q.length + 100)
-                    out.push((rec[i].role === "user" ? "> " : "· ")
-                        + (start > 0 ? "… " : "")
-                        + esc(t.slice(start, idx))
-                        + hl + esc(t.slice(idx, idx + q.length)) + "</font></b>"
-                        + esc(t.slice(idx + q.length, end))
-                        + (end < t.length ? " …" : ""))
-                }
-                return out
-            }
+            readonly property var filterSnippets: agents.filterSnippets(modelData)
 
             // Row + optional peek panel stacked. The panel grows inside the
             // popup's ScrollView when open; only one row peeks at a time

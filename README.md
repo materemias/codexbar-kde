@@ -159,7 +159,7 @@ your machine, grouped by project folder:
 - **Type-to-filter search.** Start typing on the Agents or History tab. The
   filter fuzzy matches the session title, last prompt, working directory, and
   provider. Recent conversation text uses exact case-insensitive substring
-  matching.
+  matching; matching lines appear under the row with the query highlighted.
 - **Auto-tab.** The popup opens directly to Agents when `Super+A` is pressed
   or an agent is blocked, and to History when sessions cut off by a restart
   are waiting to be restored.
@@ -195,6 +195,9 @@ your machine, grouped by project folder:
 - **Dismiss.** The ✕ on any row removes it from History; **Dismiss all**
   clears the restart rows currently shown (respecting an active filter).
   Dismissed rows do not come back unless that session runs and ends again.
+- **Keyboard.** `Up`/`Down` move the History selection, `Space` opens or
+  closes a recently closed row's peek, and `Enter` launches the selected
+  row, the same as the play button.
 
 The aggregator scans `/proc` to discover running agent processes and writes
 `~/.codexbar/agents.json`. The widget reads it after each successful scan, with

@@ -342,6 +342,7 @@ Item {
                 spacing: Kirigami.Units.smallSpacing
 
                 HistorySection {
+                    id: historySection
                     agentsView: agentsSection
                     Layout.fillWidth: true
                 }
@@ -349,28 +350,40 @@ Item {
         }
     }
 
-    // Keyboard navigation: up/down moves the agent selection, Enter
-    // activates the highlighted row. Works on any tab — pressing Enter
-    // also switches to the Agents tab so the user sees what they activated.
+    // Keyboard navigation: up/down moves the selection of the Agents list,
+    // or of History while that tab is shown. Space peeks, Enter activates:
+    // focus a live agent, or launch a History row. Outside History, Enter
+    // and Space switch to Agents so the user sees what they activated.
     focus: true
     Keys.onPressed: function(event) {
         if (!agentsSection) return
+        var onHistory = tabHost.activeTab === 2
         if (event.key === Qt.Key_Up) {
-            agentsSection.selectPrevious()
+            if (onHistory) historySection.selectPrevious()
+            else agentsSection.selectPrevious()
             event.accepted = true
         } else if (event.key === Qt.Key_Down) {
-            agentsSection.selectNext()
+            if (onHistory) historySection.selectNext()
+            else agentsSection.selectNext()
             event.accepted = true
         } else if (event.key === Qt.Key_Space
             && agentsSection.filterText.length === 0) {
             // Space with no query in progress = peek toggle. Once the user
             // is typing a filter, space is just a space.
-            root.requestedTab = "agents"
-            agentsSection.togglePeek()
+            if (onHistory) {
+                historySection.togglePeek()
+            } else {
+                root.requestedTab = "agents"
+                agentsSection.togglePeek()
+            }
             event.accepted = true
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            root.requestedTab = "agents"
-            agentsSection.activateSelected()
+            if (onHistory) {
+                historySection.activateSelected()
+            } else {
+                root.requestedTab = "agents"
+                agentsSection.activateSelected()
+            }
             event.accepted = true
         } else if (event.key === Qt.Key_Escape) {
             if (agentsSection.filterText.length > 0) {
@@ -415,6 +428,7 @@ Item {
             if (root.expanded) {
                 refocusTimer.restart()
                 if (agentsSection.selectedIndex < 0) agentsSection.selectAt(0)
+                if (historySection.selectedIndex < 0) historySection.selectAt(0)
             } else {
                 agentsSection.filterText = ""
             }
