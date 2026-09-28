@@ -269,13 +269,21 @@ def _fetch_claude_reset_credits(timeout: float) -> dict | None:
 
 
 
-def _clamp_to_account_reset(primary, secondary):
-    """End the session window at an earlier weekly reset.
+# Providers whose weekly reset also clears the 5h session window. Codex resets
+# every window at once. Claude does not: its weekly rollover leaves the running
+# 5h session untouched, so clamping would show a session end that never happens.
+_WEEKLY_RESET_CLEARS_SESSION = {"codex"}
 
-    The weekly reset also resets the session window, so a 5h window whose
-    natural end falls after it actually ends at the weekly reset. The copy
+
+def _clamp_to_account_reset(provider: str, primary, secondary):
+    """End the session window at an earlier weekly reset (Codex only).
+
+    For providers in `_WEEKLY_RESET_CLEARS_SESSION`, a 5h window whose natural
+    end falls after the weekly reset actually ends at the weekly reset. The copy
     keeps the natural start in `startsAt` so pace spans the truncated window.
     """
+    if provider not in _WEEKLY_RESET_CLEARS_SESSION:
+        return primary
     if not isinstance(primary, dict) or not isinstance(secondary, dict):
         return primary
     end = _parse_iso(primary.get("resetsAt"))
@@ -379,7 +387,7 @@ def _normalize_record(provider: str, record: dict) -> dict:
         "identity": identity,
         "loginMethod": login_method,
         "accountEmail": account_email,
-        "primary": _clamp_to_account_reset(primary, secondary),
+        "primary": _clamp_to_account_reset(provider, primary, secondary),
         "secondary": secondary,
         "tertiary": usage.get("tertiary"),
         "extraRateWindows": extra_rate_windows,

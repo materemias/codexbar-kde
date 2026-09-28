@@ -337,8 +337,8 @@ class CodexRotationTests(unittest.TestCase):
 
 
 class SessionWindowClampTests(unittest.TestCase):
-    def _primary(self, weekly_reset: str) -> dict:
-        return fetch._normalize_record("claude", {"usage": {
+    def _primary(self, weekly_reset: str, provider: str = "codex") -> dict:
+        return fetch._normalize_record(provider, {"usage": {
             "primary": {"usedPercent": 64, "windowMinutes": 300,
                         "resetsAt": "2026-09-26T21:49:00Z"},
             "secondary": {"usedPercent": 71, "windowMinutes": 10080,
@@ -352,6 +352,12 @@ class SessionWindowClampTests(unittest.TestCase):
 
     def test_later_weekly_reset_leaves_session_window(self) -> None:
         primary = self._primary("2026-09-30T20:00:00Z")
+        self.assertEqual(primary["resetsAt"], "2026-09-26T21:49:00Z")
+        self.assertNotIn("startsAt", primary)
+
+    def test_claude_weekly_reset_leaves_session_window(self) -> None:
+        # Claude's weekly rollover does not clear the running 5h session.
+        primary = self._primary("2026-09-26T20:00:00Z", provider="claude")
         self.assertEqual(primary["resetsAt"], "2026-09-26T21:49:00Z")
         self.assertNotIn("startsAt", primary)
 
