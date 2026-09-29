@@ -27,16 +27,82 @@ It started as a Linux port of the macOS
 [CodexBar](https://github.com/steipete/CodexBar) menu-bar app and uses its
 `codexbar` CLI for usage data.
 
+[Requirements](#requirements) · [Install](#install) ·
+[Keyboard shortcuts](#keyboard-shortcuts) · [Features](#features) ·
+[Supported providers](#supported-providers) · [Supported agents](#supported-agent-sessions) ·
+[Credentials](#configure-provider-credentials) · [Configuration](#configuration) ·
+[Update](#update)
+
 **Panel:** usage rings per provider and window, coloured by pace, and dots
 counting working, blocked and idle agents.
 
-![Panel indicators](docs/panel.png)
+[![Panel indicators](docs/panel.png)](docs/panel.png)
 
 | Usage | Agents | History |
 | :---: | :---: | :---: |
-| ![Usage tab](docs/usage.png) | ![Agents tab](docs/agents.png) | ![History tab](docs/history.png) |
+| [![Usage tab](docs/usage.png)](docs/usage.png) | [![Agents tab](docs/agents.png)](docs/agents.png) | [![History tab](docs/history.png)](docs/history.png) |
 
 The popup screenshots use made-up accounts and sessions.
+
+## Requirements
+
+| Requirement | Needed for |
+| --- | --- |
+| KDE Plasma **6** (with KWin) | Everything |
+| Python 3 | Everything (bundled with Plasma 6 systems) |
+| CMake 3.21+, a C++17 compiler, Qt 6 Core/QML development files | Building. On Arch: `base-devel`, `cmake`, `qt6-declarative` |
+| [`codexbar`](https://github.com/steipete/CodexBar) CLI | Usage tab and tray rings. Without it, Agents and History still work |
+| `qdbus6` (Plasma's Qt tools) | *Optional:* click to focus and desktop switching |
+| kitty | *Optional:* **Launch** and **Restore all**. Other terminals keep the copyable resume command |
+| systemd user session | *Optional:* **Launch**, so restored terminals survive a plasmashell restart |
+| kitty remote control (`allow_remote_control`, `listen_on`) | *Optional:* faster, exact focus of kitty windows. KWin is used otherwise |
+| `notify-send` (libnotify) | *Optional:* desktop usage warnings and agent waiting-for-input notifications |
+
+The `codexbar` CLI path defaults to `/usr/bin/codexbar`, which is what the
+Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
+
+## Install
+
+1. Build and install the widget. The package contains a small native plugin,
+   so build it on the machine that runs it:
+
+   ```sh
+   git clone https://github.com/materemias/codexbar-kde
+   cd codexbar-kde
+   cmake -S . -B build
+   cmake --build build
+   kpackagetool6 -t Plasma/Applet -i build/package
+   ```
+
+   Install `build/package`, not the source directory. The installed copy lives
+   in `~/.local/share/plasma/plasmoids/org.codexbar.plasmoid/`, so the source
+   checkout can be moved or deleted afterwards.
+
+2. Add it to a panel: right-click the panel → **Enter Edit Mode** →
+   **Add Widgets…**, search for **CodexBar**, and drag it onto the panel.
+
+3. Enable the agent integration: widget settings → **Agents** → **Install**.
+   This lets the widget read `~/.codexbar/agents.json` and registers the
+   `codexbar://` handler used by click to focus. Agents and History stay empty
+   until it is installed and plasmashell has been restarted once (see
+   [Restarting plasmashell](#restarting-plasmashell)).
+
+4. [Configure credentials](#configure-provider-credentials) for any provider
+   beyond Claude and Codex.
+
+## Keyboard shortcuts
+
+| Shortcut         | Action                                                        |
+| ---------------- | ------------------------------------------------------------- |
+| `Super+A`        | Open the popup on the Agents tab                              |
+| `←` / `→`        | Switch tabs                                                   |
+| `↑` / `↓`        | Move the selection on Agents or History; an open peek follows |
+| `Space`          | Open or close the selected row's peek                         |
+| `Enter`          | Agents: focus the session's terminal. History: launch it      |
+| `R`              | Refresh (Usage tab only; elsewhere `r` types into the filter) |
+| Printable text   | Filter the Agents and History tabs                            |
+| `Backspace`      | Edit the active filter                                        |
+| `Esc`            | Clear the active filter, then close the popup                 |
 
 ## Features
 
@@ -76,6 +142,12 @@ The popup screenshots use made-up accounts and sessions.
   several Codex accounts and decides which may be used; the Codex header then
   shows its mode and each account shows 🟢 when open to rotation or 🔒 when
   held back. Without the plugin, nothing is shown.
+- **omp mode notifications.** With rotation status available, a mode change
+  sends a desktop alert containing the previous and new modes, for example
+  `auto · FILL → auto · TARGET`. Changes between `auto` and `confirm`, or
+  entering/leaving `STALLED`, are included. The first reading and the first
+  reading after status becomes available again are silent. Enabled by
+  default in Settings → Providers, independently of usage warnings.
 - **Codex reset forecast.** An optional line from
   [codex-reset.com](https://codex-reset.com) under the Codex accounts:
   `ANNOUNCED` with the announcement, `LIKELY` with an estimated time and its
@@ -84,6 +156,25 @@ The popup screenshots use made-up accounts and sessions.
   site is down, usage data is unaffected.
 - **Refresh.** The header button, or `R` on the Usage tab, fetches usage and
   rescans agents immediately. The header also shows the `codexbar` CLI version.
+- **Last-known usage.** Recent usage appears from a local cache before the
+  first network refresh, and stays visible when a provider refresh fails.
+  Cached rows say `Last known` with the measurement time and any refresh
+  error. Their bars are muted, with no live pace projection or reset
+  countdown. Records expire after 24 hours. The cache contains normalized
+  display data, not credentials, in `~/.codexbar/usage_cache.json` with mode
+  `0600`. The helper rechecks the CLI path, configuration and account inputs
+  before restoring cached data; unverifiable data is cleared. Codex token
+  refreshes and rotation among the same configured accounts preserve the cache.
+- **Desktop usage warnings.** Enabled by default in Settings → Providers.
+  Alerts fire at 80% and 95% used, or earlier when the pace projects
+  exhaustion before reset. Each account and window is tracked separately;
+  repeated polls do not repeat a delivered warning, but a higher severity
+  can alert again. Cached readings and combined bars never generate alerts.
+  Failed delivery retries on a later poll. OpenRouter's monthly key limit
+  rearms at the UTC month boundary. Windows without a reset time rearm when
+  a fresh reading falls below 80%. Changed account credentials start a separate
+  alert history. Notifications omit account emails. After an applet restart,
+  the first fresh high reading can alert again.
 
 ### Agents tab
 
@@ -102,6 +193,10 @@ The popup screenshots use made-up accounts and sessions.
 - **Type to filter.** Typing filters by title, prompt, folder, provider and
   model (fuzzy), and by recent conversation text (exact). Matching lines
   appear under the row with the query highlighted.
+- **Waiting-for-input alerts.** Optional in Settings → Agents, off by default.
+  A desktop notification appears when a tracked session changes to blocked.
+  Opening the applet or enabling alerts does not notify for sessions already
+  blocked. Notifications omit session titles, prompts and paths.
 
 ### History tab
 
@@ -139,6 +234,11 @@ enabled, even with the Agents tab hidden.
 
 ## Supported providers
 
+These are the providers already integrated and tested in this applet, largely
+the ones I use myself. The list is not a limit on what the applet can support:
+other providers supported by the CodexBar CLI on Linux are generally
+straightforward to add.
+
 | Provider       | Auth                                  | What it shows                                                     |
 | -------------- | ------------------------------------- | ----------------------------------------------------------------- |
 | **Claude**     | OAuth (`~/.claude/.credentials.json`) | 5h / 7d windows, plus Claude Design and Daily Routines quotas     |
@@ -173,51 +273,6 @@ Sessions are recognised in kitty, Konsole, WezTerm, Alacritty, Ghostty, foot,
 GNOME Terminal, Tilix, Yakuake, xterm, tmux and VS Code terminals. A process
 whose session cannot be identified is listed as untracked, with its state and
 folder but no title; Settings → Agents can hide these.
-
-## Requirements
-
-| Requirement | Needed for |
-| --- | --- |
-| KDE Plasma **6** (with KWin) | Everything |
-| Python 3 | Everything (bundled with Plasma 6 systems) |
-| CMake 3.21+, a C++17 compiler, Qt 6 Core/QML development files | Building. On Arch: `base-devel`, `cmake`, `qt6-declarative` |
-| [`codexbar`](https://github.com/steipete/CodexBar) CLI | Usage tab and tray rings. Without it, Agents and History still work |
-| `qdbus6` (Plasma's Qt tools) | *Optional:* click to focus and desktop switching |
-| kitty | *Optional:* **Launch** and **Restore all**. Other terminals keep the copyable resume command |
-| systemd user session | *Optional:* **Launch**, so restored terminals survive a plasmashell restart |
-| kitty remote control (`allow_remote_control`, `listen_on`) | *Optional:* faster, exact focus of kitty windows. KWin is used otherwise |
-
-The `codexbar` CLI path defaults to `/usr/bin/codexbar`, which is what the
-Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
-
-## Install
-
-1. Build and install the widget. The package contains a small native plugin,
-   so build it on the machine that runs it:
-
-   ```sh
-   git clone https://github.com/materemias/codexbar-kde
-   cd codexbar-kde
-   cmake -S . -B build
-   cmake --build build
-   kpackagetool6 -t Plasma/Applet -i build/package
-   ```
-
-   Install `build/package`, not the source directory. The installed copy lives
-   in `~/.local/share/plasma/plasmoids/org.codexbar.plasmoid/`, so the source
-   checkout can be moved or deleted afterwards.
-
-2. Add it to a panel: right-click the panel → **Enter Edit Mode** →
-   **Add Widgets…**, search for **CodexBar**, and drag it onto the panel.
-
-3. Enable the agent integration: widget settings → **Agents** → **Install**.
-   This lets the widget read `~/.codexbar/agents.json` and registers the
-   `codexbar://` handler used by click to focus. Agents and History stay empty
-   until it is installed and plasmashell has been restarted once (see
-   [Restarting plasmashell](#restarting-plasmashell)).
-
-4. Set up credentials for any provider beyond Claude and Codex, as described
-   below.
 
 ## Configure provider credentials
 
@@ -273,21 +328,48 @@ Network tab). The session expires eventually; the row then shows "TypeSafe
 session expired" until you paste a fresh header. TypeSafe reports no rate
 window, so it has no tray meter; enable it in Settings → Providers.
 
-## Troubleshooting
+## Configuration
 
-### "Kilo CLI session file is invalid ... run `kilo login`"
+Right-click the widget → **Configure CodexBar**. Four tabs:
 
-Running `kilo login` does not fix this one. The message is the CodexBar CLI
-falling back to the Kilo session file after finding no API key, and the two
-tools disagree about that file's shape: `kilo` writes the token as
-`kilo.key` in `~/.local/share/kilo/auth.json`, while CodexBar looks for
-`kilo.access`. A fresh login rewrites `kilo.key` and changes nothing.
+### Backend
+- Path to the `codexbar` CLI binary (default `/usr/bin/codexbar`). Custom paths,
+  including spaces and shell-special characters, are passed literally. The same
+  setting controls normal polling and Codex account discovery in Tray settings.
+- Usage polling interval (10–3600 seconds)
 
-Do not hand-edit `~/.local/share/kilo/auth.json`. Add a `kilo` provider
-`apiKey` to `~/.codexbar/config.json` as shown above. This keeps CodexBar on
-the API path. With the key present the provider reports `source: "api"`;
-without it, and with `KILO_API_KEY` unset, the same misleading session-file
-error comes back.
+### Providers
+- Toggle individual providers on/off (Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo, TypeSafe; TypeSafe is off by default)
+- In the Providers tab, toggle the Codex reset forecast with
+  `showCodexResetForecast` (enabled by default)
+- Desktop usage warnings (`usageNotifications`, enabled by default)
+- omp mode-change alerts (`ompModeNotifications`, enabled by default).
+  Requires available status from the custom omp rotation plugin.
+
+### Tray
+- Pick meters per Codex account and per rate window
+- Pick provider and window meters for Claude, z.ai, OpenCode Go, OpenRouter, and Kilo
+- Per meter, "only if proj > 100%" hides the tray indicator while the window is
+  on pace to last until its reset (projection as in the popup's `proj N%`);
+  it reappears once the current rate would exceed 100%. Meters whose window
+  cannot be projected yet (under 3% elapsed, no reset time) stay hidden too.
+  The provider icon disappears along with its last visible meter.
+- Indicator style: ring + percent, ring only, or percent only
+- Icon and ring size (14–48px, capped by panel thickness)
+
+### Agents
+- Show/hide the Agents section in the popup
+- Include untracked processes without a resolved provider session
+- Show last user prompt under each session row
+- Agent state refresh interval (2–120 seconds)
+- Red badge when any agent is blocked
+- Stacked colored count dots (working/blocked/idle) with adjustable size
+- Optional task label in horizontal panels, with adjustable maximum width
+- Close popup on focus loss
+- Desktop waiting-for-input alerts (`agentNotifications`, off by default).
+  Agent polling continues with alerts enabled even if agent indicators are hidden.
+- Install, remove or check the agent integration's XHR env scripts and
+  `codexbar://` URL handler.
 
 ## Update
 
@@ -335,88 +417,10 @@ This keeps the session's environment and locale, including the time format
 the popup uses. `plasmashell --replace` or `kstart plasmashell` from a terminal
 inherit that terminal's environment instead.
 
-## Configuration
-
-Right-click the widget → **Configure CodexBar**. Four tabs:
-
-### Backend
-- Path to the `codexbar` CLI binary (default `/usr/bin/codexbar`). Custom paths,
-  including spaces and shell-special characters, are passed literally. The same
-  setting controls normal polling and Codex account discovery in Tray settings.
-- Usage polling interval (10–3600 seconds)
-
-### Providers
-- Toggle individual providers on/off (Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo, TypeSafe; TypeSafe is off by default)
-- In the Providers tab, toggle the Codex reset forecast with
-  `showCodexResetForecast` (enabled by default)
-
-### Tray
-- Pick meters per Codex account and per rate window
-- Pick provider and window meters for Claude, z.ai, OpenCode Go, OpenRouter, and Kilo
-- Per meter, "only if proj > 100%" hides the tray indicator while the window is
-  on pace to last until its reset (projection as in the popup's `proj N%`);
-  it reappears once the current rate would exceed 100%. Meters whose window
-  cannot be projected yet (under 3% elapsed, no reset time) stay hidden too.
-  The provider icon disappears along with its last visible meter.
-- Indicator style: ring + percent, ring only, or percent only
-- Icon and ring size (14–48px, capped by panel thickness)
-
-### Agents
-- Show/hide the Agents section in the popup
-- Include untracked processes without a resolved provider session
-- Show last user prompt under each session row
-- Agent state refresh interval (2–120 seconds)
-- Red badge when any agent is blocked
-- Stacked colored count dots (working/blocked/idle) with adjustable size
-- Optional task label in horizontal panels, with adjustable maximum width
-- Close popup on focus loss
-- **Integration** — Install/Remove/Check buttons for the XHR env scripts and
-  `codexbar://` URL handler
-
-## Keyboard shortcuts
-
-| Shortcut         | Action                                                        |
-| ---------------- | ------------------------------------------------------------- |
-| `Super+A`        | Open the popup on the Agents tab                              |
-| `←` / `→`        | Switch tabs                                                   |
-| `↑` / `↓`        | Move the selection on Agents or History; an open peek follows |
-| `Space`          | Open or close the selected row's peek                         |
-| `Enter`          | Agents: focus the session's terminal. History: launch it      |
-| `R`              | Refresh (Usage tab only; elsewhere `r` types into the filter) |
-| Printable text   | Filter the Agents and History tabs                            |
-| `Backspace`      | Edit the active filter                                        |
-| `Esc`            | Clear the active filter, then close the popup                 |
-
-## Layout
-
-```
-CMakeLists.txt                  # Builds the plugin and stages build/package
-native/                        # QProcess QML plugin and lifecycle regression
-contents/
-  config/main.xml              # KConfigXT schema (all settings keys)
-  config/config.qml             # Settings tab definitions
-  ui/main.qml                   # PlasmoidItem root, timers, helpers
-  ui/CompactRepresentation.qml  # Tray: rings, state dots, topic label
-  ui/FullRepresentation.qml     # Popup: header (title, CLI version), tab bar
-  ui/ProviderSection.qml        # Per-provider usage section (Usage tab)
-  ui/AgentsSection.qml          # Agent list with folder groups (Agents tab)
-  ui/HistorySection.qml         # Ended sessions, restore and dismiss (History tab)
-  ui/configBackend.qml          # Settings → Backend tab
-  ui/configProviders.qml        # Settings → Providers tab
-  ui/configTray.qml             # Settings → Tray tab
-  ui/configAgents.qml           # Settings → Agents tab
-  ui/process/                   # Local native module metadata
-  scripts/codexbar_fetch.py     # Parallel CLI invocation, merges JSON
-  scripts/codexbar_agents.py    # Agent state aggregator (/proc scanner)
-  scripts/codexbar_focus.py     # Click to focus, kitty launch and desktop placement
-  scripts/install_integration.py # One-shot: env scripts + URL handler + cleanup
-  icons/*.svg                   # Per-provider icons
-```
-
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).
 
 Third-party provider logos under `contents/icons/` are trademarks of their
-respective owners, used solely for visual identification — see
+respective owners, used solely for visual identification. See
 [`NOTICE`](NOTICE) for attribution.

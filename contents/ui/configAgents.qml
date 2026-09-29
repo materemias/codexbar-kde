@@ -9,6 +9,7 @@ Item {
     id: root
 
     property bool cfg_showAgents: true
+    property bool cfg_agentNotifications: false
     property bool cfg_agentBlockedBadge: true
     property bool cfg_showAgentPrompts: false
     property bool cfg_includeUntrackedAgents: true
@@ -84,6 +85,12 @@ Item {
                 text: "Close popup when focus moves away (click-to-focus closes the popup)"
                 checked: cfg_closePopupOnFocusLoss
                 onToggled: cfg_closePopupOnFocusLoss = checked
+            }
+
+            QQC2.CheckBox {
+                text: "Notify when an agent starts waiting for input"
+                checked: cfg_agentNotifications
+                onToggled: cfg_agentNotifications = checked
             }
 
             RowLayout {

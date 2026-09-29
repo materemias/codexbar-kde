@@ -16,6 +16,34 @@ Kirigami.FormLayout {
     property bool cfg_enableOpenRouter: true
     property bool cfg_enableKilo: true
     property bool cfg_enableTypeSafe: false
+    property bool cfg_usageNotifications: true
+    property bool cfg_ompModeNotifications: true
+
+    QQC2.CheckBox {
+        Kirigami.FormData.label: "Notifications:"
+        text: "Warn about usage limits"
+        checked: cfg_usageNotifications
+        onToggled: cfg_usageNotifications = checked
+    }
+    QQC2.Label {
+        text: "Desktop alerts at 80% and 95%, or when the current pace projects exhaustion before reset. Requires notify-send (libnotify)."
+        wrapMode: Text.WordWrap
+        Layout.fillWidth: true
+        opacity: 0.55
+        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+    }
+    QQC2.CheckBox {
+        text: "Notify when omp mode changes"
+        checked: cfg_ompModeNotifications
+        onToggled: cfg_ompModeNotifications = checked
+    }
+    QQC2.Label {
+        text: "Shows the previous and new mode when omp status is available. The first reading stays silent. Requires notify-send (libnotify)."
+        wrapMode: Text.WordWrap
+        Layout.fillWidth: true
+        opacity: 0.55
+        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+    }
 
     RowLayout {
         Kirigami.FormData.label: "Codex combined bars:"

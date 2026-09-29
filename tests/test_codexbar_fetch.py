@@ -69,7 +69,21 @@ def forecast_server(body: bytes, interval: float = 0):
         thread.join()
 
 
-class ProviderFailureTests(unittest.TestCase):
+class IsolatedUsageTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.home = Path(directory.name)
+        environment = mock.patch.dict(fetch.os.environ, {
+            "HOME": directory.name,
+            "CODEX_HOME": str(self.home / ".codex"),
+            "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
+
+class ProviderFailureTests(IsolatedUsageTestCase):
     def test_invalid_executable_emits_normalized_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cli = Path(directory) / "invalid-cli"
@@ -141,6 +155,404 @@ class ProviderFailureTests(unittest.TestCase):
                         ["--cli-path", "/bin/true", f"--timeout={value}"]
                     )
                 self.assertEqual(raised.exception.code, 2)
+
+
+class UsageCacheTests(IsolatedUsageTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.now = dt.datetime.now(dt.timezone.utc)
+        self.measured = self.now - dt.timedelta(minutes=5)
+        self.cache_path = self.home / ".codexbar" / "usage_cache.json"
+
+    def record(self, provider="codex", account="a@example.com", used=42) -> dict:
+        return fetch._normalize_record(provider, {
+            "source": "oauth",
+            "usage": {
+                "accountEmail": account,
+                "loginMethod": "Plus",
+                "updatedAt": self.measured.isoformat(),
+                "primary": {
+                    "usedPercent": used, "windowMinutes": 300,
+                    "resetsAt": (self.now + dt.timedelta(hours=2)).isoformat(),
+                },
+            },
+        })
+
+    def snapshot(self, records=None, providers="codex", cache_only=False, cli="/bin/true") -> dict:
+        output = io.StringIO()
+        arguments = ["--cli-path", cli, "--providers", providers]
+        if cache_only:
+            arguments += ["--cache-only", "--forecast-url", "https://example.invalid/forecast"]
+        with (
+            mock.patch.object(fetch, "_fetch_provider", side_effect=lambda _, p, __: [
+                record for record in (records or []) if record["id"] == p
+            ]),
+            mock.patch.object(fetch, "_cli_version", return_value=None),
+            mock.patch.object(fetch, "_read_codex_rotation", return_value=None),
+            mock.patch.object(fetch.subprocess, "run", side_effect=AssertionError("unexpected subprocess")),
+            mock.patch.object(fetch, "_read_http_body", side_effect=AssertionError("unexpected network")),
+            mock.patch("sys.stdout", output),
+        ):
+            self.assertEqual(fetch.main(arguments), 0)
+        return json.loads(output.getvalue())
+
+    def test_startup_restores_private_normalized_usage_without_refresh(self) -> None:
+        record = self.record()
+        record["identity"] = {"access_token": "secret-identity"}
+        record["primary"]["rawToken"] = "secret-window"
+        record["raw"] = {"credentials": "secret-payload"}
+        fresh = self.snapshot([record])
+        self.assertEqual(fresh["updatedAt"], self.measured.isoformat())
+        contents = self.cache_path.read_text()
+        self.assertNotIn("secret", contents)
+        self.assertNotIn("codexRotation", contents)
+        self.assertNotIn("forecast", contents)
+        self.assertEqual(self.cache_path.stat().st_mode & 0o777, 0o600)
+        restored = self.snapshot(cache_only=True)
+        old = restored["providers"][0]
+        self.assertTrue(restored["cacheOnly"])
+        self.assertIsNone(restored["forecast"])
+        self.assertIsNone(restored["codexRotation"])
+        self.assertEqual(restored["updatedAt"], self.measured.isoformat())
+        self.assertEqual(old["primary"]["usedPercent"], 42)
+        self.assertTrue(old["stale"])
+        self.assertEqual(old["cachedAt"], self.measured.isoformat())
+        self.assertEqual(old["refreshError"], "")
+
+    def test_missing_cli_still_returns_last_known_usage(self) -> None:
+        cli = str(self.home / "removed-cli")
+        scopes = fetch._usage_cache_scopes(cli, ["codex"])
+        fetch._usage_cache_write(scopes, [self.record()], self.now)
+        startup = self.snapshot(cache_only=True, cli=cli)
+        self.assertEqual(startup["providers"][0]["primary"]["usedPercent"], 42)
+        self.assertIsNone(startup["fatal"])
+        failed = self.snapshot(cli=cli)
+        self.assertEqual(failed["fatal"]["code"], "cli_missing")
+        self.assertEqual(failed["providers"][0]["refreshError"], failed["fatal"]["message"])
+        self.assertEqual(failed["updatedAt"], self.measured.isoformat())
+
+    def test_provider_failure_retains_only_that_provider_and_does_not_renew_age(self) -> None:
+        self.snapshot([self.record(), self.record("kilo", None, 12)], providers="codex,kilo")
+        failed = fetch._result_error("codex", "timeout", "Timed out")
+        fresh, old = self.snapshot(
+            [failed, self.record("kilo", None, 25)], providers="kilo,codex",
+        )["providers"]
+        self.assertEqual(fresh["primary"]["usedPercent"], 25)
+        self.assertNotIn("stale", fresh)
+        self.assertEqual(old["primary"]["usedPercent"], 42)
+        self.assertEqual(old["refreshError"], "Timed out")
+        self.assertEqual(old["cachedAt"], self.measured.isoformat())
+        scopes = fetch._usage_cache_scopes("/bin/true", ["codex", "kilo"])
+        expired = fetch._usage_cache_read(scopes, self.measured + dt.timedelta(hours=24, seconds=1))
+        self.assertEqual(expired, {})
+        recovered = self.snapshot([self.record(used=49)])["providers"][0]
+        self.assertNotIn("stale", recovered)
+        self.assertNotIn("refreshError", recovered)
+        self.assertEqual(recovered["primary"]["usedPercent"], 49)
+
+    def test_independent_account_failure_and_successful_roster_removal(self) -> None:
+        self.snapshot([self.record(), self.record(account="b@example.com", used=81)])
+        failed = fetch._normalize_record("codex", {
+            "account": "B@example.com", "error": {"message": "Account expired"},
+        })
+        first, second = self.snapshot([self.record(used=51), failed])["providers"]
+        self.assertEqual(first["primary"]["usedPercent"], 51)
+        self.assertNotIn("stale", first)
+        self.assertTrue(second["stale"])
+        self.assertEqual(second["primary"]["usedPercent"], 81)
+        self.assertEqual(second["refreshError"], "Account expired")
+        self.snapshot([self.record(used=60)])
+        failure = fetch._result_error("codex", "timeout", "Offline")
+        remaining = self.snapshot([failure])["providers"]
+        self.assertEqual([record["accountEmail"] for record in remaining], ["a@example.com"])
+        self.assertEqual(remaining[0]["accountCount"], 1)
+        self.assertEqual(remaining[0]["primary"]["usedPercent"], 60)
+
+    def test_unknown_failed_account_never_borrows_another_account(self) -> None:
+        self.snapshot([self.record()])
+        failure = fetch._normalize_record("codex", {
+            "account": "new@example.com", "error": {"message": "Cannot authenticate"},
+        })
+        result = self.snapshot([failure])["providers"]
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0]["ok"])
+        self.assertEqual(result[0]["accountEmail"], "new@example.com")
+        self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+
+    def test_cache_rejects_expired_future_and_malformed_records(self) -> None:
+        self.snapshot([self.record()])
+        original = json.loads(self.cache_path.read_text())
+        for timestamp in (
+            (self.now - dt.timedelta(hours=25)).isoformat(),
+            (self.now + dt.timedelta(hours=1)).isoformat(),
+            "not-a-date", "9999-12-31T23:59:59-23:59", None,
+        ):
+            with self.subTest(timestamp=timestamp):
+                payload = json.loads(json.dumps(original))
+                record = payload["providers"]["codex"]["records"][0]
+                record["updatedAt"] = record["cachedAt"] = timestamp
+                self.cache_path.write_text(json.dumps(payload))
+                self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+        for invalid in ("{", "null", "[]", '{"version":1,"providers":[]}'):
+            with self.subTest(invalid=invalid):
+                self.cache_path.write_text(invalid)
+                self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+                refreshed = self.snapshot([self.record(used=17)])
+                self.assertEqual(refreshed["providers"][0]["primary"]["usedPercent"], 17)
+        original["providers"]["codex"]["records"][0]["primary"]["usedPercent"] = "bad"
+        self.cache_path.write_text(json.dumps(original))
+        self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+
+    def test_scope_rejects_disabled_provider_cli_auth_and_roster_changes(self) -> None:
+        auth = self.home / ".codex" / "auth.json"
+        auth.parent.mkdir()
+        auth.write_text('{"tokens":{"account_id":"original"}}')
+        self.snapshot([self.record(), self.record("kilo", None)], providers="codex,kilo")
+        enabled = self.snapshot(providers="kilo", cache_only=True)["providers"]
+        self.assertEqual([record["id"] for record in enabled], ["kilo"])
+        self.assertEqual(self.snapshot(cache_only=True, cli="/missing/other-cli")["providers"], [])
+        auth.write_text('{"tokens":{"account_id":"replacement"}}')
+        self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+        self.snapshot([self.record()])
+        config = self.home / ".codexbar" / "config.json"
+        config.write_text(json.dumps({
+            "providers": [{"id": "codex", "codexProfileHomePaths": ["~/.codex-other"]}],
+        }))
+        self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+
+    def test_opencode_api_key_change_invalidates_cached_account(self) -> None:
+        with mock.patch.dict(fetch.os.environ, {"OPENCODE_API_KEY": "old-account-secret"}):
+            self.snapshot([self.record("opencodego", None)], providers="opencodego")
+            restored = self.snapshot(providers="opencodego", cache_only=True)["providers"]
+            self.assertEqual(restored[0]["primary"]["usedPercent"], 42)
+            self.assertNotIn("old-account-secret", self.cache_path.read_text())
+            with mock.patch.dict(fetch.os.environ, {"OPENCODE_API_KEY": "new-account-secret"}):
+                self.assertEqual(
+                    self.snapshot(providers="opencodego", cache_only=True)["providers"], [],
+                )
+
+    def test_failed_atomic_replace_keeps_previous_good_snapshot(self) -> None:
+        self.snapshot([self.record()])
+        previous = self.cache_path.read_bytes()
+        with mock.patch.object(fetch.os, "replace", side_effect=OSError("disk full")):
+            current = self.snapshot([self.record(used=73)])
+        self.assertEqual(current["providers"][0]["primary"]["usedPercent"], 73)
+        self.assertEqual(self.cache_path.read_bytes(), previous)
+        self.assertEqual(list(self.cache_path.parent.glob(".usage_cache-*")), [])
+
+    def test_mid_fetch_account_switch_discards_success_and_failure(self) -> None:
+        auth = self.home / ".codex" / "auth.json"
+        auth.parent.mkdir()
+        for succeeds in (False, True):
+            with self.subTest(succeeds=succeeds):
+                auth.write_text('{"tokens":{"account_id":"account-a"}}')
+                self.snapshot([self.record()])
+                old_scope = fetch._usage_cache_scopes("/bin/true", ["codex"])["codex"]
+                output = io.StringIO()
+
+                def changed_fetch(_cli, provider, _timeout):
+                    if provider == "kilo":
+                        return [self.record("kilo", None, 17)]
+                    auth.write_text('{"tokens":{"account_id":"account-b"}}')
+                    return ([self.record(used=91)] if succeeds else [
+                        fetch._result_error("codex", "timeout", "Offline")
+                    ])
+
+                with (
+                    mock.patch.object(fetch, "_fetch_provider", side_effect=changed_fetch),
+                    mock.patch.object(fetch, "_cli_version", return_value=None),
+                    mock.patch.object(fetch, "_read_codex_rotation", return_value=None),
+                    mock.patch("sys.stdout", output),
+                ):
+                    fetch.main(["--cli-path", "/bin/true", "--providers", "codex,kilo"])
+                failed, healthy = json.loads(output.getvalue())["providers"]
+                self.assertFalse(failed["ok"])
+                self.assertEqual(failed["error"]["code"], "credential_scope_changed")
+                self.assertNotIn("primary", failed)
+                new_scope = fetch._usage_cache_scopes("/bin/true", ["codex"])["codex"]
+                self.assertNotEqual(new_scope, old_scope)
+                self.assertEqual(failed["sourceScope"], new_scope)
+                self.assertEqual(healthy["primary"]["usedPercent"], 17)
+                self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+
+    def test_known_codex_account_refresh_preserves_scope_and_cache(self) -> None:
+        auth = self.home / ".codex" / "auth.json"
+        auth.parent.mkdir()
+        auth.write_text(json.dumps({"tokens": {
+            "account_id": "stable-account", "access_token": "old", "refresh_token": "old",
+        }, "last_refresh": "before"}))
+        fresh = self.snapshot([self.record()])["providers"][0]
+        auth.write_text(json.dumps({"tokens": {
+            "account_id": "stable-account", "access_token": "new", "refresh_token": "new",
+        }, "last_refresh": "after"}))
+        restored = self.snapshot(cache_only=True)["providers"]
+        self.assertEqual([r["primary"]["usedPercent"] for r in restored], [42])
+        self.assertEqual(restored[0]["sourceScope"], fresh["sourceScope"])
+        self.assertRegex(fresh["sourceScope"], r"^[a-f0-9]{64}$")
+        auth.write_text('{"tokens":{"account_id":"different-account"}}')
+        self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+
+    def test_live_cached_and_failed_records_share_scope_without_persisting_it(self) -> None:
+        live = self.snapshot([self.record()])["providers"][0]
+        cached = self.snapshot(cache_only=True)["providers"][0]
+        failed = self.snapshot([fetch._result_error("codex", "timeout", "Offline")])["providers"][0]
+        self.assertEqual(live["sourceScope"], cached["sourceScope"])
+        self.assertEqual(live["sourceScope"], failed["sourceScope"])
+        self.assertNotIn("sourceScope", self.cache_path.read_text())
+        fresh_error = self.snapshot(
+            [fetch._result_error("kilo", "timeout", "Offline")], providers="kilo",
+        )["providers"][0]
+        self.assertEqual(
+            fresh_error["sourceScope"], fetch._usage_cache_scopes("/bin/true", ["kilo"])["kilo"],
+        )
+
+    def test_partial_provider_writes_preserve_untouched_cache_and_prune_expired(self) -> None:
+        self.snapshot([self.record(), self.record("kilo", None, 12)], providers="codex,kilo")
+        self.snapshot([self.record(used=61)])
+        restored = self.snapshot(providers="kilo", cache_only=True)["providers"]
+        self.assertEqual([r["primary"]["usedPercent"] for r in restored], [12])
+        scopes = fetch._usage_cache_scopes("/bin/true", ["codex"])
+        fetch._usage_cache_write(scopes, [], self.now + dt.timedelta(hours=25))
+        self.assertEqual(json.loads(self.cache_path.read_text())["providers"].get("kilo"), None)
+
+    def test_empty_or_unavailable_scopes_preserve_valid_cache_without_exposing_it(self) -> None:
+        self.snapshot([self.record()])
+        fetch._usage_cache_write({}, [], self.now)
+        self.assertEqual(
+            [r["primary"]["usedPercent"] for r in self.snapshot(cache_only=True)["providers"]], [42],
+        )
+        config = self.home / ".codexbar" / "config.json"
+        config.write_text("{")
+        unscoped = self.snapshot([self.record(used=88)])["providers"][0]
+        self.assertNotIn("sourceScope", unscoped)
+        self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+        config.unlink()
+        self.assertEqual(
+            [r["primary"]["usedPercent"] for r in self.snapshot(cache_only=True)["providers"]], [42],
+        )
+
+    def test_opaque_oauth_credentials_remain_conservatively_scoped(self) -> None:
+        for provider, relative, key in (
+            ("codex", ".codex/auth.json", "access_token"),
+            ("claude", ".claude/.credentials.json", "accessToken"),
+        ):
+            with self.subTest(provider=provider):
+                auth = self.home / relative
+                auth.parent.mkdir(exist_ok=True)
+                section = "tokens" if provider == "codex" else "claudeAiOauth"
+                auth.write_text(json.dumps({section: {key: "opaque-a"}}))
+                self.snapshot([self.record(provider)], providers=provider)
+                auth.write_text(json.dumps({section: {key: "opaque-b"}}))
+                self.assertEqual(self.snapshot(providers=provider, cache_only=True)["providers"], [])
+
+    def test_provider_specific_auth_files_ignore_unrelated_opencode_entries(self) -> None:
+        opencode = self.home / ".local/share/opencode/auth.json"
+        kilo = self.home / ".local/share/kilo/auth.json"
+        opencode.parent.mkdir(parents=True)
+        kilo.parent.mkdir(parents=True)
+        opencode.write_text(json.dumps({
+            "opencode-go": {"type": "api", "key": "go-a"},
+            "anthropic": {"type": "oauth", "access": "unrelated-a"},
+        }))
+        kilo.write_text('{"kilo":{"access":"kilo-a"}}')
+        scopes = fetch._usage_cache_scopes("/bin/true", ["opencodego", "kilo"])
+        opencode.write_text(json.dumps({
+            "opencode-go": {"type": "api", "key": "go-a"},
+            "anthropic": {"type": "oauth", "access": "unrelated-b"},
+        }))
+        self.assertEqual(fetch._usage_cache_scopes("/bin/true", ["opencodego", "kilo"]), scopes)
+        kilo.write_text('{"kilo":{"access":"kilo-b"}}')
+        updated = fetch._usage_cache_scopes("/bin/true", ["opencodego", "kilo"])
+        self.assertEqual(updated["opencodego"], scopes["opencodego"])
+        self.assertNotEqual(updated["kilo"], scopes["kilo"])
+        opencode.write_text('{"opencode-go":{"type":"api","key":"go-b"}}')
+        self.assertNotEqual(
+            fetch._usage_cache_scopes("/bin/true", ["opencodego"])["opencodego"],
+            scopes["opencodego"],
+        )
+
+    def test_known_account_refresh_during_fetch_keeps_fresh_usage(self) -> None:
+        auth = self.home / ".codex/auth.json"
+        auth.parent.mkdir()
+        auth.write_text('{"tokens":{"account_id":"same","access_token":"old"}}')
+        original_scope = fetch._usage_cache_scopes("/bin/true", ["codex"])["codex"]
+        output = io.StringIO()
+
+        def refreshed_fetch(*_args):
+            auth.write_text('{"tokens":{"account_id":"same","access_token":"refreshed"}}')
+            return [self.record(used=57)]
+
+        with (
+            mock.patch.object(fetch, "_fetch_provider", side_effect=refreshed_fetch),
+            mock.patch.object(fetch, "_cli_version", return_value=None),
+            mock.patch.object(fetch, "_read_codex_rotation", return_value=None),
+            mock.patch("sys.stdout", output),
+        ):
+            fetch.main(["--cli-path", "/bin/true", "--providers", "codex"])
+        record = json.loads(output.getvalue())["providers"][0]
+        self.assertTrue(record["ok"])
+        self.assertEqual(record["primary"]["usedPercent"], 57)
+        self.assertEqual(record["sourceScope"], original_scope)
+        self.assertEqual(self.snapshot(cache_only=True)["providers"][0]["primary"]["usedPercent"], 57)
+
+    def test_unscopable_provider_keeps_saved_entry_while_other_provider_updates(self) -> None:
+        auth = self.home / ".codex/auth.json"
+        auth.parent.mkdir()
+        original_auth = '{"tokens":{"account_id":"same"}}'
+        auth.write_text(original_auth)
+        self.snapshot([self.record(), self.record("kilo", None, 10)], providers="codex,kilo")
+        auth.write_text("{")
+        current = self.snapshot(
+            [self.record(used=88), self.record("kilo", None, 22)], providers="codex,kilo",
+        )["providers"]
+        self.assertNotIn("sourceScope", current[0])
+        self.assertRegex(current[1]["sourceScope"], r"^[a-f0-9]{64}$")
+        self.assertEqual(
+            [r["id"] for r in self.snapshot(providers="codex,kilo", cache_only=True)["providers"]],
+            ["kilo"],
+        )
+        auth.write_text(original_auth)
+        restored = self.snapshot(providers="codex,kilo", cache_only=True)["providers"]
+        self.assertEqual([r["primary"]["usedPercent"] for r in restored], [42, 22])
+
+    def test_default_codex_rotation_preserves_all_accounts_scope(self) -> None:
+        auth = self.home / ".codex/auth.json"
+        profile_a = self.home / ".codex-a/auth.json"
+        profile_b = self.home / ".codex-b/auth.json"
+        for path, account in ((auth, "a"), (profile_a, "a"), (profile_b, "b")):
+            path.parent.mkdir()
+            path.write_text(json.dumps({"tokens": {
+                "account_id": account, "access_token": str(path),
+            }}))
+        config = self.home / ".codexbar/config.json"
+        config.parent.mkdir()
+        config.write_text(json.dumps({"providers": [{
+            "id": "codex", "codexProfileHomePaths": [str(profile_a.parent), str(profile_b.parent)],
+        }]}))
+        fresh = self.snapshot([self.record(), self.record(account="b@example.com", used=71)])
+        original_scope = fresh["providers"][0]["sourceScope"]
+        auth.write_text('{"tokens":{"account_id":"b","access_token":"rotated-default"}}')
+        restored = self.snapshot(cache_only=True)["providers"]
+        self.assertEqual([r["primary"]["usedPercent"] for r in restored], [42, 71])
+        self.assertEqual(
+            fetch._usage_cache_scopes("/bin/true", ["codex"])["codex"], original_scope,
+        )
+        auth.write_text('{"tokens":{"account_id":"c","access_token":"new-account"}}')
+        self.assertNotEqual(
+            fetch._usage_cache_scopes("/bin/true", ["codex"])["codex"], original_scope,
+        )
+        self.assertEqual(self.snapshot(cache_only=True)["providers"], [])
+
+    def test_identityless_codex_credentials_remain_bound_to_home_path(self) -> None:
+        first = self.home / ".codex"
+        second = self.home / ".codex-other"
+        for home in (first, second):
+            home.mkdir()
+            (home / "auth.json").write_text('{"tokens":{"access_token":"opaque"}}')
+        original = fetch._usage_cache_scopes("/bin/true", ["codex"])["codex"]
+        with mock.patch.dict(fetch.os.environ, {"CODEX_HOME": str(second)}):
+            moved = fetch._usage_cache_scopes("/bin/true", ["codex"])["codex"]
+        self.assertNotEqual(moved, original)
 
 
 class CodexRotationTests(unittest.TestCase):
@@ -404,7 +816,7 @@ class ResetCreditTests(unittest.TestCase):
         ))
 
 
-class ForecastTests(unittest.TestCase):
+class ForecastTests(IsolatedUsageTestCase):
     def test_eta_uses_cadence_and_future_window_start(self) -> None:
         last_reset = dt.datetime(2026, 8, 31, 2, 34, 27, tzinfo=dt.timezone.utc)
         now = dt.datetime(2026, 9, 2, 10, 0, tzinfo=dt.timezone.utc)
@@ -640,7 +1052,7 @@ class ForecastTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "forecast_unavailable")
 
 
-class CliVersionTests(unittest.TestCase):
+class CliVersionTests(IsolatedUsageTestCase):
     def _run(self, **kwargs) -> str | None:
         completed = mock.MagicMock()
         completed.returncode = kwargs.get("returncode", 0)

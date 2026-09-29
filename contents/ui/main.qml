@@ -7,6 +7,8 @@ import org.kde.plasma.core as PlasmaCore
 import "process" as Process
 import org.kde.taskmanager as TaskManager
 import "Command.js" as Command
+import "Usage.js" as Usage
+import "Notifications.js" as Notifications
 
 PlasmoidItem {
     id: root
@@ -48,6 +50,16 @@ PlasmoidItem {
     property bool agentsLoading: false
     property bool aggregatorLoading: false
     property var agentsRequest: null
+    property string fetchKind: "startup-cache"
+    readonly property bool cacheRestoring: root.fetchKind === "startup-cache"
+    property int backendGeneration: 0
+    property int fetchGeneration: 0
+    property var usageNotificationState: ({})
+    property var agentNotificationState: ({ enabled: false, sessions: {} })
+    property var ompModeNotificationState: null
+    property string notificationError: ""
+    property var pendingNotifications: ({})
+    property int notificationSequence: 0
     property string lastError: ""
     property string agentsError: ""
 
@@ -62,10 +74,37 @@ PlasmoidItem {
         || Plasmoid.configuration.showAgentStateDots !== false
         || Plasmoid.configuration.agentBlockedBadge === true
         || Plasmoid.configuration.showAgentTopicInPanel === true
+        || root.agentNotificationsEnabled
+    readonly property bool usageNotificationsEnabled:
+        Plasmoid.configuration.usageNotifications !== false
+    readonly property bool agentNotificationsEnabled:
+        Plasmoid.configuration.agentNotifications === true
+    readonly property bool ompModeNotificationsEnabled:
+        Plasmoid.configuration.ompModeNotifications !== false
+    onOmpModeNotificationsEnabledChanged: {
+        root.ompModeNotificationState = Notifications.ompMode(
+            root.ompModeNotificationState, null, false).state
+    }
+    onAgentNotificationsEnabledChanged: {
+        // The next successful scan establishes a silent baseline after enabling.
+        root.agentNotificationState = { enabled: false, sessions: {} }
+    }
     readonly property bool includeUntrackedAgents:
         Plasmoid.configuration.includeUntrackedAgents !== false
     onIncludeUntrackedAgentsChanged: root.refreshAgents()
     readonly property string cliPath: Command.cliPath(Plasmoid.configuration.cliPath)
+    onCliPathChanged: {
+        // A generation also rejects an old request after A → B → A.
+        root.backendGeneration++
+        root.snapshot = {
+            updatedAt: "", providers: [], fatal: null, forecast: null,
+            codexRotation: null, cliVersion: null
+        }
+        root.usageNotificationState = {}
+        root.ompModeNotificationState = null
+        root.lastError = ""
+        if (!root.cacheRestoring && !root.loading) Qt.callLater(root.refresh)
+    }
     readonly property bool codexForecastEnabled:
         Plasmoid.configuration.enableCodex !== false
         && Plasmoid.configuration.showCodexResetForecast !== false
@@ -82,6 +121,13 @@ PlasmoidItem {
         if (Plasmoid.configuration.enableKilo)       ids.push("kilo")
         if (Plasmoid.configuration.enableTypeSafe)   ids.push("typesafe")
         return ids
+    }
+    onEnabledProvidersChanged: {
+        if (root.enabledProviders.indexOf("codex") < 0) {
+            root.snapshot = Object.assign({}, root.snapshot, { codexRotation: null })
+            root.ompModeNotificationState = Notifications.ompMode(
+                root.ompModeNotificationState, null, false).state
+        }
     }
 
     preferredRepresentation: Plasmoid.formFactor === PlasmaCore.Types.Planar
@@ -127,9 +173,9 @@ PlasmoidItem {
         opencodego: ["primary", "secondary"]
     })
     toolTipSubText: {
-        if (root.lastError) return root.lastError
         var arr = root.snapshot.providers || []
-        if (arr.length === 0) return root.loading ? "Loading…" : "No providers enabled"
+        if (arr.length === 0)
+            return root.lastError || (root.loading ? "Loading…" : "No providers enabled")
         var labels = { codex: "Codex", claude: "Claude", zai: "z.ai", opencodego: "OpenCode Go" }
         // width="240" widens the tooltip a touch so the columns don't crowd.
         // Cellpadding gives horizontal breathing room between label / pct /
@@ -148,6 +194,11 @@ PlasmoidItem {
                     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
                 name += " · " + account
             }
+            if (rec.stale === true) {
+                var cached = new Date(rec.cachedAt)
+                name += " · last known"
+                    + (isNaN(cached.getTime()) ? "" : " " + _absoluteTime(cached, root.nowMs))
+            }
             if (!rec.ok) {
                 if (anyData) {
                     html += '<tr><td colspan="3" style="font-size: 6px">&nbsp;</td></tr>'
@@ -162,7 +213,7 @@ PlasmoidItem {
                 if (!w || w.usedPercent === undefined || w.usedPercent === null) continue
                 var wl = windowLabel(rec.id, allowedSlots[s], w, "")
                 var pctText = Math.round(w.usedPercent) + "%"
-                var resetText = _resetTimeLeft(w, root.nowMs)
+                var resetText = rec.stale === true ? "" : _resetTimeLeft(w, root.nowMs)
                 providerRows += '<tr>'
                     + '<td>' + wl + '</td>'
                     + '<td align="right">' + pctText + '</td>'
@@ -190,23 +241,112 @@ PlasmoidItem {
         return anyData ? html : ""
     }
 
+    function dispatchNotifications(events) {
+        if (events.length === 0) return
+        root.notificationError = ""
+        for (var i = 0; i < events.length; i++) {
+            var event = events[i]
+            var cmd = "if ! command -v notify-send >/dev/null 2>&1; then "
+                + "printf '%s\\n' 'notify-send is unavailable; install libnotify to enable desktop notifications.' >&2; "
+                + "exit 127; fi; notify-send --app-name " + Command.shellQuote("CodexBar")
+                + " --icon " + Command.shellQuote("dialog-information")
+                + " --urgency " + Command.shellQuote(event.urgency)
+                + " -- " + Command.shellQuote(event.title) + " " + Command.shellQuote(event.body)
+                + " # " + (++root.notificationSequence)
+            root.pendingNotifications[cmd] = {
+                event: event, backendGeneration: root.backendGeneration
+            }
+            notificationRunner.run(cmd)
+        }
+    }
+
+    Process.CommandRunner {
+        id: notificationRunner
+        onFinished: function(command, exitCode, standardOutput, standardError) {
+            var pending = root.pendingNotifications[command]
+            delete root.pendingNotifications[command]
+            if (!pending) return
+            var event = pending.event
+            if (event.kind !== "agent"
+                    && pending.backendGeneration !== root.backendGeneration) return
+            if (event.kind === "usage") {
+                root.usageNotificationState = Notifications.delivery(
+                    root.usageNotificationState, event, exitCode === 0)
+            }
+            if (event.kind === "ompMode") {
+                root.ompModeNotificationState = Notifications.ompModeDelivery(
+                    root.ompModeNotificationState, event, exitCode === 0)
+            }
+            if (exitCode !== 0) {
+                root.notificationError = "Desktop notification failed: "
+                    + (standardError.trim() || "notify-send exited with " + exitCode)
+                console.warn(root.notificationError)
+            }
+        }
+    }
+
     Process.CommandRunner {
         id: runner
 
         onFinished: function(command, exitCode, standardOutput, standardError) {
-            root.loading = false
-            var stdout = standardOutput.trim()
-            var stderr = standardError.trim()
-            if (stdout === "") {
-                root.lastError = stderr || "fetcher produced no output"
+            if (root.fetchGeneration !== root.backendGeneration) {
+                root.loading = false
+                root.fetchKind = ""
+                Qt.callLater(root.refresh)
                 return
             }
+            var kind = root.fetchKind
+            var stdout = standardOutput.trim()
+            var stderr = standardError.trim()
             try {
+                if (!stdout) throw new Error(stderr || "fetcher produced no output")
                 var parsed = JSON.parse(stdout)
+                if (!parsed || !Array.isArray(parsed.providers)
+                        || parsed.providers.some(function(record) {
+                            return !record || typeof record.id !== "string"
+                                || typeof record.ok !== "boolean"
+                        })) {
+                    throw new Error("fetcher returned an invalid provider snapshot")
+                }
+                // Settings may have changed while the helper was running.
+                parsed.providers = parsed.providers.filter(function(record) {
+                    return root.enabledProviders.indexOf(record.id) >= 0
+                })
+                var error = parsed.fatal ? parsed.fatal.message || "fetch failed"
+                    : exitCode !== 0 ? stderr || "fetch failed (exit " + exitCode + ")" : ""
+                var fresh = kind === "fresh" && !error && parsed.cacheOnly !== true
+                if (!fresh || root.enabledProviders.indexOf("codex") < 0) parsed.codexRotation = null
+                // The helper owns credential and cache-age validation, including empty results.
                 root.snapshot = parsed
-                root.lastError = parsed.fatal ? parsed.fatal.message : ""
+                if (kind !== "recovery-cache") root.lastError = error
+                var result = Notifications.usage(root.usageNotificationState,
+                    parsed.providers, Date.now(), fresh && root.usageNotificationsEnabled)
+                root.usageNotificationState = result.state
+                root.dispatchNotifications(result.events)
+                var modeResult = Notifications.ompMode(root.ompModeNotificationState,
+                    parsed.codexRotation, fresh && root.ompModeNotificationsEnabled)
+                root.ompModeNotificationState = modeResult.state
+                root.dispatchNotifications(modeResult.events)
             } catch (err) {
-                root.lastError = "parse error: " + err.message
+                if (kind !== "recovery-cache") root.lastError = err.message
+                root.snapshot = {
+                    updatedAt: "", providers: [], fatal: null, forecast: null,
+                    codexRotation: null, cliVersion: null
+                }
+                root.ompModeNotificationState = Notifications.ompMode(
+                    root.ompModeNotificationState, null, false).state
+                if (kind === "fresh" && root.enabledProviders.length > 0) {
+                    // A transport failure cannot prove that in-memory credentials are still current.
+                    root.fetchProviders("recovery-cache")
+                    return
+                }
+                root.usageNotificationState = {}
+            }
+            root.loading = false
+            root.fetchKind = ""
+            if (kind === "startup-cache") {
+                // Commit cached readings before starting any network command.
+                Qt.callLater(root.refresh)
             }
         }
     }
@@ -510,6 +650,10 @@ PlasmoidItem {
             try {
                 var parsed = JSON.parse(text)
                 if (!Array.isArray(parsed.history)) parsed.history = []
+                var transition = Notifications.agents(root.agentNotificationState,
+                    Array.isArray(parsed.agents) ? parsed.agents : [], root.agentNotificationsEnabled)
+                root.agentNotificationState = transition.state
+                root.dispatchNotifications(transition.events)
                 parsed.agents = Array.isArray(parsed.agents) ? parsed.agents : []
                 parsed.agents = parsed.agents.filter(function(a) {
                     return a && (root.includeUntrackedAgents || a.state !== "untracked")
@@ -552,6 +696,7 @@ PlasmoidItem {
     }
 
     function refresh() {
+        if (root.cacheRestoring || root.loading) return
         if (root.enabledProviders.length === 0) {
             root.snapshot = {
                 updatedAt: new Date().toISOString(),
@@ -561,14 +706,24 @@ PlasmoidItem {
                 codexRotation: null,
                 cliVersion: null
             }
+            root.usageNotificationState = {}
+            root.ompModeNotificationState = Notifications.ompMode(
+                root.ompModeNotificationState, null, false).state
             return
         }
-        if (root.loading) return
+        root.fetchProviders("fresh")
+    }
+
+    function fetchProviders(kind) {
         root.loading = true
+        root.fetchKind = kind
+        root.fetchGeneration = root.backendGeneration
         var cmd = "python3 " + Command.shellQuote(root.scriptPath)
             + " --cli-path " + Command.shellQuote(root.cliPath)
-            + " --providers " + root.enabledProviders.join(",")
-        if (root.codexForecastEnabled) {
+            + " --providers " + Command.shellQuote(root.enabledProviders.join(","))
+        if (kind !== "fresh") {
+            cmd += " --cache-only"
+        } else if (root.codexForecastEnabled) {
             cmd += " --forecast-url https://codex-reset.com/api/forecast"
         }
         runner.run(cmd)
@@ -607,7 +762,7 @@ PlasmoidItem {
         // (Plasma 6 / Qt 6 quirk), not a property binding. Super+A toggles
         // the popup via Plasma's default `activated` handler.
         Plasmoid.globalShortcut = "Meta+A"
-        root.refresh()
+        root.fetchProviders("startup-cache")
     }
 
     // Bar/ring color. With a settled pace (elapsed share of the window, see
@@ -833,9 +988,7 @@ PlasmoidItem {
     // Length of a usage window in ms: the declared windowMinutes, or from
     // startsAt to resetsAt when an earlier weekly reset truncates it.
     function windowSpanMs(win) {
-        if (win.startsAt && win.resetsAt)
-            return new Date(win.resetsAt).getTime() - new Date(win.startsAt).getTime()
-        return (win.windowMinutes || 0) * 60000
+        return Usage.windowSpanMs(win)
     }
 
     // Elapsed share of a usage window (0–100), or -1 when the window has no
@@ -843,20 +996,13 @@ PlasmoidItem {
     // the declared window, or less than 3% elapsed (pure noise). Same rule as
     // the pace tick in ProviderSection.
     function pacePercent(win, now) {
-        if (!win || !win.resetsAt || !win.windowMinutes) return -1
-        var windowMs = windowSpanMs(win)
-        var remainingMs = new Date(win.resetsAt).getTime() - now
-        if (isNaN(remainingMs) || remainingMs <= 0 || remainingMs > windowMs) return -1
-        var pacePct = (1 - remainingMs / windowMs) * 100
-        return pacePct < 3 ? -1 : pacePct
+        return Usage.pacePercent(win, now)
     }
 
     // Projected usage at reset if the current rate holds, or -1 when the
     // window has no pace (see pacePercent).
     function projectedPercent(win, now) {
-        var pacePct = pacePercent(win, now)
-        if (pacePct < 0) return -1
-        return Math.min(999, (win.usedPercent || 0) * 100 / pacePct)
+        return Usage.projectedPercent(win, now)
     }
 
     // Codex plan allowance relative to Plus. Pro carries 20× the Plus usage
@@ -932,6 +1078,7 @@ PlasmoidItem {
             return rec && rec.id === "codex" && rec.ok
         })
         if (records.length < 2) return null
+        if (records.some(function(record) { return record.stale === true })) return null
         var primary = show5h ? _compositeWindow(records, 300) : null
         var secondary = show7d ? _compositeWindow(records, 10080) : null
         if (!primary && !secondary) return null
@@ -957,26 +1104,7 @@ PlasmoidItem {
     }
 
     function windowLabel(providerId, slot, rec, extraTitle) {
-        // Codex exposes this separate weekly GPT quota as "gpt-reserve".
-        if (providerId === "codex"
-                && (slot === "codex-base-model-inference"
-                    || slot === "gpt-reserve"
-                    || extraTitle === "gpt-reserve")) {
-            return "Reserve 7d"
-        }
-        if (extraTitle && extraTitle.length > 0) return extraTitle
-        if (slot === "claude-design") return "Design"
-        if (slot === "claude-routines") return "Routines"
-        if (providerId === "claude" && slot === "tertiary") return "Sonnet"
-        if (providerId === "openrouter") return "Limit"
-        if (providerId === "kilo") return "Credits"
-        if (providerId === "zai" && slot === "secondary") return "Monthly"
-        var mins = rec && rec.windowMinutes ? rec.windowMinutes : 0
-        if (mins === 300) return "5h"
-        if (mins === 1440) return "1d"
-        if (mins === 10080) return "7d"
-        if (mins === 43200) return "Monthly"
-        return slot
+        return Usage.windowLabel(providerId, slot, rec, extraTitle) || slot
     }
 
     function accountAvailabilityIndicator(rec) {

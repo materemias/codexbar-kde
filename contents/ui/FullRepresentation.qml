@@ -36,6 +36,74 @@ Item {
         return r && r.closedBy === "reboot"
     }).length
 
+    readonly property bool hasStaleUsage: (root.snapshot.providers || []).some(function(record) {
+        return !!record.stale
+    })
+
+    readonly property color panelColor: Qt.tint(Kirigami.Theme.backgroundColor,
+        Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+            Kirigami.Theme.textColor.b, 0.035))
+
+    component PanelTab: QQC2.TabButton {
+        id: control
+        property string iconName
+        property string compactText: text
+        width: tabBar.width / tabBar.count
+        implicitHeight: Kirigami.Units.gridUnit * 2
+        padding: Kirigami.Units.smallSpacing
+        hoverEnabled: true
+
+        contentItem: RowLayout {
+            spacing: Kirigami.Units.smallSpacing
+            Kirigami.Icon {
+                source: control.iconName
+                implicitWidth: Kirigami.Units.iconSizes.small
+                implicitHeight: Kirigami.Units.iconSizes.small
+                Layout.minimumWidth: Kirigami.Units.iconSizes.small
+                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                Layout.maximumWidth: Kirigami.Units.iconSizes.small
+                Layout.minimumHeight: Kirigami.Units.iconSizes.small
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                Layout.maximumHeight: Kirigami.Units.iconSizes.small
+                Layout.alignment: Qt.AlignVCenter
+                color: Kirigami.Theme.textColor
+                opacity: control.checked ? 1 : 0.8
+            }
+            PC3.Label {
+                Layout.fillWidth: true
+                text: control.compactText
+                elide: Text.ElideRight
+                font.weight: control.checked ? Font.DemiBold : Font.Normal
+                opacity: control.checked ? 1 : 0.7
+            }
+        }
+        background: Rectangle {
+            color: control.checked ? full.panelColor : "transparent"
+            radius: Kirigami.Units.smallSpacing
+            // Square the lower corners so the selected fill meets the pane.
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: parent.radius
+                color: parent.color
+            }
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.leftMargin: Kirigami.Units.smallSpacing
+                anchors.rightMargin: Kirigami.Units.smallSpacing
+                height: 2
+                color: Kirigami.Theme.highlightColor
+                visible: control.checked
+            }
+            border.width: control.visualFocus ? 1 : 0
+            border.color: Kirigami.Theme.highlightColor
+        }
+        PC3.ToolTip.visible: hovered
+        PC3.ToolTip.text: text
+    }
     // Header sits outside the tab area so it stays pinned.
     ColumnLayout {
         id: headerWrap
@@ -73,7 +141,8 @@ Item {
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                 opacity: 0.7
                 text: {
-                    if (root.loading) return "refreshing…"
+                    if (root.loading) return full.hasStaleUsage ? "last known · refreshing…" : "refreshing…"
+                    if (full.hasStaleUsage) return "includes last-known usage"
                     if (!root.snapshot.updatedAt) return ""
                     var t = new Date(root.snapshot.updatedAt)
                     return "updated " + t.toLocaleTimeString(Qt.locale(), Locale.ShortFormat)
@@ -91,9 +160,23 @@ Item {
             }
         }
 
+        PC3.Label {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            color: Kirigami.Theme.negativeTextColor
+            visible: text.length > 0
+            text: {
+                if (root.snapshot.fatal) return root.snapshot.fatal.message
+                if (root.lastError) return root.lastError
+                if (root.notificationError) return root.notificationError
+                return ""
+            }
+        }
         QQC2.TabBar {
             id: tabBar
             Layout.fillWidth: true
+            spacing: 0
+            background: Item {}
             visible: full.agentsTabVisible
             currentIndex: root.requestedTab === "agents" ? 1
                 : root.requestedTab === "usage" ? 0
@@ -111,39 +194,30 @@ Item {
                 }
             }
 
-            QQC2.TabButton {
+            PanelTab {
+                iconName: "office-chart-bar"
                 text: "Usage"
-                width: implicitWidth
             }
-            QQC2.TabButton {
+            PanelTab {
+                iconName: "system-run"
                 text: full.agentTotalCount > 0
                     ? "Agents (" + full.agentTotalCount + ")"
                     : "Agents"
-                width: implicitWidth
             }
-            QQC2.TabButton {
+            PanelTab {
+                iconName: "view-history"
                 text: full.rebootCount > 0
                     ? "History (" + full.rebootCount + " to restore)"
                     : "History"
-                width: implicitWidth
+                compactText: full.rebootCount > 0
+                    ? "History (" + full.rebootCount + ")"
+                    : "History"
             }
         }
 
         Kirigami.Separator {
             Layout.fillWidth: true
             visible: !full.agentsTabVisible
-        }
-
-        PC3.Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            color: Kirigami.Theme.negativeTextColor
-            visible: text.length > 0
-            text: {
-                if (root.snapshot.fatal) return root.snapshot.fatal.message
-                if (root.lastError) return root.lastError
-                return ""
-            }
         }
     }
 
@@ -157,13 +231,19 @@ Item {
         anchors.leftMargin: Kirigami.Units.largeSpacing
         anchors.rightMargin: Kirigami.Units.largeSpacing
         anchors.bottomMargin: Kirigami.Units.largeSpacing
-        anchors.topMargin: Kirigami.Units.smallSpacing
+        anchors.topMargin: 0
 
         readonly property int activeTab: full.agentsTabVisible ? tabBar.currentIndex : 0
 
+        Rectangle {
+            anchors.fill: parent
+            color: full.panelColor
+            radius: Kirigami.Units.largeSpacing
+        }
         // --- Usage tab ---
         QQC2.ScrollView {
             anchors.fill: parent
+            anchors.margins: Kirigami.Units.largeSpacing
             visible: tabHost.activeTab === 0
             contentWidth: availableWidth
             clip: true
@@ -178,7 +258,9 @@ Item {
                     opacity: 0.7
                     visible: (root.snapshot.providers || []).length === 0
                         && !root.lastError && !root.snapshot.fatal
-                    text: root.loading ? "Loading…" : "No providers enabled. Open Settings to enable some."
+                    text: root.loading ? "Loading…"
+                        : root.snapshot.cacheOnly ? "No saved usage yet."
+                        : "No providers enabled. Open Settings to enable some."
                 }
 
                 Repeater {
@@ -314,6 +396,7 @@ Item {
         // --- Agents tab ---
         QQC2.ScrollView {
             anchors.fill: parent
+            anchors.margins: Kirigami.Units.largeSpacing
             visible: tabHost.activeTab === 1 && full.agentsTabVisible
             contentWidth: availableWidth
             clip: true
@@ -333,6 +416,7 @@ Item {
         // --- History tab ---
         QQC2.ScrollView {
             anchors.fill: parent
+            anchors.margins: Kirigami.Units.largeSpacing
             visible: tabHost.activeTab === 2 && full.agentsTabVisible
             contentWidth: availableWidth
             clip: true

@@ -15,6 +15,14 @@
             <min>10</min>
             <max>3600</max>
         </entry>
+        <entry name="usageNotifications" type="Bool">
+            <label>Notify at 80% and 95% usage or projected exhaustion before reset</label>
+            <default>true</default>
+        </entry>
+        <entry name="ompModeNotifications" type="Bool">
+            <label>Notify when the available omp mode changes</label>
+            <default>true</default>
+        </entry>
         <entry name="enableCodex" type="Bool">
             <default>true</default>
         </entry>
@@ -69,6 +77,10 @@
         <entry name="showAgents" type="Bool">
             <label>Show running/blocked Claude + Codex agents in the popup</label>
             <default>true</default>
+        </entry>
+        <entry name="agentNotifications" type="Bool">
+            <label>Notify when a known agent starts waiting for input</label>
+            <default>false</default>
         </entry>
         <entry name="agentBlockedBadge" type="Bool">
             <label>Show a red dot on the tray icon while any agent is blocked (legacy corner badge)</label>

@@ -20,7 +20,7 @@ Item {
     readonly property var overPaceOnly: Plasmoid.configuration.trayOverPaceOnly || []
 
     // Provider-grouped indicator records:
-    //   [{ providerId, icon, windows: [{ slot, pct, pace, hasData, ok, projected }] }, ...]
+    //   [{ providerId, icon, windows: [{ slot, pct, pace, hasData, ok, stale, projected }] }, ...]
     // Grouping is in first-appearance order from the configured list, so the
     // user's ordering ("codex:primary, claude:primary, codex:secondary") still
     // produces a clean group-by-provider layout.
@@ -71,7 +71,8 @@ Item {
             group.windowKeys[slot] = true
 
             var records = byId[pid] || []
-            var win = { slot: slot, pct: 0, pace: -1, hasData: false, ok: false, projected: -1 }
+            var win = { slot: slot, pct: 0, pace: -1, hasData: false,
+                ok: false, stale: false, projected: -1 }
             for (var ri = 0; ri < records.length; ri++) {
                 var rec = records[ri]
                 var recAccount = rec.accountEmail
@@ -81,14 +82,20 @@ Item {
                 win.ok = true
                 var w = windowFor(rec, slot)
                 if (w && w.usedPercent !== undefined && w.usedPercent !== null) {
+                    win.stale = win.stale || rec.stale === true
                     var pct = Math.max(0, Math.min(100, w.usedPercent))
                     if (!win.hasData || pct > win.pct) {
                         win.pct = pct
-                        win.pace = root.pacePercent(w, now)
+                        win.pace = rec.stale === true ? -1 : root.pacePercent(w, now)
                     }
                     win.hasData = true
-                    win.projected = Math.max(win.projected, root.projectedPercent(w, now))
+                    if (rec.stale !== true)
+                        win.projected = Math.max(win.projected, root.projectedPercent(w, now))
                 }
+            }
+            if (win.stale) {
+                win.pace = -1
+                win.projected = -1
             }
             // Legacy "codex:<slot>" keys expand to per-account windows; honour
             // the flag on either form.
@@ -277,7 +284,7 @@ Item {
 
                         readonly property real pct: indicatorRoot.modelData.pct
                         readonly property bool active: indicatorRoot.modelData.ok && indicatorRoot.modelData.hasData
-                        readonly property color tint: indicatorRoot.active
+                        readonly property color tint: indicatorRoot.active && !indicatorRoot.modelData.stale
                             ? root.colorFor(pct, indicatorRoot.modelData.pace)
                             : Kirigami.Theme.disabledTextColor
 

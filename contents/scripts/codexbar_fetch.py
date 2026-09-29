@@ -7,14 +7,20 @@ document on stdout. The QML widget calls this once per polling tick.
 
 Usage:
   codexbar_fetch.py --cli-path PATH --providers codex,claude,zai,opencodego,openrouter,kilo,typesafe
+  codexbar_fetch.py --cli-path PATH --providers codex,claude --cache-only
 
 With --forecast-url it also attaches a `forecast` object describing when the next
 OpenAI usage-limit reset is expected (data from codex-reset.com).
+Successful normalized usage is kept privately for 24 hours. --cache-only reads
+it without executing the CLI; refresh failures retain matching accounts with
+stale, cachedAt, and refreshError fields.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import fcntl
+import hashlib
 import json
 import math
 import os
@@ -22,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -522,11 +529,297 @@ def _parse_iso(value) -> _dt.datetime | None:
         return None
     try:
         parsed = _dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        return parsed.astimezone(_dt.timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
-    return parsed.astimezone(_dt.timezone.utc)
+
+
+USAGE_CACHE_PATH = "~/.codexbar/usage_cache.json"
+USAGE_CACHE_TTL = 24 * 60 * 60
+USAGE_CREDENTIAL_ENV = {
+    "zai": ("ZAI_API_KEY",),
+    "opencodego": ("OPENCODE_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_API_KEY"),
+    "kilo": ("KILO_API_KEY",),
+}
+
+
+def _usage_auth_input(provider: str, payload: dict, path: str) -> dict:
+    if provider == "codex":
+        tokens = payload.get("tokens")
+        if isinstance(tokens, dict):
+            account_id = tokens.get("account_id") or tokens.get("accountId")
+            if isinstance(account_id, str) and account_id.strip():
+                # Codex's documented account id survives OAuth token rotation.
+                # Keep other auth modes/keys in the fingerprint, not rotating tokens.
+                return {"credentials": {
+                    **{key: value for key, value in payload.items()
+                       if key not in ("tokens", "last_refresh")},
+                    "tokens": {"account_id": account_id},
+                }}
+    elif provider == "opencodego":
+        payload = payload.get("opencode-go")
+    elif provider == "kilo":
+        payload = payload.get("kilo")
+    # Claude's local OAuth record has no reliable account id. Opaque secrets
+    # must remain conservative: a refresh can also be an account replacement.
+    return {"path": path, "credentials": payload}
+
+
+def _usage_cache_scopes(cli: str, providers: list[str]) -> dict[str, str]:
+    """Fingerprint local account inputs without storing credentials in the cache."""
+    try:
+        with open(_expand("~/.codexbar/config.json"), encoding="utf-8") as fh:
+            config = json.load(fh)
+    except FileNotFoundError:
+        config = {}
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(config, dict) or not isinstance(config.get("providers", []), list):
+        return {}
+    scopes = {}
+    for provider in providers:
+        entries = [
+            entry for entry in config.get("providers", [])
+            if isinstance(entry, dict) and entry.get("id") == provider
+        ]
+        auth_paths = []
+        if provider == "codex":
+            homes = [os.environ.get("CODEX_HOME") or "~/.codex"]
+            for entry in entries:
+                paths = entry.get("codexProfileHomePaths", [])
+                if isinstance(paths, list):
+                    homes.extend(path for path in paths if isinstance(path, str))
+            auth_paths = [os.path.join(_expand(home), "auth.json") for home in homes]
+        elif provider == "claude":
+            home = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
+            auth_paths = [os.path.join(_expand(home), ".credentials.json")]
+        elif provider == "opencodego":
+            auth_paths = [_expand("~/.local/share/opencode/auth.json")]
+        elif provider == "kilo":
+            auth_paths = [_expand("~/.local/share/kilo/auth.json")]
+        inputs = {
+            "cli": os.path.realpath(shutil.which(cli) or cli),
+            "provider": provider,
+            "config": entries,
+            "environment": {
+                name: os.environ[name]
+                for name in USAGE_CREDENTIAL_ENV.get(provider, ())
+                if name in os.environ
+            },
+        }
+        digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode())
+        auth_inputs = set()
+        try:
+            for path in sorted(set(auth_paths)):
+                contribution = {"path": path, "missing": True}
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        auth = json.load(fh)
+                    if not isinstance(auth, dict):
+                        raise ValueError("invalid credential object")
+                    contribution = _usage_auth_input(provider, auth, path)
+                except FileNotFoundError:
+                    pass
+                auth_inputs.add(json.dumps(contribution, sort_keys=True))
+        except (OSError, ValueError):
+            continue
+        # --all-accounts reads a roster, not a default/profile assignment.
+        # Deduplicate known identities so omp can rotate the default among
+        # configured profiles; opaque and missing credentials stay path-bound.
+        digest.update(json.dumps(sorted(auth_inputs)).encode())
+        scopes[provider] = digest.hexdigest()
+    return scopes
+
+
+def _cached_usage_record(record: object, now: _dt.datetime) -> dict | None:
+    """Validate persisted data and retain only normalized display fields."""
+    if not isinstance(record, dict) or record.get("ok") is not True or record.get("error"):
+        return None
+    if not isinstance(record.get("id"), str):
+        return None
+    measured = _parse_iso(record.get("updatedAt"))
+    if measured is None or not 0 <= (now - measured).total_seconds() <= USAGE_CACHE_TTL:
+        return None
+    if "cachedAt" in record and _parse_iso(record["cachedAt"]) != measured:
+        return None
+    result = {
+        "id": record["id"], "ok": True, "error": None,
+        "updatedAt": measured.isoformat(), "cachedAt": measured.isoformat(),
+    }
+    for key in ("source", "accountEmail", "loginMethod", "balanceText"):
+        value = record.get(key)
+        if value is not None and not isinstance(value, str):
+            return None
+        result[key] = value
+
+    def window(value):
+        if not isinstance(value, dict):
+            raise ValueError("invalid cached window")
+        used = value.get("usedPercent")
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+            raise ValueError("invalid cached usage")
+        normalized = {"usedPercent": used}
+        for key in ("resetsAt", "startsAt", "resetDescription"):
+            field = value.get(key)
+            if field is not None:
+                if not isinstance(field, str) or (key != "resetDescription" and _parse_iso(field) is None):
+                    raise ValueError("invalid cached reset")
+                normalized[key] = field
+        minutes = value.get("windowMinutes")
+        if minutes is not None:
+            if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not math.isfinite(minutes) or minutes <= 0:
+                raise ValueError("invalid cached duration")
+            normalized["windowMinutes"] = minutes
+        return normalized
+
+    try:
+        for slot in ("primary", "secondary", "tertiary"):
+            value = record.get(slot)
+            result[slot] = window(value) if value is not None else None
+        extras = record.get("extraRateWindows", [])
+        if not isinstance(extras, list):
+            return None
+        result["extraRateWindows"] = []
+        for extra in extras:
+            if not isinstance(extra, dict) or not all(
+                isinstance(extra.get(key, ""), str) for key in ("id", "title")
+            ):
+                return None
+            result["extraRateWindows"].append({
+                "id": extra.get("id", ""), "title": extra.get("title", ""),
+                "window": window(extra.get("window")),
+            })
+        credits = record.get("resetCredits")
+        if credits is not None:
+            if not isinstance(credits, dict) or type(credits.get("count")) is not int or credits["count"] < 0:
+                return None
+            expires = credits.get("soonestExpiresAt")
+            if expires is not None and _parse_iso(expires) is None:
+                return None
+            result["resetCredits"] = {"count": credits["count"], "soonestExpiresAt": expires}
+        router = record.get("openRouterUsage")
+        if isinstance(router, dict):
+            result["openRouterUsage"] = {
+                key: value for key, value in router.items()
+                if key in ("balance", "keyLimit", "keyUsageMonthly")
+                and type(value) in (int, float) and math.isfinite(value)
+            }
+    except (ValueError, OverflowError):
+        return None
+    return result
+
+
+def _usage_cache_entries(now: _dt.datetime) -> dict[str, dict]:
+    """Read and prune the shared cache, retaining only safe normalized entries."""
+    try:
+        with open(_expand(USAGE_CACHE_PATH), encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return {}
+    entries = payload.get("providers")
+    if not isinstance(entries, dict):
+        return {}
+    cached = {}
+    for provider, entry in entries.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("scope"), str):
+            continue
+        if re.fullmatch(r"[a-f0-9]{64}", entry["scope"]) is None:
+            continue
+        records = entry.get("records")
+        if not isinstance(records, list):
+            continue
+        valid = []
+        for record in records:
+            normalized = _cached_usage_record(record, now)
+            if normalized is not None and normalized["id"] == provider:
+                valid.append(normalized)
+        if valid:
+            cached[provider] = {"scope": entry["scope"], "records": valid}
+    return cached
+
+
+def _usage_cache_read(scopes: dict[str, str], now: _dt.datetime) -> dict[str, list[dict]]:
+    cached = {}
+    for provider, entry in _usage_cache_entries(now).items():
+        if scopes.get(provider) == entry["scope"]:
+            records = entry["records"]
+            cached[provider] = [
+                {**record, "sourceScope": entry["scope"], "accountCount": len(records)}
+                for record in records
+            ]
+    return cached
+
+
+def _usage_cache_write(scopes: dict[str, str], records: list[dict], now: _dt.datetime) -> None:
+    replacements = {provider: {"scope": scope, "records": []} for provider, scope in scopes.items()}
+    for record in records:
+        normalized = _cached_usage_record(record, now)
+        if normalized is not None and normalized["id"] in replacements:
+            replacements[normalized["id"]]["records"].append(normalized)
+    path = _expand(USAGE_CACHE_PATH)
+    temporary = None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Lock the stable sidecar, not the cache inode replaced by os.replace().
+        with open(path + ".lock", "a", encoding="utf-8") as lock:
+            os.fchmod(lock.fileno(), 0o600)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            entries = _usage_cache_entries(now)
+            entries.update(replacements)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=os.path.dirname(path),
+                prefix=".usage_cache-", delete=False,
+            ) as fh:
+                temporary = fh.name
+                os.fchmod(fh.fileno(), 0o600)
+                json.dump({"version": 1, "providers": entries}, fh, allow_nan=False)
+            os.replace(temporary, path)
+    except (OSError, ValueError):
+        pass
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def _last_known(record: dict, error: str = "") -> dict:
+    return {**record, "stale": True, "refreshError": error}
+
+
+def _merge_usage_results(results: list[dict], cached: list[dict], now: _dt.datetime) -> list[dict]:
+    """A returned account roster replaces the old one, except matching failures."""
+    def account(record):
+        return (record.get("accountEmail") or "").strip().casefold()
+
+    if len(results) == 1 and not results[0].get("ok") and not account(results[0]) and cached:
+        message = results[0].get("error", {}).get("message") or "Refresh failed"
+        merged = [_last_known(record, message) for record in cached]
+    else:
+        merged = []
+        for record in results:
+            if record.get("ok"):
+                fresh = {key: value for key, value in record.items()
+                         if key not in ("stale", "cachedAt", "refreshError")}
+                measured = _parse_iso(fresh.get("updatedAt")) or now
+                fresh["updatedAt"] = measured.isoformat()
+                merged.append(fresh)
+                continue
+            matches = [old for old in cached if account(old) == account(record)]
+            if len(matches) == 1:
+                message = record.get("error", {}).get("message") or "Refresh failed"
+                merged.append(_last_known(matches[0], message))
+            else:
+                merged.append(record)
+    for record in merged:
+        record["accountCount"] = len(merged)
+    return merged
 
 
 def _forecast_eta(
@@ -898,26 +1191,39 @@ def main(argv: list[str]) -> int:
         default=None,
         help="Fetch the Codex reset forecast from this URL.",
     )
+    parser.add_argument(
+        "--cache-only", action="store_true",
+        help="Read last-known usage without invoking the CLI or network.",
+    )
     args = parser.parse_args(argv)
 
     cli = _expand(args.cli_path)
+    providers = list(dict.fromkeys(p.strip() for p in args.providers.split(",") if p.strip()))
+    now = _dt.datetime.now(_dt.timezone.utc)
+    scopes = _usage_cache_scopes(cli, providers)
+    cached = _usage_cache_read(scopes, now)
+    restored = [_last_known(record) for p in providers for record in cached.get(p, [])]
+    out = {
+        "updatedAt": max((r["updatedAt"] for r in restored), default=None),
+        "providers": restored,
+        "fatal": None,
+        "forecast": None,
+        "codexRotation": None,
+        "cliVersion": None,
+    }
+    if args.cache_only:
+        out["cacheOnly"] = True
+        json.dump(out, sys.stdout)
+        sys.stdout.write("\n")
+        return 0
     if not (os.path.isfile(cli) and os.access(cli, os.X_OK)) and not shutil.which(cli):
-        out = {
-            "updatedAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            "fatal": {
-                "code": "cli_missing",
-                "message": f"codexbar CLI not found or not executable: {cli}",
-            },
-            "providers": [],
-            "forecast": None,
-            "codexRotation": None,
-            "cliVersion": None,
-        }
+        message = f"codexbar CLI not found or not executable: {cli}"
+        out["fatal"] = {"code": "cli_missing", "message": message}
+        out["providers"] = [_last_known(record, message) for record in restored]
         json.dump(out, sys.stdout)
         sys.stdout.write("\n")
         return 0
 
-    providers = [p.strip() for p in args.providers.split(",") if p.strip()]
     results: list[dict] = []
     forecast_future = None
     with ThreadPoolExecutor(
@@ -944,12 +1250,33 @@ def main(argv: list[str]) -> int:
         except Exception as exc:  # noqa: BLE001 - keep healthy provider results
             forecast = _forecast_failure(exc)
 
-    # Preserve the requested provider order in output.
-    order = {p: i for i, p in enumerate(providers)}
-    results.sort(key=lambda r: order.get(r["id"], 999))
+    now = _dt.datetime.now(_dt.timezone.utc)
+    # A CLI request may refresh tokens or outlive an account/config switch.
+    # Never publish its results or old fallback under a different identity.
+    current_scopes = _usage_cache_scopes(cli, providers)
+    cached = _usage_cache_read(current_scopes, now)
+    merged = []
+    for provider in providers:
+        if scopes.get(provider) != current_scopes.get(provider):
+            records = [_result_error(
+                provider, "credential_scope_changed",
+                "Provider credentials or configuration changed during refresh; refresh again.",
+            )]
+        else:
+            records = _merge_usage_results(
+                [record for record in results if record["id"] == provider],
+                cached.get(provider, []), now,
+            )
+        for record in records:
+            record.pop("sourceScope", None)
+            if provider in current_scopes:
+                record["sourceScope"] = current_scopes[provider]
+        merged.extend(records)
+    results = merged
+    _usage_cache_write(current_scopes, results, now)
 
     out = {
-        "updatedAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "updatedAt": max((r["updatedAt"] for r in results if r.get("updatedAt")), default=None),
         "providers": results,
         "fatal": None,
         "forecast": forecast,

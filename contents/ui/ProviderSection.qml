@@ -8,6 +8,7 @@ ColumnLayout {
     property var record: ({})
     property var forecast: null
     property bool showForecast: false
+    readonly property bool stale: !!(record && record.stale)
     // Codex renders as one group under a shared header (FullRepresentation):
     // each account, and the combined pool, gets a compact sub-heading
     // instead of the full provider header.
@@ -170,6 +171,24 @@ ColumnLayout {
         text: section.record && section.record.error ? section.record.error.message : ""
     }
 
+    PC3.Label {
+        visible: section.stale
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        color: Kirigami.Theme.neutralTextColor
+        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+        text: {
+            if (!section.stale) return ""
+            var measured = new Date(section.record.cachedAt || section.record.updatedAt)
+            var line = "Last known usage"
+            if (!isNaN(measured.getTime()))
+                line += " · " + measured.toLocaleString(Qt.locale(), Locale.ShortFormat)
+            if (section.record.refreshError)
+                line += "\nRefresh failed: " + section.record.refreshError
+            return line
+        }
+    }
+
     // Per-window rows.
     Repeater {
         model: section.visibleRows
@@ -194,8 +213,10 @@ ColumnLayout {
                 ? root.compositeStats(rec.compositeWindows, rec.windowMinutes, root.nowMs) : null
             readonly property real pct: Math.max(0, Math.min(100,
                 (isComposite ? pool.usedPercent : rec.usedPercent) || 0))
-            readonly property color tint: root.colorFor(pct, paceSettled ? pacePct : -1)
+            readonly property color tint: section.stale ? Kirigami.Theme.disabledTextColor
+                : root.colorFor(pct, paceSettled ? pacePct : -1)
             readonly property string resetText: {
+                if (section.stale) return ""
                 if (!isComposite) return root.formatReset(rec, root.nowMs)
                 var reset = pool.resetsAt ? root.formatReset({ resetsAt: pool.resetsAt }, root.nowMs) : ""
                 var line = pool.remaining.toFixed(1) + " of " + pool.total + " Plus allowances left"
@@ -206,7 +227,7 @@ ColumnLayout {
             // the last row. Grouped Codex rows show only the count; the
             // expiry moves into the reset line's tooltip.
             readonly property string creditsText: {
-                if (!section.record) return ""
+                if (!section.record || section.stale) return ""
                 if (section.record.id !== "codex" && section.record.id !== "claude") return ""
                 if (index !== section.creditsRowIndex) return ""
                 return root.formatResetCredits(section.record.resetCredits, root.nowMs)
@@ -224,10 +245,10 @@ ColumnLayout {
             readonly property real paceWindowMs: rec.windowMinutes ? root.windowSpanMs(rec) : 0
             readonly property real paceRemainingMs: rec.resetsAt
                 ? new Date(rec.resetsAt).getTime() - root.nowMs : NaN
-            readonly property bool paceValid: isComposite ? pool.pacePct >= 0
+            readonly property bool paceValid: !section.stale && (isComposite ? pool.pacePct >= 0
                 : !isNaN(paceRemainingMs)
                   && paceWindowMs > 0 && paceRemainingMs > 0
-                  && paceRemainingMs <= paceWindowMs
+                  && paceRemainingMs <= paceWindowMs)
             readonly property real pacePct: !paceValid ? -1
                 : isComposite ? pool.pacePct
                 : (1 - paceRemainingMs / paceWindowMs) * 100
