@@ -51,10 +51,11 @@ The screenshots use made-up accounts and sessions.
   credits on the weekly row, e.g. `· 2 saved resets · soonest expires in 16d
   8h`. For Claude this comes from Anthropic's usage API with the token in
   `~/.claude/.credentials.json`; a failed request just hides it.
-- **Account rotation indicator.** If you run the omp Codex account rotation, a
-  script that spreads traffic across several Codex accounts and decides which
-  may be used, the Codex header shows its mode and each account shows 🟢 when
-  open to rotation or 🔒 when held back. Without it, nothing is shown.
+- **Account rotation indicator.** Needs the omp Codex account rotation, a
+  custom omp plugin that is not released yet. It spreads traffic across
+  several Codex accounts and decides which may be used; the Codex header then
+  shows its mode and each account shows 🟢 when open to rotation or 🔒 when
+  held back. Without the plugin, nothing is shown.
 - **Codex reset forecast.** An optional line from
   [codex-reset.com](https://codex-reset.com) under the Codex accounts:
   `ANNOUNCED` with the announcement, `LIKELY` with an estimated time and its
@@ -307,8 +308,7 @@ If the widget doesn't pick up changes (new environment, deleted files, icon
 caches), restart plasmashell through systemd:
 
 ```sh
-systemctl --user stop plasma-plasmashell.service
-systemctl --user start plasma-plasmashell.service
+systemctl --user restart plasma-plasmashell.service
 ```
 
 This keeps the session's environment and locale, including the time format

@@ -112,4 +112,4 @@ credentials" for setup.
 
 - Plasma clamps popup height. Keep usage sections compact.
 - Claude OAuth fetches can take about 16 seconds. Keep the provider helper timeout at least 30 seconds.
-- `systemctl --user restart plasma-plasmashell` does not reload the applet reliably; use the stop, install, start sequence under Development.
+- `systemctl --user restart plasma-plasmashell` is fine for a plain restart, but an upgrade must stop Plasma before `kpackagetool6 -u` replaces the loaded native library; use the stop, install, start sequence under Development.
