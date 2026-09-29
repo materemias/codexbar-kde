@@ -12,11 +12,16 @@ agents: live sessions across Claude Code, Codex, OpenCode, pi and omp, click to
 focus their terminal, a conversation peek, and a History tab that restores
 sessions after a reboot on the desktops they ran on.
 
+**Panel:** usage rings per provider and window, coloured by pace, and dots
+counting working, blocked and idle agents.
+
+![Panel indicators](docs/panel.png)
+
 | Usage | Agents | History |
 | :---: | :---: | :---: |
 | ![Usage tab](docs/usage.png) | ![Agents tab](docs/agents.png) | ![History tab](docs/history.png) |
 
-The screenshots use made-up accounts and sessions.
+The popup screenshots use made-up accounts and sessions.
 
 ## Features
 
