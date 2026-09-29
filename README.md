@@ -1,16 +1,31 @@
 # CodexBar for KDE Plasma 6
 
-A KDE Plasma 6 panel widget for working with AI coding agents. It shows how
-much of each provider's allowance you have left, every agent session running on
-your machine and what it is doing, and the sessions that recently ended, with
-one click to bring them back.
+**Never lose track of an agent again.**
+
+You run a handful of coding agents across several monitors and desktops. One
+is waiting for your answer, two just finished, and your weekly limit is closer
+than you think. Then a crash takes every terminal down with it. CodexBar keeps
+all of that in your Plasma panel:
+
+- **No surprise limits.** Every account's usage in one place, with pace
+  ticks and projections that warn you before a limit hits, not after.
+- **Who needs you, at a glance.** Panel dots count working, blocked and
+  idle agents, so you see a session waiting for input without looking for it.
+- **Find any session by typing.** Every Claude Code, Codex, OpenCode, pi
+  and omp session running in a terminal, filtered as you type, with a peek at
+  its last messages.
+- **Jump straight to it.** One click switches to the right desktop and
+  raises the session's terminal, whichever monitor it is on.
+- **Never leave the keyboard.** `Super+A` opens the agent list, typing
+  fuzzy-finds a session, `↑`/`↓` select it, `Space` peeks and `Enter` jumps
+  to its terminal.
+- **Get it all back.** After a reboot or crash, **Restore all** reopens your
+  kitty sessions, each in its own window on the desktop it ran on. Closed one
+  by mistake? Find it in History and bring it back with one click.
 
 It started as a Linux port of the macOS
 [CodexBar](https://github.com/steipete/CodexBar) menu-bar app and uses its
-`codexbar` CLI for usage data. It has since grown into a control surface for
-agents: live sessions across Claude Code, Codex, OpenCode, pi and omp, click to
-focus their terminal, a conversation peek, and a History tab that restores
-sessions after a reboot on the desktops they ran on.
+`codexbar` CLI for usage data.
 
 **Panel:** usage rings per provider and window, coloured by pace, and dots
 counting working, blocked and idle agents.
