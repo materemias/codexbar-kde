@@ -80,7 +80,7 @@ credentials" for setup.
   activation. `install_integration.py` registers the handler.
 - `agents.json` `history` holds ended sessions with `closedBy`: `reboot`
   rows (every session of the previous boot, kept until live again) and
-  `exit` rows (same-boot exits, newest 20, untracked excluded). The History
+  `exit` rows (same-boot exits, newest 100, untracked excluded). The History
   tab orders reboot rows by desktop and exit rows newest first.
   A pid still live under another session id changed identity and is not
   an exit. A relaunched session inherits its history row's desktop until the

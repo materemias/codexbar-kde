@@ -1346,7 +1346,7 @@ def _apply_desktop_map(
 
 # Sessions that ended while this boot kept running. Sessions cut off by a
 # reboot stay until they run again, however many there are.
-HISTORY_LIMIT = 20
+HISTORY_LIMIT = 100
 _CLOSED_BY = ("reboot", "exit")
 
 

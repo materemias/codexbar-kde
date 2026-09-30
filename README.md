@@ -203,7 +203,7 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 
 - **Interrupted by restart.** After a reboot, every session from the last scan
   before it, ordered by desktop. They stay until the session runs again.
-- **Recently closed.** The 20 most recent sessions that exited during this
+- **Recently closed.** The 100 most recent sessions that exited during this
   boot, as compact rows with a peek of their last turns.
 - **Restore.** Each row has a copyable resume command, shown only when the
   exact provider session is known. Sessions that ran in kitty also get
