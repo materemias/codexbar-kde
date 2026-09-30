@@ -11,6 +11,7 @@ Kirigami.FormLayout {
     property bool cfg_showCodexResetForecast: true
     property bool cfg_showComposite5h: false
     property bool cfg_showComposite7d: true
+    property bool cfg_showRecentUsage: true
     property bool cfg_enableZai: true
     property bool cfg_enableOpenCodeGo: true
     property bool cfg_enableOpenRouter: true
@@ -64,6 +65,12 @@ Kirigami.FormLayout {
         Layout.fillWidth: true
         opacity: 0.55
         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+    }
+    QQC2.CheckBox {
+        Kirigami.FormData.label: "Recent usage:"
+        text: "Highlight the last 24h on 7d bars, the last 1h on 5h bars"
+        checked: cfg_showRecentUsage
+        onToggled: cfg_showRecentUsage = checked
     }
     QQC2.CheckBox {
         Kirigami.FormData.label: "Claude:"

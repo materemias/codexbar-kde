@@ -61,6 +61,7 @@ When completing a feature, update README.md in the same change.
 - OpenCode Go (`opencodego`) uses the `api` source with an `apiKey` in `~/.codexbar/config.json`; the CLI's auto pick is a `local` estimate that is far off the real quota, kept only as fallback. Its `tertiary` slot is the monthly window and is never hidden at 0%. OpenCode Zen (`opencode`) is web-only on macOS and unsupported here.
 - OpenRouter shows balance in the header. It renders a usage bar only when `keyLimit > 0`.
 - TypeSafe (`typesafe`, CLI 0.64.0+) is balance-only and off by default: no `primary`, header shows `Balance` parsed from `loginMethod`, no tray meter. Browser cookie import is macOS-only; Linux needs `cookieSource: "manual"` plus `cookieHeader` in `~/.codexbar/config.json`.
+- Recent consumption (`window.recent`: `hours`, `consumedPercent`) is computed by the fetcher for `windowMinutes` 10080 (24h lookback) and 300 (1h). Its run-length `history` lives in `usage_cache.json` next to `providers`, keyed `<provider>:<casefolded email>:<slot or extra:id>`, written under the same lock. A usage drop or a reset time moving later starts a new cycle whose usage counts in full; a change across a gap over 15 minutes spanning the lookback start is left out. QML only displays it.
 
 Plasmashell does not inherit API keys from shell startup files.
 `~/.codexbar/config.json` must be mode `0600`; the CLI reads it for provider

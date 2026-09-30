@@ -131,6 +131,19 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
   it forward, and its reset line shows allowances left and the next reset, for
   example `12.9 of 41 Plus allowances left · next reset Sep 26, 11:01 (1d 1h)`.
   The 7d combined bar is on by default, the 5h one off.
+- **Recent usage.** 7d bars highlight the share used in the last 24 hours as a
+  brighter tail of the fill, and 5h bars the last hour, with the figure in
+  grey under the bar's right end, e.g. `13% in last 24h`. A reset inside that
+  time counts the new window's usage in full, so the figure can exceed the
+  current fill (the whole fill is then highlighted). It counts what was
+  observed: a change across one poll that spans the lookback start counts in
+  full, and a change across a polling pause of over 15 minutes that spans it is
+  left out, since it can't be placed on either side. The combined Codex bar
+  pools it in Plus units like its fill. History starts with the first poll
+  after install, is
+  kept as run-length samples (one entry per change, or per gap over 15
+  minutes) in `~/.codexbar/usage_cache.json`, pruned to 24 hours, and
+  survives restarts. Toggle it with `showRecentUsage` in Settings → Providers.
 - **Codex 5h window.** A Codex weekly reset also resets the 5h window, so when
   the weekly reset comes first, the 5h row ends there and its pace spans the
   shortened window. Claude's weekly rollover leaves the 5h session alone.
@@ -346,6 +359,8 @@ Right-click the widget → **Configure CodexBar**. Four tabs:
 - Desktop usage warnings (`usageNotifications`, enabled by default)
 - omp mode-change alerts (`ompModeNotifications`, enabled by default).
   Requires available status from the custom omp rotation plugin.
+- Recent-usage tail and figure on 7d (last 24h) and 5h (last 1h) bars
+  (`showRecentUsage`, enabled by default)
 
 ### Tray
 - Pick meters per Codex account and per rate window

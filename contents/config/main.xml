@@ -41,6 +41,10 @@
             <label>Show a combined 7d bar across all Codex accounts</label>
             <default>true</default>
         </entry>
+        <entry name="showRecentUsage" type="Bool">
+            <label>Show usage consumed in the last 24h (7d windows) and 1h (5h windows)</label>
+            <default>true</default>
+        </entry>
         <entry name="enableOpenRouter" type="Bool">
             <default>true</default>
         </entry>

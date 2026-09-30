@@ -237,6 +237,19 @@ ColumnLayout {
                     ? root.formatResetCredits(section.record.resetCredits, root.nowMs, true)
                     : creditsText)
 
+            // Consumption over the fetcher's lookback: 24h for 7d windows, 1h
+            // for 5h windows. The same share of the fill is highlighted as
+            // its tail; a reset inside the lookback can make it the whole fill.
+            readonly property var recent: section.stale || !root.showRecentUsage ? null
+                : rec.recent || null
+            readonly property real tailPct: recent ? Math.min(pct, Math.max(0, recent.consumedPercent)) : 0
+            readonly property string recentText: {
+                if (!recent) return ""
+                var used = recent.consumedPercent
+                var amount = used > 0 && used < 1 ? "<1" : Math.round(used).toString()
+                return amount + "% in last " + recent.hours + "h"
+            }
+
             // Window pace: elapsed share of this usage window, assuming even
             // consumption. Needs resetsAt + windowMinutes; balance-only rows
             // (OpenRouter, Kilo) carry neither and render without a tick. A
@@ -313,10 +326,29 @@ ColumnLayout {
                         color: Qt.rgba(1, 1, 1, 0.10)
                     }
                     Rectangle {
+                        id: fill
                         radius: 4
                         color: rowItem.tint
                         height: parent.height
                         width: parent.width * (rowItem.pct / 100)
+                        Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+                    }
+                    // Recent-consumption tail: the fill's last tailPct drawn
+                    // brighter. The clipped full-length copy keeps the fill's
+                    // rounded right end.
+                    Item {
+                        visible: rowItem.tailPct > 0
+                        x: fill.width - width
+                        width: Math.min(fill.width, parent.width * (rowItem.tailPct / 100))
+                        height: parent.height
+                        clip: true
+                        Rectangle {
+                            x: -parent.x
+                            width: fill.width
+                            height: parent.height
+                            radius: 4
+                            color: Qt.lighter(rowItem.tint, 1.45)
+                        }
                         Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                     }
                     // Pace tick: where even consumption would sit at this
@@ -355,21 +387,42 @@ ColumnLayout {
                 }
             }
 
-            PC3.Label {
-                visible: text.length > 0
+            RowLayout {
+                visible: resetLine.text.length > 0 || recentLine.text.length > 0
                 Layout.fillWidth: true
                 Layout.leftMargin: section.labelColumnWidth + Kirigami.Units.smallSpacing
-                text: rowItem.resetText + rowItem.projectionSuffix + rowItem.creditsSuffix
-                opacity: 0.55
-                horizontalAlignment: Text.AlignLeft
-                elide: Text.ElideRight
-                MouseArea {
-                    anchors.fill: parent
-                    enabled: section.subheading && rowItem.creditsText.length > 0
-                    hoverEnabled: enabled
-                    PC3.ToolTip.visible: enabled && containsMouse
-                    PC3.ToolTip.delay: 350
-                    PC3.ToolTip.text: rowItem.creditsText
+                spacing: Kirigami.Units.smallSpacing
+
+                PC3.Label {
+                    id: resetLine
+                    Layout.fillWidth: true
+                    text: rowItem.resetText + rowItem.projectionSuffix + rowItem.creditsSuffix
+                    opacity: 0.55
+                    horizontalAlignment: Text.AlignLeft
+                    elide: Text.ElideRight
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: section.subheading && rowItem.creditsText.length > 0
+                        hoverEnabled: enabled
+                        PC3.ToolTip.visible: enabled && containsMouse
+                        PC3.ToolTip.delay: 350
+                        PC3.ToolTip.text: rowItem.creditsText
+                    }
+                }
+
+                PC3.Label {
+                    id: recentLine
+                    visible: text.length > 0
+                    text: rowItem.recentText
+                    opacity: 0.55
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        PC3.ToolTip.visible: containsMouse
+                        PC3.ToolTip.delay: 350
+                        PC3.ToolTip.text: "Window usage consumed in the last " + (rowItem.recent ? rowItem.recent.hours : 0)
+                            + "h, from polled readings, highlighted as the bar's bright tail. Usage restored by a reset counts in full."
+                    }
                 }
             }
         }

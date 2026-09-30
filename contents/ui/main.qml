@@ -108,6 +108,7 @@ PlasmoidItem {
     readonly property bool codexForecastEnabled:
         Plasmoid.configuration.enableCodex !== false
         && Plasmoid.configuration.showCodexResetForecast !== false
+    readonly property bool showRecentUsage: Plasmoid.configuration.showRecentUsage !== false
     readonly property int refreshMs: Math.max(10, Plasmoid.configuration.refreshSeconds || 30) * 1000
     readonly property var enabledProviders: {
         // Display order: Claude → Codex → z.ai → OpenCode Go → OpenRouter → Kilo → TypeSafe
@@ -1049,7 +1050,7 @@ PlasmoidItem {
     // each tick.
     function _compositeWindow(records, windowMinutes) {
         var windows = []
-        var used = 0, total = 0
+        var used = 0, total = 0, consumed = 0, hours = 0
         for (var i = 0; i < records.length; i++) {
             var w = records[i].primary && records[i].primary.windowMinutes === windowMinutes
                 ? records[i].primary
@@ -1061,12 +1062,19 @@ PlasmoidItem {
             windows.push({ usedPercent: u, resetsAt: w.resetsAt, startsAt: w.startsAt, weight: weight })
             used += weight * u
             total += weight
+            // Pooled recent consumption in the same Plus-weighted units as
+            // the fill; an account without history contributes nothing.
+            if (w.recent) {
+                consumed += weight * w.recent.consumedPercent
+                hours = w.recent.hours
+            }
         }
         if (windows.length < 2) return null
         return {
             usedPercent: used / total,
             windowMinutes: windowMinutes,
-            compositeWindows: windows
+            compositeWindows: windows,
+            recent: hours > 0 ? { hours: hours, consumedPercent: consumed / total } : null
         }
     }
 

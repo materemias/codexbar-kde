@@ -431,6 +431,17 @@ class UsageCacheTests(IsolatedUsageTestCase):
             [r["primary"]["usedPercent"] for r in self.snapshot(cache_only=True)["providers"]], [42],
         )
 
+    def test_restart_restores_recent_consumption_from_history(self) -> None:
+        scopes = fetch._usage_cache_scopes("/bin/true", ["codex"])
+        for minutes, used in ((70, 40), (60, 40), (50, 42), (40, 43), (30, 44), (20, 45), (10, 46), (5, 46)):
+            record = self.record(used=used)
+            record["updatedAt"] = (self.now - dt.timedelta(minutes=minutes)).isoformat()
+            fetch._usage_cache_write(scopes, [record], self.now - dt.timedelta(minutes=minutes))
+        restored = self.snapshot(cache_only=True)["providers"][0]
+        self.assertEqual(
+            restored["primary"]["recent"], {"hours": 1, "consumedPercent": 6},
+        )
+
     def test_opaque_oauth_credentials_remain_conservatively_scoped(self) -> None:
         for provider, relative, key in (
             ("codex", ".codex/auth.json", "access_token"),
@@ -1200,6 +1211,80 @@ class OpenRouterBalanceTests(unittest.TestCase):
 
         self.assertIsNone(record["balanceText"])
         self.assertIsNone(record["primary"])
+
+
+class RecentUsageTests(unittest.TestCase):
+    NOW = dt.datetime(2026, 9, 30, 12, tzinfo=dt.timezone.utc)
+    KEY = "codex:a@example.com:secondary"
+
+    def observe(self, history: dict, minutes_ago: float, used: float, reset: dt.datetime) -> None:
+        fetch._usage_history_observe(history, {
+            "id": "codex", "ok": True, "accountEmail": "A@example.com",
+            "updatedAt": (self.NOW - dt.timedelta(minutes=minutes_ago)).isoformat(),
+            "secondary": {"usedPercent": used, "windowMinutes": 10080, "resetsAt": reset.isoformat()},
+        })
+
+    def consumption(self, samples) -> dict | None:
+        """samples: (minutes_ago, used, reset) polled every 10 minutes between steps."""
+        history: dict = {}
+        for (start, used, reset), (end, _, _) in zip(samples, samples[1:] + [(0, None, None)]):
+            minutes = start
+            while minutes > end:
+                self.observe(history, minutes, used, reset)
+                minutes -= 10
+        self.observe(history, 0, samples[-1][1], samples[-1][2])
+        fetch._usage_history_prune(history, self.NOW)
+        return fetch._recent_consumption(history[self.KEY], 24, self.NOW)
+
+    def test_counts_increases_since_lookback_start(self) -> None:
+        reset = self.NOW + dt.timedelta(days=3)
+        recent = self.consumption([(30 * 60, 30, reset), (20 * 60, 35, reset), (60, 42, reset)])
+        self.assertEqual(recent, {"hours": 24, "consumedPercent": 12})
+
+    def test_new_cycle_counts_its_usage_even_above_the_previous_reading(self) -> None:
+        old_reset = self.NOW - dt.timedelta(hours=6)
+        new_reset = old_reset + dt.timedelta(days=7)
+        recent = self.consumption([(30 * 60, 30, old_reset), (10 * 60, 40, old_reset), (6 * 60 - 5, 45, new_reset)])
+        self.assertEqual(recent, {"hours": 24, "consumedPercent": 55})
+
+    def test_small_drop_within_a_cycle_is_jitter_not_a_reset(self) -> None:
+        reset = self.NOW + dt.timedelta(days=3)
+        recent = self.consumption([(30 * 60, 42.3, reset), (60, 42.0, reset), (30, 43.0, reset)])
+        self.assertEqual(recent["consumedPercent"], 1.0)
+
+    def test_reset_inside_unobserved_gap_counts_new_cycle_usage(self) -> None:
+        old_reset = self.NOW - dt.timedelta(hours=6)
+        history: dict = {}
+        for minutes in range(30 * 60, 8 * 60, -10):
+            self.observe(history, minutes, 40, old_reset)
+        for minutes in range(2 * 60, -1, -10):
+            self.observe(history, minutes, 10, old_reset + dt.timedelta(days=7))
+        recent = fetch._recent_consumption(history[self.KEY], 24, self.NOW)
+        self.assertEqual(recent, {"hours": 24, "consumedPercent": 10})
+
+    def test_five_hour_window_uses_one_hour_lookback(self) -> None:
+        reset = self.NOW + dt.timedelta(hours=2)
+        history: dict = {}
+        for minutes, used in ((120, 10), (110, 20), (100, 30), (90, 30), (80, 30), (70, 30),
+                              (60, 30), (50, 30), (40, 33), (30, 35), (20, 35), (10, 36), (0, 37)):
+            fetch._usage_history_observe(history, {
+                "id": "claude", "ok": True, "updatedAt": (self.NOW - dt.timedelta(minutes=minutes)).isoformat(),
+                "primary": {"usedPercent": used, "windowMinutes": 300, "resetsAt": reset.isoformat()},
+            })
+        record = {"id": "claude", "ok": True, "primary": {"usedPercent": 37, "windowMinutes": 300}}
+        fetch._attach_recent_usage([record], history, self.NOW)
+        self.assertEqual(record["primary"]["recent"], {"hours": 1, "consumedPercent": 7})
+
+    def test_gap_across_lookback_start_is_not_counted(self) -> None:
+        reset = self.NOW + dt.timedelta(hours=2)
+        history: dict = {}
+        for minutes, used in ((90, 10), (30, 30), (20, 30), (10, 32), (0, 32)):
+            fetch._usage_history_observe(history, {
+                "id": "claude", "ok": True, "updatedAt": (self.NOW - dt.timedelta(minutes=minutes)).isoformat(),
+                "primary": {"usedPercent": used, "windowMinutes": 300, "resetsAt": reset.isoformat()},
+            })
+        recent = fetch._recent_consumption(history["claude::primary"], 1, self.NOW)
+        self.assertEqual(recent, {"hours": 1, "consumedPercent": 2})
 
 
 if __name__ == "__main__":

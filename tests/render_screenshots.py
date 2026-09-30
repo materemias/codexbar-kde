@@ -25,22 +25,26 @@ NOW = datetime(2026, 9, 29, 14, 0, tzinfo=timezone.utc)
 NOW_MS = int(NOW.timestamp() * 1000)
 
 
-def window(percent, minutes, remaining_hours):
-    return {"usedPercent": percent, "windowMinutes": minutes,
-            "resetsAt": (NOW + timedelta(hours=remaining_hours)).isoformat()}
+def window(percent, minutes, remaining_hours, recent=None):
+    result = {"usedPercent": percent, "windowMinutes": minutes,
+              "resetsAt": (NOW + timedelta(hours=remaining_hours)).isoformat()}
+    if recent is not None:
+        result["recent"] = {"hours": 1 if minutes == 300 else 24,
+                            "consumedPercent": recent}
+    return result
 
 
 def fixture():
     providers = [
-        {"id": "claude", "ok": True, "loginMethod": "Max", "primary": window(28, 300, 2),
-         "secondary": window(39, 10080, 80),
+        {"id": "claude", "ok": True, "loginMethod": "Max", "primary": window(28, 300, 2, 9),
+         "secondary": window(39, 10080, 80, 13),
          "extraRateWindows": [{"id": "claude-design", "title": "Design", "window": window(14, 10080, 80)}]},
         {"id": "codex", "ok": True, "accountEmail": "studio@example.com", "loginMethod": "Pro",
-         "accountCount": 3, "primary": window(35, 300, 1.5), "secondary": window(42, 10080, 72)},
+         "accountCount": 3, "primary": window(35, 300, 1.5, 4), "secondary": window(42, 10080, 72, 11)},
         {"id": "codex", "ok": True, "accountEmail": "lab@example.com", "loginMethod": "Plus",
-         "accountCount": 3, "primary": window(68, 300, 2), "secondary": window(76, 10080, 48)},
+         "accountCount": 3, "primary": window(68, 300, 2, 21), "secondary": window(76, 10080, 48, 18)},
         {"id": "codex", "ok": True, "accountEmail": "team@example.com", "loginMethod": "Plus",
-         "accountCount": 3, "primary": window(18, 300, 3), "secondary": window(30, 10080, 96)},
+         "accountCount": 3, "primary": window(18, 300, 3, 0), "secondary": window(30, 10080, 96, 2)},
         {"id": "zai", "ok": True, "primary": window(25, 300, 2), "secondary": window(46, 43200, 240)},
         {"id": "opencodego", "ok": True, "primary": window(19, 300, 2),
          "secondary": window(28, 10080, 72), "tertiary": window(32, 43200, 240)},
@@ -138,6 +142,7 @@ Window {
         property bool expanded: true
         property bool loading: false
         property bool codexForecastEnabled: false
+        property bool showRecentUsage: true
         property string lastError: ""
         property string agentsError: ""
         property string notificationError: ""

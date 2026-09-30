@@ -13,7 +13,9 @@ With --forecast-url it also attaches a `forecast` object describing when the nex
 OpenAI usage-limit reset is expected (data from codex-reset.com).
 Successful normalized usage is kept privately for 24 hours. --cache-only reads
 it without executing the CLI; refresh failures retain matching accounts with
-stale, cachedAt, and refreshError fields.
+stale, cachedAt, and refreshError fields. The same file keeps a run-length
+usage history per 7d and 5h window, reported as `recent` consumption over the
+last 24 hours and 1 hour respectively.
 """
 from __future__ import annotations
 
@@ -538,6 +540,14 @@ def _parse_iso(value) -> _dt.datetime | None:
 
 USAGE_CACHE_PATH = "~/.codexbar/usage_cache.json"
 USAGE_CACHE_TTL = 24 * 60 * 60
+# Recent-consumption lookback per window length: minutes → hours.
+RECENT_LOOKBACK_HOURS = {10080: 24, 300: 1}
+# Observations further apart than this leave the time between them unobserved.
+HISTORY_GAP_SECONDS = 15 * 60
+# A reset time moving later by more than this, or usage dropping by more than
+# the percent tolerance, starts a new window cycle. Both absorb API jitter.
+HISTORY_CYCLE_SHIFT_SECONDS = 10 * 60
+HISTORY_RESET_DROP_PERCENT = 0.5
 USAGE_CREDENTIAL_ENV = {
     "zai": ("ZAI_API_KEY",),
     "opencodego": ("OPENCODE_API_KEY",),
@@ -712,15 +722,17 @@ def _cached_usage_record(record: object, now: _dt.datetime) -> dict | None:
     return result
 
 
-def _usage_cache_entries(now: _dt.datetime) -> dict[str, dict]:
-    """Read and prune the shared cache, retaining only safe normalized entries."""
+def _usage_cache_payload() -> dict:
     try:
         with open(_expand(USAGE_CACHE_PATH), encoding="utf-8") as fh:
             payload = json.load(fh)
     except (OSError, ValueError):
         return {}
-    if not isinstance(payload, dict) or payload.get("version") != 1:
-        return {}
+    return payload if isinstance(payload, dict) and payload.get("version") == 1 else {}
+
+
+def _usage_cache_entries(payload: dict, now: _dt.datetime) -> dict[str, dict]:
+    """Prune the shared cache, retaining only safe normalized entries."""
     entries = payload.get("providers")
     if not isinstance(entries, dict):
         return {}
@@ -745,7 +757,7 @@ def _usage_cache_entries(now: _dt.datetime) -> dict[str, dict]:
 
 def _usage_cache_read(scopes: dict[str, str], now: _dt.datetime) -> dict[str, list[dict]]:
     cached = {}
-    for provider, entry in _usage_cache_entries(now).items():
+    for provider, entry in _usage_cache_entries(_usage_cache_payload(), now).items():
         if scopes.get(provider) == entry["scope"]:
             records = entry["records"]
             cached[provider] = [
@@ -755,7 +767,8 @@ def _usage_cache_read(scopes: dict[str, str], now: _dt.datetime) -> dict[str, li
     return cached
 
 
-def _usage_cache_write(scopes: dict[str, str], records: list[dict], now: _dt.datetime) -> None:
+def _usage_cache_write(scopes: dict[str, str], records: list[dict], now: _dt.datetime) -> dict:
+    """Replace the scoped entries, record fresh observations, and return the history."""
     replacements = {provider: {"scope": scope, "records": []} for provider, scope in scopes.items()}
     for record in records:
         normalized = _cached_usage_record(record, now)
@@ -763,21 +776,28 @@ def _usage_cache_write(scopes: dict[str, str], records: list[dict], now: _dt.dat
             replacements[normalized["id"]]["records"].append(normalized)
     path = _expand(USAGE_CACHE_PATH)
     temporary = None
+    history: dict[str, list[list]] = {}
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # Lock the stable sidecar, not the cache inode replaced by os.replace().
         with open(path + ".lock", "a", encoding="utf-8") as lock:
             os.fchmod(lock.fileno(), 0o600)
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            entries = _usage_cache_entries(now)
+            payload = _usage_cache_payload()
+            entries = _usage_cache_entries(payload, now)
             entries.update(replacements)
+            history = _usage_history_entries(payload, now)
+            for record in records:
+                if record.get("ok") is True and record.get("stale") is not True:
+                    _usage_history_observe(history, record)
+            _usage_history_prune(history, now)
             with tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", dir=os.path.dirname(path),
                 prefix=".usage_cache-", delete=False,
             ) as fh:
                 temporary = fh.name
                 os.fchmod(fh.fileno(), 0o600)
-                json.dump({"version": 1, "providers": entries}, fh, allow_nan=False)
+                json.dump({"version": 1, "providers": entries, "history": history}, fh, allow_nan=False)
             os.replace(temporary, path)
     except (OSError, ValueError):
         pass
@@ -787,6 +807,138 @@ def _usage_cache_write(scopes: dict[str, str], records: list[dict], now: _dt.dat
                 os.unlink(temporary)
             except OSError:
                 pass
+    return history
+
+
+def _usage_history_key(record: dict, slot: str) -> str:
+    account = (record.get("accountEmail") or "").strip().casefold()
+    return f"{record['id']}:{account}:{slot}"
+
+
+def _usage_history_windows(record: dict):
+    """Yield (key, window) for windows with a recent-consumption lookback."""
+    windows = [(slot, record.get(slot)) for slot in ("primary", "secondary", "tertiary")]
+    for extra in record.get("extraRateWindows") or []:
+        if isinstance(extra, dict):
+            windows.append(("extra:" + str(extra.get("id", "")), extra.get("window")))
+    for slot, window in windows:
+        if isinstance(window, dict) and window.get("windowMinutes") in RECENT_LOOKBACK_HOURS:
+            yield _usage_history_key(record, slot), window
+
+
+def _usage_history_entries(payload: dict, now: _dt.datetime) -> dict[str, list[list]]:
+    """Validated runs per window: [firstSeen, lastSeen, usedPercent, resetsAt|None]."""
+    history = payload.get("history")
+    if not isinstance(history, dict):
+        return {}
+    limit = int(now.timestamp())
+    valid = {}
+    for key, runs in history.items():
+        if not isinstance(runs, list):
+            continue
+        kept = []
+        for run in runs:
+            if not (
+                isinstance(run, list) and len(run) == 4
+                and type(run[0]) is int and type(run[1]) is int
+                and (kept[-1][1] if kept else 0) <= run[0] <= run[1] <= limit
+                and type(run[2]) in (int, float) and math.isfinite(run[2])
+                and (run[3] is None or type(run[3]) is int)
+            ):
+                kept = []
+                break
+            kept.append(run)
+        if kept:
+            valid[key] = kept
+    return valid
+
+
+def _usage_history_new_cycle(previous: list, current: list) -> bool:
+    """A usage drop or a later reset time means the window reset in between."""
+    if current[2] < previous[2] - HISTORY_RESET_DROP_PERCENT:
+        return True
+    return (previous[3] is not None and current[3] is not None
+            and current[3] - previous[3] > HISTORY_CYCLE_SHIFT_SECONDS)
+
+
+def _usage_history_observe(history: dict[str, list[list]], record: dict) -> None:
+    """Extend the window's current run, or start one when the reading changed."""
+    measured = _parse_iso(record.get("updatedAt"))
+    if measured is None:
+        return
+    seen = int(measured.timestamp())
+    for key, window in _usage_history_windows(record):
+        used = window.get("usedPercent")
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+            continue
+        reset = _parse_iso(window.get("resetsAt"))
+        current = [seen, seen, used, int(reset.timestamp()) if reset else None]
+        runs = history.setdefault(key, [])
+        if runs:
+            last = runs[-1]
+            if seen < last[1]:
+                continue
+            same_reset = (last[3] is None) == (current[3] is None) and (
+                last[3] is None or abs(current[3] - last[3]) <= HISTORY_CYCLE_SHIFT_SECONDS)
+            if used == last[2] and same_reset and seen - last[1] <= HISTORY_GAP_SECONDS:
+                last[1] = seen
+                continue
+        runs.append(current)
+
+
+def _usage_history_prune(history: dict[str, list[list]], now: _dt.datetime) -> None:
+    """Keep runs inside the longest lookback plus the run in effect at its start."""
+    start = int(now.timestamp()) - max(RECENT_LOOKBACK_HOURS.values()) * 3600
+    for key in list(history):
+        runs = history[key]
+        if runs[-1][1] < start:
+            del history[key]
+            continue
+        first = 0
+        while first + 1 < len(runs) and runs[first + 1][0] <= start:
+            first += 1
+        del runs[:first]
+
+
+def _recent_consumption(runs: list[list], hours: int, now: _dt.datetime) -> dict | None:
+    """Percent of the window consumed in the last `hours`, summed across resets.
+
+    Within one cycle only increases count; after a reset the new cycle's usage
+    counts in full. A change across an unobserved gap that spans the lookback
+    start cannot be placed on either side, so it is left out; a change across
+    an ordinary poll interval spanning it counts in full.
+    """
+    now_ts = int(now.timestamp())
+    start = now_ts - hours * 3600
+    if not runs or runs[-1][1] < start:
+        return None
+    base = 0
+    while base + 1 < len(runs) and runs[base + 1][0] <= start:
+        base += 1
+    window = runs[base:]
+    straddles = (window[0][1] < start and len(window) > 1
+                 and window[1][0] - window[0][1] > HISTORY_GAP_SECONDS)
+    consumed = 0.0
+    for index, (previous, current) in enumerate(zip(window, window[1:])):
+        if index == 0 and straddles:
+            continue
+        if _usage_history_new_cycle(previous, current):
+            consumed += current[2]
+        else:
+            consumed += max(0.0, current[2] - previous[2])
+    return {"hours": hours, "consumedPercent": round(consumed, 2)}
+
+
+def _attach_recent_usage(records: list[dict], history: dict[str, list[list]], now: _dt.datetime) -> None:
+    for record in records:
+        if record.get("ok") is not True:
+            continue
+        for key, window in _usage_history_windows(record):
+            recent = _recent_consumption(
+                history.get(key, []), RECENT_LOOKBACK_HOURS[window["windowMinutes"]], now,
+            )
+            if recent is not None:
+                window["recent"] = recent
 
 
 def _last_known(record: dict, error: str = "") -> dict:
@@ -1211,12 +1363,15 @@ def main(argv: list[str]) -> int:
         "codexRotation": None,
         "cliVersion": None,
     }
+    cli_missing = not (os.path.isfile(cli) and os.access(cli, os.X_OK)) and not shutil.which(cli)
+    if args.cache_only or cli_missing:
+        _attach_recent_usage(restored, _usage_history_entries(_usage_cache_payload(), now), now)
     if args.cache_only:
         out["cacheOnly"] = True
         json.dump(out, sys.stdout)
         sys.stdout.write("\n")
         return 0
-    if not (os.path.isfile(cli) and os.access(cli, os.X_OK)) and not shutil.which(cli):
+    if cli_missing:
         message = f"codexbar CLI not found or not executable: {cli}"
         out["fatal"] = {"code": "cli_missing", "message": message}
         out["providers"] = [_last_known(record, message) for record in restored]
@@ -1273,7 +1428,7 @@ def main(argv: list[str]) -> int:
                 record["sourceScope"] = current_scopes[provider]
         merged.extend(records)
     results = merged
-    _usage_cache_write(current_scopes, results, now)
+    _attach_recent_usage(results, _usage_cache_write(current_scopes, results, now), now)
 
     out = {
         "updatedAt": max((r["updatedAt"] for r in results if r.get("updatedAt")), default=None),
