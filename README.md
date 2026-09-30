@@ -43,6 +43,7 @@ counting working, blocked and idle agents.
 | [![Usage tab](docs/usage.png)](docs/usage.png) | [![Agents tab](docs/agents.png)](docs/agents.png) | [![History tab](docs/history.png)](docs/history.png) |
 
 The popup screenshots use made-up accounts and sessions.
+Drag the popup's edges to resize it within the available screen space.
 
 ## Requirements
 

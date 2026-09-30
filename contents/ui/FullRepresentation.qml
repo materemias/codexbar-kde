@@ -15,7 +15,6 @@ Item {
     Layout.preferredHeight: implicitHeight
     Layout.minimumWidth: Kirigami.Units.gridUnit * 20
     Layout.minimumHeight: 280
-    Layout.maximumHeight: Math.min(900, Screen.desktopAvailableHeight * 0.85)
 
     readonly property bool agentsTabVisible: Plasmoid.configuration.showAgents !== false
     readonly property int blockedCount: {
