@@ -45,7 +45,7 @@ KNOWN_HOSTS = {
     "kitty", "konsole", "code", "code-insiders", "code-flatpak",
     "tmux", "tmux: server", "wezterm", "alacritty", "ghostty",
     "gnome-terminal", "gnome-terminal-", "xterm", "foot",
-    "yakuake", "tilix", "ptyhost",
+    "yakuake", "tilix", "ptyhost", "t3code",
 }
 
 # argv[1] verbs that mean a background service rather than an interactive
@@ -123,13 +123,6 @@ def _comm_of(pid: int) -> str:
     return _read_text(f"/proc/{pid}/comm").strip()
 
 
-def _cmdline_of(pid: int) -> str:
-    try:
-        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
-    except OSError:
-        return ""
-
-
 def _argv_of(pid: int) -> list[str]:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -185,8 +178,10 @@ def _parent_walk_for_host(start_pid: int) -> tuple[str, int, list[int]]:
         if comm in KNOWN_HOSTS:
             host, host_pid = comm, cur
             break
-        cmdline = _cmdline_of(cur)
-        if "vscode-server" in cmdline or "/code/" in cmdline or "code-insiders" in cmdline:
+        # Match the executable only; arguments can name any path, such as
+        # ~/code/<project> passed to the agent.
+        exe = (_argv_of(cur) or [""])[0]
+        if "vscode-server" in exe or "/code/" in exe or "code-insiders" in exe:
             host, host_pid = "code", cur
             break
         nxt = _ppid_of(cur)
@@ -232,6 +227,20 @@ def _is_service_argv(argv: list[str]) -> bool:
     return any(a in _HEADLESS_FLAGS for a in rest)
 
 
+def _under_t3(pid: int) -> bool:
+    """True when T3 Code started the process. T3 drives Claude through
+    stream-json and Codex through one `app-server` per thread, so these
+    look like services but are its interactive sessions."""
+    seen: set[int] = set()
+    cur = _ppid_of(pid)
+    while cur > 1 and cur not in seen and len(seen) < 12:
+        if _comm_of(cur) == "t3code":
+            return True
+        seen.add(cur)
+        cur = _ppid_of(cur)
+    return False
+
+
 def _pgrep(name: str, services: bool = False) -> list[int]:
     """Interactive processes named `name`, or with `services` only the
     background ones (app servers, daemons) that the scan otherwise skips."""
@@ -248,7 +257,8 @@ def _pgrep(name: str, services: bool = False) -> list[int]:
         if not pid_s.isdigit():
             continue
         pid = int(pid_s)
-        if _is_service_argv(_argv_of(pid)) != services:
+        service = _is_service_argv(_argv_of(pid)) and not _under_t3(pid)
+        if service != services:
             continue
         out.append(pid)
     return out
@@ -717,6 +727,7 @@ def _codex_fresh_rollout(pid: int, home: str, pool: set[str]) -> tuple[str, bool
         other for other in _pgrep("codex")
         if other != pid and _codex_home(other) == home
         and _cwd_of(other) == cwd and not _resume_arg(other, "resume")
+        and not _under_t3(other)
     ]
     return newest, len(mine) == 1 and not peers
 

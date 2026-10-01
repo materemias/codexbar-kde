@@ -289,7 +289,12 @@ background sessions of `claude daemon`, and Codex's Agent Command Center
 after switching to another thread.
 
 Sessions are recognised in kitty, Konsole, WezTerm, Alacritty, Ghostty, foot,
-GNOME Terminal, Tilix, Yakuake, xterm, tmux and VS Code terminals. A process
+GNOME Terminal, Tilix, Yakuake, xterm, tmux and VS Code terminals. Claude
+and Codex threads that T3 Code runs are listed too, with T3 Code as the host.
+Clicking one raises the T3 Code window, because T3 Code has no link to open a
+single thread. History cannot relaunch them, but it shows the resume command.
+When T3 Code stops a thread's provider session, its row moves to History even
+though the thread stays in T3 Code. A process
 whose session cannot be identified is listed as untracked, with its state and
 folder but no title; Settings → Agents can hide these.
 

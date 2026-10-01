@@ -856,6 +856,40 @@ class ResumeAndIdentityTests(unittest.TestCase):
         self.assertEqual(records[0]["resumeCommand"], "cd -- /work && claude --resume shared")
 
 
+class T3CodeTests(unittest.TestCase):
+    # T3 Code runs Claude as stream-json and Codex as one app-server per
+    # thread, directly under its Electron main process.
+    COMM = {10: "claude", 11: "claude", 12: "codex", 5: "t3code", 4: "t3code", 3: "systemd"}
+    PPID = {10: 5, 11: 3, 12: 5, 5: 4, 4: 3, 3: 1}
+    ARGV = {
+        10: ["claude", "--output-format", "stream-json", "--add-dir", "/home/u/code/proj"],
+        11: ["claude", "-p", "hi"],
+        12: ["codex", "app-server"],
+        5: ["/opt/t3code-bin/t3code", "--require", "x"],
+        4: ["/opt/t3code-bin/t3code"],
+        3: ["/usr/lib/systemd/systemd", "--user"],
+    }
+
+    def _patch(self):
+        return (
+            mock.patch.object(agents, "_comm_of", side_effect=lambda p: self.COMM.get(p, "")),
+            mock.patch.object(agents, "_ppid_of", side_effect=lambda p: self.PPID.get(p, 0)),
+            mock.patch.object(agents, "_argv_of", side_effect=lambda p: self.ARGV.get(p, [])),
+        )
+
+    def test_pgrep_keeps_t3_sessions_interactive(self) -> None:
+        out = subprocess.CompletedProcess([], 0, stdout="10\n11\n12\n")
+        a, b, c = self._patch()
+        with a, b, c, mock.patch.object(agents.subprocess, "run", return_value=out):
+            self.assertEqual(agents._pgrep("claude"), [10, 12])
+            self.assertEqual(agents._pgrep("claude", services=True), [11])
+
+    def test_host_walk_stops_at_t3_not_code_in_args(self) -> None:
+        a, b, c = self._patch()
+        with a, b, c:
+            self.assertEqual(agents._parent_walk_for_host(10), ("t3code", 4, [10, 5, 4]))
+
+
 class PersistenceTests(unittest.TestCase):
     def test_older_requested_at_is_skipped_only_for_same_boot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

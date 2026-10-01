@@ -95,6 +95,10 @@ credentials" for setup.
 - pi overwrites its process title, so `--session <id>` is read from the
   parent shell's `-c` command (how Launch starts it). A fresh pi owns the
   only rollout in its slug whose header falls in its first 30 seconds.
+- T3 Code runs Claude with stream-json flags and Codex as one
+  `codex app-server` per thread, under its `t3code` Electron process.
+  `_under_t3` makes these interactive despite headless or service argv, and
+  keeps them out of the shared Codex rollout pool. The host is `t3code`.
 - Claude Code's agent view runs tasks as `kind: "bg"` sessions under
   `claude daemon`, with no terminal ancestor; they are not listed.
 - `codexbar_focus.py --launch <provider> <sessionId>` resumes a kitty
