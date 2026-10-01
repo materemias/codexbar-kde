@@ -25,16 +25,19 @@ import json
 import os
 import pwd
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import codexbar_agents as agents
 
 AGENTS_DIR = Path.home() / ".codexbar" / "agents"
 AGGREGATE_PATH = Path.home() / ".codexbar" / "agents.json"
+T3_DIR = Path.home() / ".t3" / "userdata"
 
 
 def _find_sentinel(session_id: str) -> dict | None:
@@ -436,6 +439,42 @@ def launch_all(keys: set[tuple[str, str]]) -> int:
     return 0
 
 
+def _t3_thread_link(session_id: str) -> str:
+    """The t3code:// link of the T3 Code thread running a provider session.
+    T3 keeps the Claude session id as `resume` and the Codex thread id as
+    `threadId` in each thread's resume cursor."""
+    try:
+        env = (T3_DIR / "environment-id").read_text().strip()
+        with sqlite3.connect(f"file:{T3_DIR / 'state.sqlite'}?mode=ro", uri=True, timeout=1) as db:
+            row = db.execute(
+                "SELECT thread_id FROM provider_session_runtime"
+                " WHERE ? IN (json_extract(resume_cursor_json, '$.resume'),"
+                " json_extract(resume_cursor_json, '$.threadId'))"
+                " ORDER BY last_seen_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+    except (OSError, sqlite3.Error):
+        return ""
+    if not env or not row:
+        return ""
+    return f"t3code://threads/{quote(env, safe='')}/{quote(row[0], safe='')}"
+
+
+def _t3_open(session_id: str) -> None:
+    """Ask T3 Code to show the thread. T3 Code 0.0.44 only raises its window
+    for this link; pingdotgg/t3code#9745 tracks opening the thread itself."""
+    link = _t3_thread_link(session_id)
+    if not link:
+        return
+    try:
+        subprocess.Popen(
+            ["xdg-open", link], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
 def focus(session_id: str) -> int:
     record = _find_sentinel(session_id)
     if not record:
@@ -447,6 +486,9 @@ def focus(session_id: str) -> int:
     if not candidates:
         sys.stderr.write("codexbar_focus: no ancestry — claude pid already gone\n")
         return 3
+
+    if record.get("host") == "t3code":
+        _t3_open(session_id)
 
     # Skip kitty branch if no kitty in the tree.
     has_kitty = any(_comm(p) == "kitty" for p in candidates)

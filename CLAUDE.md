@@ -99,6 +99,9 @@ credentials" for setup.
   `codex app-server` per thread, under its `t3code` Electron process.
   `_under_t3` makes these interactive despite headless or service argv, and
   keeps them out of the shared Codex rollout pool. The host is `t3code`.
+  Focus opens `t3code://threads/<environment-id>/<thread>`, mapped from the
+  session id through `provider_session_runtime.resume_cursor_json` in
+  `~/.t3/userdata/state.sqlite`, then activates the window through KWin.
 - Claude Code's agent view runs tasks as `kind: "bg"` sessions under
   `claude daemon`, with no terminal ancestor; they are not listed.
 - `codexbar_focus.py --launch <provider> <sessionId>` resumes a kitty

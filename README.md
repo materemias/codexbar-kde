@@ -291,8 +291,11 @@ after switching to another thread.
 Sessions are recognised in kitty, Konsole, WezTerm, Alacritty, Ghostty, foot,
 GNOME Terminal, Tilix, Yakuake, xterm, tmux and VS Code terminals. Claude
 and Codex threads that T3 Code runs are listed too, with T3 Code as the host.
-Clicking one raises the T3 Code window, because T3 Code has no link to open a
-single thread. History cannot relaunch them, but it shows the resume command.
+Clicking one raises the T3 Code window and sends it the thread's
+`t3code://threads/<environment>/<thread>` link. T3 Code 0.0.44 ignores the
+thread part, so the thread opens only once
+[pingdotgg/t3code#9745](https://github.com/pingdotgg/t3code/issues/9745) is
+fixed. History cannot relaunch them, but it shows the resume command.
 When T3 Code stops a thread's provider session, its row moves to History even
 though the thread stays in T3 Code. A process
 whose session cannot be identified is listed as untracked, with its state and

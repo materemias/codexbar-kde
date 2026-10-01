@@ -27,6 +27,27 @@ def entry(**changes: object) -> dict:
     return record
 
 
+class T3LinkTests(unittest.TestCase):
+    def test_link_maps_claude_and_codex_sessions_to_t3_threads(self) -> None:
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "environment-id").write_text("env-1\n")
+            with sqlite3.connect(root / "state.sqlite") as db:
+                db.execute("CREATE TABLE provider_session_runtime"
+                           " (thread_id TEXT, last_seen_at TEXT, resume_cursor_json TEXT)")
+                db.executemany("INSERT INTO provider_session_runtime VALUES (?, ?, ?)", [
+                    ("t-claude", "2", json.dumps({"threadId": "t-claude", "resume": "claude-sid"})),
+                    ("t-codex", "1", json.dumps({"threadId": "codex-sid"})),
+                ])
+            with mock.patch.object(focus, "T3_DIR", root):
+                self.assertEqual(focus._t3_thread_link("claude-sid"), "t3code://threads/env-1/t-claude")
+                self.assertEqual(focus._t3_thread_link("codex-sid"), "t3code://threads/env-1/t-codex")
+                self.assertEqual(focus._t3_thread_link("other"), "")
+            with mock.patch.object(focus, "T3_DIR", root / "missing"):
+                self.assertEqual(focus._t3_thread_link("claude-sid"), "")
+
+
 class LaunchTests(unittest.TestCase):
     def launch(self, payload: dict, desktops: int = 6):
         with tempfile.TemporaryDirectory() as directory:
