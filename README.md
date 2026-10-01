@@ -12,7 +12,7 @@ all of that in your Plasma panel:
 - **Who needs you, at a glance.** Panel dots count working, blocked and
   idle agents, so you see a session waiting for input without looking for it.
 - **Find any session by typing.** Every Claude Code, Codex, OpenCode, pi
-  and omp session running in a terminal, filtered as you type, with a peek at
+  and omp session running in a terminal or T3 Code, filtered as you type, with a peek at
   its last messages.
 - **Jump straight to it.** One click switches to the right desktop and
   raises the session's terminal, whichever monitor it is on.
