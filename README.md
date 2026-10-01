@@ -181,14 +181,19 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
   refreshes and rotation among the same configured accounts preserve the cache.
 - **Desktop usage warnings.** Enabled by default in Settings → Providers.
   Alerts fire at 80% and 95% used, or earlier when the pace projects
-  exhaustion before reset. Each account and window is tracked separately;
+  exhaustion before reset once at least 10% is used, so the first prompt of a
+  fresh window stays quiet. Each account and window is tracked separately;
   repeated polls do not repeat a delivered warning, but a higher severity
   can alert again. Cached readings and combined bars never generate alerts.
   Failed delivery retries on a later poll. OpenRouter's monthly key limit
   rearms at the UTC month boundary. Windows without a reset time rearm when
   a fresh reading falls below 80%. Changed account credentials start a separate
-  alert history. Notifications omit account emails. After an applet restart,
-  the first fresh high reading can alert again.
+  alert history. Alerts name the account by email, for example
+  `Codex · me@example.com · 7d`. After an applet restart, the first fresh high
+  reading can alert again.
+- **Notification timeout.** All CodexBar desktop notifications close after 10
+  seconds and stay in the notification history. They are sent at normal
+  urgency, since Plasma never closes critical ones on its own.
 
 ### Agents tab
 

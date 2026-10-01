@@ -27,7 +27,7 @@ Kirigami.FormLayout {
         onToggled: cfg_usageNotifications = checked
     }
     QQC2.Label {
-        text: "Desktop alerts at 80% and 95%, or when the current pace projects exhaustion before reset. Requires notify-send (libnotify)."
+        text: "Desktop alerts at 80% and 95%, or from 10% used when the current pace projects exhaustion before reset. Requires notify-send (libnotify)."
         wrapMode: Text.WordWrap
         Layout.fillWidth: true
         opacity: 0.55

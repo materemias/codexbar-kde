@@ -13,11 +13,14 @@ function accountIdentity(record) {
         ? record.accountEmail.trim().toLowerCase() : null
 }
 
+// A projection below this much actual use is early-window noise: the first
+// prompt of a fresh 5h window can project far past 100%.
+var PROJECTION_MIN_PERCENT = 10
+
 function usage(previous, records, now, enabled) {
     var state = Object.assign({}, previous || {})
     var events = []
     var scopes = {}
-    var accounts = {}
     var counts = {}
     for (var a = 0; a < records.length; a++) {
         var account = records[a]
@@ -26,10 +29,6 @@ function usage(previous, records, now, enabled) {
             scopes[JSON.stringify([account.id, account.sourceScope])] = true
         var providerKey = JSON.stringify(account.id)
         counts[providerKey] = (counts[providerKey] || 0) + 1
-        if (!accounts[providerKey]) accounts[providerKey] = []
-        var identity = accountIdentity(account)
-        if (identity !== null && accounts[providerKey].indexOf(identity) < 0)
-            accounts[providerKey].push(identity)
     }
     for (var priorKey in state)
         if (!scopes[state[priorKey].source]) delete state[priorKey]
@@ -44,10 +43,7 @@ function usage(previous, records, now, enabled) {
         var accountId = accountIdentity(record)
         // Without an identity, two accounts cannot be safely distinguished.
         if (accountId === null && counts[provider] > 1) continue
-        var label = providerName(record.id)
-        if (counts[provider] > 1) {
-            label += " account " + (accounts[provider].sort().indexOf(accountId) + 1)
-        }
+        var label = providerName(record.id) + (accountId !== null ? " · " + accountId : "")
         var windows = []
         var slots = ["primary", "secondary", "tertiary"]
         for (var s = 0; s < slots.length; s++)
@@ -74,7 +70,8 @@ function usage(previous, records, now, enabled) {
             var key = JSON.stringify([record.id, record.sourceScope, accountId, entry.slot])
             var old = state[key]
             var level = win.usedPercent >= 95 ? 3 : win.usedPercent >= 80 ? 2
-                : Usage.projectedPercent(win, now) > 100 ? 1 : 0
+                : win.usedPercent >= PROJECTION_MIN_PERCENT
+                    && Usage.projectedPercent(win, now) > 100 ? 1 : 0
             var samePeriod = old && old.reset === reset
             var priorLevel = samePeriod ? old.level : 0
             var pending = samePeriod ? old.pending : []
@@ -93,8 +90,7 @@ function usage(previous, records, now, enabled) {
             state[key].pending = pending.concat([level])
             var detail = level === 1 ? "Projected to exhaust before reset at the current pace."
                 : Math.round(win.usedPercent) + "% of the allowance used."
-            events.push({ kind: "usage", urgency: level === 3 ? "critical" : "normal",
-                usageKey: key, cycle: cycle, level: level,
+            events.push({ kind: "usage", usageKey: key, cycle: cycle, level: level,
                 title: "CodexBar " + (level === 3 ? "usage critical" : "usage warning"),
                 // Never pass provider-supplied titles or unknown slot IDs into notification text.
                 body: label + " · " + (Usage.windowLabel(record.id, entry.slot, win)
@@ -136,7 +132,7 @@ function ompMode(previous, status, enabled) {
     if (mode === null || old.mode === null) return { state: state, events: events }
     if (mode !== old.mode) {
         state.sequence++
-        state.transition = { kind: "ompMode", urgency: "normal",
+        state.transition = { kind: "ompMode",
             sequence: state.sequence, title: "CodexBar omp mode changed",
             body: old.mode + " → " + mode }
     } else {
@@ -172,7 +168,7 @@ function agents(previous, records, enabled) {
         sessions[key] = record.state
         if (enabled && old.enabled && old.sessions[key] !== undefined
                 && old.sessions[key] !== "blocked" && record.state === "blocked") {
-            events.push({ kind: "agent", urgency: "normal",
+            events.push({ kind: "agent",
                 title: "CodexBar agent waiting for input",
                 body: providerName(record.provider) + " is waiting for your input." })
         }

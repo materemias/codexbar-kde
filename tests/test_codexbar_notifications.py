@@ -69,13 +69,13 @@ Item {
             var result = Notifications.usage({}, [record(79, null, reset)], now, true)
             check(result.events.length === 0, "79% must stay quiet without a projection")
             result = Notifications.usage(result.state, [record(80, null, reset)], now, true)
-            check(result.events.length === 1 && result.events[0].urgency === "normal",
+            check(result.events.length === 1 && result.events[0].title.indexOf("warning") >= 0,
                 "80% must warn")
             var warned = delivered(result)
             result = Notifications.usage(warned, [record(94, null, reset)], now, true)
             check(result.events.length === 0, "polling in the warning range must not repeat")
             result = Notifications.usage(result.state, [record(95, null, reset)], now, true)
-            check(result.events.length === 1 && result.events[0].urgency === "critical",
+            check(result.events.length === 1 && result.events[0].title.indexOf("critical") >= 0,
                 "95% must escalate")
             var critical = delivered(result)
             result = Notifications.usage(critical, [record(98, null, reset)], now, true)
@@ -91,7 +91,7 @@ Item {
 
     def test_projection_uses_shared_pace_with_three_percent_floor(self):
         self.policy('''
-            var item = record(4)
+            var item = record(12)
             item.primary.windowMinutes = 300
             item.primary.resetsAt = new Date(now + 300 * 60000 * 0.98).toISOString()
             check(Usage.projectedPercent(item.primary, now) === -1,
@@ -104,6 +104,12 @@ Item {
                 "settled over-pace usage must warn")
             result = Notifications.usage(result.state, [item], now, true)
             check(result.events.length === 0, "projected exhaustion must not repeat")
+            var early = record(9)
+            early.primary.windowMinutes = 300
+            early.primary.resetsAt = item.primary.resetsAt
+            check(Usage.projectedPercent(early.primary, now) > 100
+                && Notifications.usage({}, [early], now, true).events.length === 0,
+                "a projection under 10% actual use must stay quiet")
             item.primary.usedPercent = 80
             result = Notifications.usage(result.state, [item], now, true)
             check(result.events.length === 1 && result.events[0].body.indexOf("80%") >= 0,
@@ -143,20 +149,21 @@ Item {
                 "startup cache stays silent but first fresh reading can alert")
         ''')
 
-    def test_accounts_windows_and_private_notification_text(self):
+    def test_accounts_windows_and_named_notification_text(self):
         self.policy('''
             var a = record(80, "private-a@example.invalid")
             var b = record(80, "private-b@example.invalid")
             a.secondary = { usedPercent: 95 }
-            a.extraRateWindows = [{ id: "grant", title: "private-a@example.invalid",
+            a.extraRateWindows = [{ id: "grant", title: "provider-supplied title",
                 window: { usedPercent: 80 } }]
             var result = Notifications.usage({}, [a, b], now, true)
             check(result.events.length === 4, "accounts and windows must alert independently")
             var text = JSON.stringify(result.events.map(function(event) {
                 return [event.title, event.body]
             }))
-            check(text.indexOf("private-") < 0 && text.indexOf("account 1") >= 0
-                && text.indexOf("account 2") >= 0, "notification text must use benign account labels")
+            check(text.indexOf("provider-supplied") < 0 && text.indexOf("Codex · private-a@example.invalid") >= 0
+                && text.indexOf("Codex · private-b@example.invalid") >= 0,
+                "notification text must name accounts by email, never by provider titles")
             check(Notifications.usage(result.state, [b, a], now, true).events.length === 0,
                 "account reorder must not repeat alerts")
             check(Notifications.usage({}, [record(99), record(99)], now, true).events.length === 0,
@@ -289,7 +296,7 @@ Item {
             check(result.events.length === 0, "month rollover itself must not alert")
             item.primary.usedPercent = 80
             result = Notifications.usage(result.state, [item], october + 86400000, true)
-            check(result.events.length === 1 && result.events[0].urgency === "normal",
+            check(result.events.length === 1 && result.events[0].title.indexOf("warning") >= 0,
                 "next month's 80% crossing must rearm")
             state = delivered(result)
             item.primary.usedPercent = 95

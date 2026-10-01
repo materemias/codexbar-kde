@@ -60,6 +60,7 @@ PlasmoidItem {
     property string notificationError: ""
     property var pendingNotifications: ({})
     property int notificationSequence: 0
+    readonly property int notificationTimeoutMs: 10000
     property string lastError: ""
     property string agentsError: ""
 
@@ -251,7 +252,9 @@ PlasmoidItem {
                 + "printf '%s\\n' 'notify-send is unavailable; install libnotify to enable desktop notifications.' >&2; "
                 + "exit 127; fi; notify-send --app-name " + Command.shellQuote("CodexBar")
                 + " --icon " + Command.shellQuote("dialog-information")
-                + " --urgency " + Command.shellQuote(event.urgency)
+                // Plasma never auto-hides critical urgency, so every alert
+                // stays normal and expires.
+                + " --urgency normal --expire-time " + root.notificationTimeoutMs
                 + " -- " + Command.shellQuote(event.title) + " " + Command.shellQuote(event.body)
                 + " # " + (++root.notificationSequence)
             root.pendingNotifications[cmd] = {
