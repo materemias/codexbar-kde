@@ -17,6 +17,8 @@ ColumnLayout {
 
     // Cluster sessions by cwd. Groups are sorted alphabetically by folder name,
     // and rows within each group are newest first by stateChangedAt.
+    // Groups ignore the filter: typing toggles row visibility instead of
+    // rebuilding every delegate on each keystroke.
     readonly property var groups: {
         var byFolder = {}
         var order = []
@@ -24,7 +26,6 @@ ColumnLayout {
         for (var i = 0; i < src.length; i++) {
             var a = src[i]
             if (!a) continue
-            if (!agents._matchesFilter(a)) continue
             var folder = root.cwdLabel(a.cwd || "") || (a.provider || "agent")
             var g = byFolder[folder]
             if (!g) {
@@ -60,7 +61,8 @@ ColumnLayout {
         var out = []
         for (var i = 0; i < groups.length; i++) {
             for (var j = 0; j < groups[i].sessions.length; j++) {
-                out.push(groups[i].sessions[j])
+                var a = groups[i].sessions[j]
+                if (agents.recordMatches(a)) out.push(a)
             }
         }
         return out
@@ -73,60 +75,169 @@ ColumnLayout {
     // accumulate here (FullRepresentation forwards them). Empty = no filter.
     property string filterText: ""
 
-    // Fuzzy matching stays within one session field. Recent turns use exact
-    // substring matching so unrelated prose cannot satisfy a short query.
-    function _fuzzyMatches(text, q) {
-        var hay = (text || "").toLowerCase()
-        var j = 0
-        for (var i = 0; i < hay.length && j < q.length; i++) {
-            if (hay[i] === q[j]) j++
-        }
-        return j === q.length
+    // Field matches: a substring anywhere, else a subsequence whose every
+    // run of matched characters starts a word ("cmh" finds "Check MCP
+    // history", "tern" skips "after thorough testing"). Recent turns use
+    // exact substring matching so unrelated prose cannot satisfy a query.
+    // Every match is shown: highlighted in a visible label, or as a line
+    // in the row's snippet panel.
+    readonly property var _fields: [
+        { name: "windowTitle", label: "title" },
+        { name: "lastPrompt", label: "prompt" },
+        { name: "cwd", label: "cwd" },
+        { name: "provider", label: "provider" },
+        { name: "model", label: "model" }
+    ]
+
+    function _fieldText(record, name) {
+        var value = name === "model" ? _modelName(record.model) : record[name]
+        return String(value || "").replace(/\s+/g, " ")
     }
 
-    function _matchesFilter(a) {
+    function _isWordChar(c) {
+        return c.toLowerCase() !== c.toUpperCase() || (c >= "0" && c <= "9")
+    }
+
+    function _wordStart(text, k) {
+        if (k === 0) return true
+        var p = text[k - 1], c = text[k]
+        if (!_isWordChar(p)) return true
+        // camelCase boundary
+        return c !== c.toLowerCase() && p !== p.toUpperCase()
+    }
+
+    // Sorted match positions of lowercase q in text, or null.
+    function _matchPositions(text, q) {
+        if (!text || !q) return null
+        var hay = text.toLowerCase()
+        var at = hay.indexOf(q)
+        if (at !== -1) {
+            var run = []
+            for (var r = 0; r < q.length; r++) run.push(at + r)
+            return run
+        }
+        // Each matched character continues the previous run or starts a
+        // word. Failed (start, queryIndex) states are memoized.
+        var failed = {}
+        var walk = function(from, j) {
+            if (j === q.length) return []
+            var key = from + ":" + j
+            if (failed[key]) return null
+            for (var k = from; k < hay.length; k++) {
+                if (hay[k] !== q[j]) continue
+                if (!((j > 0 && k === from) || agents._wordStart(text, k))) continue
+                var rest = walk(k + 1, j + 1)
+                if (rest) return [k].concat(rest)
+            }
+            failed[key] = true
+            return null
+        }
+        return walk(0, 0)
+    }
+
+    function _escape(s) {
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    }
+
+    // StyledText for text[start, end) with the matched positions highlighted.
+    function _styled(text, positions, start, end) {
+        var hit = {}
+        for (var i = 0; i < positions.length; i++) hit[positions[i]] = true
+        var out = ""
+        var k = start
+        while (k < end) {
+            var on = hit[k] === true
+            var e = k
+            while (e < end && (hit[e] === true) === on) e++
+            var part = _escape(text.slice(k, e))
+            out += on ? "<b><font color=\"#ffb300\">" + part + "</font></b>" : part
+            k = e
+        }
+        return out
+    }
+
+    // Up to 60 characters before the first match and 100 after the last.
+    function _excerpt(text, positions) {
+        var start = Math.max(0, positions[0] - 60)
+        var end = Math.min(text.length, positions[positions.length - 1] + 101)
+        return (start > 0 ? "… " : "")
+            + _styled(text, positions, start, end)
+            + (end < text.length ? " …" : "")
+    }
+
+    function recordMatches(a) {
         var q = filterText.toLowerCase()
         if (!q) return true
-
-        var fields = [a.windowTitle, a.lastPrompt, a.cwd, a.provider, a.model]
-        for (var i = 0; i < fields.length; i++) {
-            if (_fuzzyMatches(fields[i], q)) return true
+        if (!a) return false
+        for (var i = 0; i < _fields.length; i++) {
+            if (_matchPositions(_fieldText(a, _fields[i].name), q)) return true
         }
-
         var rec = a.recent || []
         for (var j = 0; j < rec.length; j++) {
-            if ((rec[j].text || "").toLowerCase().indexOf(q) !== -1) return true
+            var t = (rec[j].text || "").replace(/\s+/g, " ")
+            if (t.toLowerCase().indexOf(q) !== -1) return true
         }
         return false
     }
 
-    // While a filter is active: up to two conversation lines of a record
-    // that contain the query, as StyledText with the query highlighted.
-    // The Agents and History rows both render these under the row.
-    function filterSnippets(record) {
+    // A visible label: StyledText with the filter match highlighted while
+    // a filter is active, otherwise the text unchanged (render PlainText).
+    // `excerpt` trims long wrapped text around the match so it stays in view.
+    function highlighted(text, excerpt) {
+        var q = filterText.toLowerCase()
+        var t = String(text || "")
+        if (!q) return t
+        var norm = t.replace(/\s+/g, " ")
+        var pos = _matchPositions(norm, q)
+        if (!pos) return _escape(norm)
+        return excerpt ? _excerpt(norm, pos) : _styled(norm, pos, 0, norm.length)
+    }
+
+    // The record field a session row shows as its task label.
+    function labelField(record) {
+        if (record.windowTitle) return "windowTitle"
+        if (showPrompts && record.lastPrompt) return "lastPrompt"
+        return "provider"
+    }
+
+    // The fields in `[[name, label], …]` whose label shows its full text.
+    // An elided label can hide the match, so its field gets a snippet line.
+    function shownFields(entries) {
+        return entries.filter(function(e) { return !e[1].truncated })
+            .map(function(e) { return e[0] })
+    }
+
+    // While a filter is active: StyledText lines for every matched field
+    // the row does not show (names in `shown`), then up to two
+    // conversation lines containing the query. A prompt line is dropped
+    // when a matching user turn already repeats that prompt.
+    function filterSnippets(record, shown) {
         var q = filterText.toLowerCase()
         if (!q || !record) return []
-        var out = []
-        var esc = function(s) {
-            return s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;")
-        }
-        var hl = "<b><font color=\"#ffb300\">"
+        var turns = []
         var rec = record.recent || []
-        for (var i = 0; i < rec.length && out.length < 2; i++) {
-            var t = (rec[i].text || "").replace(/\s+/g, " ")
+        for (var j = 0; j < rec.length && turns.length < 2; j++) {
+            var t = (rec[j].text || "").replace(/\s+/g, " ")
             var idx = t.toLowerCase().indexOf(q)
             if (idx === -1) continue
-            var start = Math.max(0, idx - 60)
-            var end = Math.min(t.length, idx + q.length + 100)
-            out.push((rec[i].role === "user" ? "> " : "· ")
-                + (start > 0 ? "… " : "")
-                + esc(t.slice(start, idx))
-                + hl + esc(t.slice(idx, idx + q.length)) + "</font></b>"
-                + esc(t.slice(idx + q.length, end))
-                + (end < t.length ? " …" : ""))
+            var run = []
+            for (var r = 0; r < q.length; r++) run.push(idx + r)
+            turns.push({ user: rec[j].role === "user", text: t,
+                line: (rec[j].role === "user" ? "> " : "· ") + _excerpt(t, run) })
         }
-        return out
+        var out = []
+        for (var i = 0; i < _fields.length; i++) {
+            var f = _fields[i]
+            if (shown.indexOf(f.name) !== -1) continue
+            var text = _fieldText(record, f.name)
+            var pos = _matchPositions(text, q)
+            if (!pos) continue
+            if (f.name === "lastPrompt" && turns.some(function(turn) {
+                return turn.user && turn.text.slice(0, 100) === text.slice(0, 100)
+            })) continue
+            out.push(f.label + ": " + _excerpt(text, pos))
+        }
+        return out.concat(turns.map(function(turn) { return turn.line }))
     }
 
     function _providerName(provider) {
@@ -293,6 +404,9 @@ ColumnLayout {
             Layout.fillWidth: true
             spacing: 1
             required property var modelData
+            visible: groupItem.modelData.sessions.some(function(s) {
+                return agents.recordMatches(s)
+            })
 
             PC3.Label {
                 text: groupItem.modelData.folder
@@ -320,13 +434,16 @@ ColumnLayout {
             Layout.fillWidth: true
             Layout.leftMargin: 6
             required property var modelData
+            visible: agents.recordMatches(modelData)
 
             implicitHeight: rowCol.implicitHeight + 4
             readonly property string sessionKey: agents.agentKey(modelData)
             readonly property bool peekOpen: sessionKey !== ""
                 && sessionKey === agents.peekKey
 
-            readonly property var filterSnippets: agents.filterSnippets(modelData)
+            readonly property var filterSnippets: agents.filterSnippets(modelData,
+                agents.shownFields([[agents.labelField(modelData), taskText],
+                    ["model", modelText]]))
 
             // Row + optional peek panel stacked. The panel grows inside the
             // popup's ScrollView when open; only one row peeks at a time
@@ -396,14 +513,18 @@ ColumnLayout {
                     }
 
                     PC3.Label {
-                        text: rowItem.taskLabel
+                        id: taskText
+                        text: agents.highlighted(rowItem.taskLabel)
+                        textFormat: agents.filterText ? Text.StyledText : Text.PlainText
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                         Layout.alignment: Qt.AlignVCenter
                     }
 
                     PC3.Label {
-                        text: agents._modelName(rowItem.modelData.model)
+                        id: modelText
+                        text: agents.highlighted(agents._modelName(rowItem.modelData.model))
+                        textFormat: agents.filterText ? Text.StyledText : Text.PlainText
                         visible: text.length > 0
                         color: Kirigami.Theme.linkColor
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
@@ -735,11 +856,8 @@ ColumnLayout {
             // Prefer the agent-generated session title. Only fall through
             // to the raw user prompt when the user has opted into showing
             // it (otherwise the row just shows the provider name).
-            readonly property string taskLabel: {
-                if (modelData.windowTitle) return modelData.windowTitle
-                if (agents.showPrompts && modelData.lastPrompt) return modelData.lastPrompt
-                return modelData.provider || "agent"
-            }
+            readonly property string taskLabel:
+                modelData[agents.labelField(modelData)] || "agent"
 
             // "Just finished" highlight: true while the existing freshness
             // value remains above zero.

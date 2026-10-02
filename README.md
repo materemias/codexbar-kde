@@ -216,8 +216,10 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 - **Conversation peek.** The arrow or `Space` expands the last eight user,
   assistant and tool turns.
 - **Type to filter.** Typing filters by title, prompt, folder, provider and
-  model (fuzzy), and by recent conversation text (exact). Matching lines
-  appear under the row with the query highlighted.
+  model, and by recent conversation text (exact). A field matches when it
+  contains the query, or when the query's letters start words in order
+  (`fmh` finds "Fix MCP history"). Every match is shown: highlighted in the
+  row, or as a line under it.
 - **Waiting-for-input alerts.** Optional in Settings → Agents, off by default.
   A desktop notification appears when a tracked session changes to blocked.
   Opening the applet or enabling alerts does not notify for sessions already

@@ -75,7 +75,7 @@ credentials" for setup.
 - The aggregator scans `/proc` every tick. Processes without a hook sentinel remain visible as `untracked`.
 - Each session record carries up to eight recent user or assistant turns, capped at 320 characters each. Consecutive tool-only turns collapse into one summary.
 - omp advisor sidecars named `__advisor.*.jsonl` are never session rollouts.
-- Session filtering uses fuzzy subsequence matching within one field. Recent conversation text uses exact case-insensitive substring matching.
+- Session filtering matches one field at a time: a case-insensitive substring, else a subsequence whose every run of matched characters starts a word. Recent conversation text uses exact case-insensitive substring matching. Every match is visible, highlighted in a shown label or as a snippet line for an unshown field. Filtering toggles row `visible`; the Repeater models stay unfiltered so typing does not rebuild delegates.
 - `codexbar://focus/<sessionId>` dispatches to `codexbar_focus.py`. It walks
   process ancestors, tries Kitty remote control or `tern focus`, then falls
   back to KWin activation. `install_integration.py` registers the handler.

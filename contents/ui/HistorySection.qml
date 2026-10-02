@@ -19,15 +19,11 @@ ColumnLayout {
         var s = root.agentSnapshot
         return s && Array.isArray(s.history) ? s.history : []
     }
-    readonly property var filtered: {
-        var out = []
-        for (var i = 0; i < history.records.length; i++) {
-            var record = history.records[i]
-            if (record && history.agentsView._matchesFilter(record)) out.push(record)
-        }
-        return out
-    }
-    readonly property var rebooted: {
+    // Render models ignore the filter: typing toggles row visibility
+    // instead of rebuilding every delegate on each keystroke. `rebooted`,
+    // `exited` and `filtered` hold the matching rows for selection, counts
+    // and bulk actions.
+    readonly property var rebootedAll: {
         // Desktop number first, then "all", then unknown; newest first
         // within one desktop.
         function desktopRank(record) {
@@ -35,7 +31,7 @@ ColumnLayout {
             if (/^[0-9]+$/.test(d)) return Number(d)
             return d === "all" ? 1e9 : 2e9
         }
-        var out = history.filtered.filter(function(r) { return r.closedBy === "reboot" })
+        var out = history.records.filter(function(r) { return r && r.closedBy === "reboot" })
         out.sort(function(a, b) {
             var aDesk = desktopRank(a)
             var bDesk = desktopRank(b)
@@ -44,11 +40,17 @@ ColumnLayout {
         })
         return out
     }
-    readonly property var exited: {
-        var out = history.filtered.filter(function(r) { return r.closedBy === "exit" })
+    readonly property var exitedAll: {
+        var out = history.records.filter(function(r) { return r && r.closedBy === "exit" })
         out.sort(history._newestFirst)
         return out
     }
+    function _matching(list) {
+        return list.filter(function(r) { return history.agentsView.recordMatches(r) })
+    }
+    readonly property var rebooted: _matching(rebootedAll)
+    readonly property var exited: _matching(exitedAll)
+    readonly property var filtered: rebooted.concat(exited)
 
     function _newestFirst(a, b) {
         var aTime = Number(a.lastSeenAt) || 0
@@ -186,7 +188,7 @@ ColumnLayout {
     }
 
     Repeater {
-        model: history.rebooted
+        model: history.rebootedAll
         delegate: HistoryRow {}
     }
 
@@ -214,7 +216,7 @@ ColumnLayout {
         spacing: 1
 
         Repeater {
-            model: history.exited
+            model: history.exitedAll
             delegate: ClosedRow {}
         }
     }
@@ -222,6 +224,7 @@ ColumnLayout {
     component ClosedRow: Item {
         id: closedRow
         required property var modelData
+        visible: history.agentsView.recordMatches(modelData)
         Layout.fillWidth: true
         Layout.leftMargin: 6
         implicitHeight: closedCol.implicitHeight + 4
@@ -233,11 +236,8 @@ ColumnLayout {
         readonly property bool launchAllowed: root.historyLaunchAllowed(sessionKey)
         readonly property bool selected: sessionKey !== "" && sessionKey === history.selectedKey
         readonly property color tint: Kirigami.Theme.disabledTextColor
-        readonly property string taskLabel: {
-            if (modelData.windowTitle) return modelData.windowTitle
-            if (history.agentsView.showPrompts && modelData.lastPrompt) return modelData.lastPrompt
-            return modelData.provider || "agent"
-        }
+        readonly property string taskLabel:
+            modelData[history.agentsView.labelField(modelData)] || "agent"
 
         Rectangle {
             z: -1
@@ -311,15 +311,19 @@ ColumnLayout {
                 }
 
                 PC3.Label {
-                    text: closedRow.taskLabel
-                    textFormat: Text.PlainText
+                    id: closedTitle
+                    text: history.agentsView.highlighted(closedRow.taskLabel)
+                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
                 }
 
                 PC3.Label {
-                    text: history.agentsView._modelName(closedRow.modelData.model)
+                    id: closedModel
+                    text: history.agentsView.highlighted(
+                        history.agentsView._modelName(closedRow.modelData.model))
+                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
                     visible: text.length > 0
                     color: Kirigami.Theme.linkColor
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
@@ -414,7 +418,10 @@ ColumnLayout {
             }
 
             SnippetPanel {
-                snippets: history.agentsView.filterSnippets(closedRow.modelData)
+                snippets: history.agentsView.filterSnippets(closedRow.modelData,
+                    history.agentsView.shownFields([
+                        [history.agentsView.labelField(closedRow.modelData), closedTitle],
+                        ["model", closedModel]]))
             }
 
             Rectangle {
@@ -589,6 +596,7 @@ ColumnLayout {
     component HistoryRow: Rectangle {
         id: historyRow
         required property var modelData
+        visible: history.agentsView.recordMatches(modelData)
         readonly property bool selected: history.agentsView.agentKey(modelData) === history.selectedKey
         Layout.fillWidth: true
         implicitHeight: historyCol.implicitHeight + 10
@@ -634,14 +642,19 @@ ColumnLayout {
                 }
 
                 PC3.Label {
-                    text: history.agentsView._providerName(historyRow.modelData.provider)
+                    text: history.agentsView.highlighted(
+                        history.agentsView._providerName(historyRow.modelData.provider))
+                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
                     font.weight: Font.DemiBold
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                     Layout.alignment: Qt.AlignVCenter
                 }
 
                 PC3.Label {
-                    text: history.agentsView._modelName(historyRow.modelData.model)
+                    id: historyModel
+                    text: history.agentsView.highlighted(
+                        history.agentsView._modelName(historyRow.modelData.model))
+                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
                     visible: text.length > 0
                     color: Kirigami.Theme.linkColor
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
@@ -652,10 +665,11 @@ ColumnLayout {
                 }
 
                 PC3.Label {
-                    text: historyRow.modelData.windowTitle
+                    id: historyTitle
+                    text: history.agentsView.highlighted(historyRow.modelData.windowTitle
                         || historyRow.modelData.sessionId
-                        || "session"
-                    textFormat: Text.PlainText
+                        || "session")
+                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
@@ -686,8 +700,9 @@ ColumnLayout {
                 spacing: Kirigami.Units.smallSpacing
 
                 PC3.Label {
-                    text: historyRow.modelData.cwd || "cwd unknown"
-                    textFormat: Text.PlainText
+                    id: historyCwd
+                    text: history.agentsView.highlighted(historyRow.modelData.cwd || "cwd unknown")
+                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
                     elide: Text.ElideMiddle
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                     opacity: 0.75
@@ -732,8 +747,8 @@ ColumnLayout {
 
             PC3.Label {
                 visible: text.length > 0
-                text: historyRow.modelData.lastPrompt || ""
-                textFormat: Text.PlainText
+                text: history.agentsView.highlighted(historyRow.modelData.lastPrompt || "", true)
+                textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
                 wrapMode: Text.WordWrap
                 maximumLineCount: 2
                 elide: Text.ElideRight
@@ -743,7 +758,11 @@ ColumnLayout {
             }
 
             SnippetPanel {
-                snippets: history.agentsView.filterSnippets(historyRow.modelData)
+                // The prompt label is an excerpt starting near the match.
+                snippets: history.agentsView.filterSnippets(historyRow.modelData,
+                    ["provider", "lastPrompt"].concat(history.agentsView.shownFields([
+                        ["windowTitle", historyTitle], ["cwd", historyCwd],
+                        ["model", historyModel]])))
                 Layout.leftMargin: 0
             }
 
