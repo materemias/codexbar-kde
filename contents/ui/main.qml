@@ -25,6 +25,8 @@ PlasmoidItem {
     onExpandedChanged: {
         root.nowMs = Date.now()
         if (!root.expanded) root.requestedTab = ""
+        // Tern pane focus is read per sweep; refresh it for the indicator.
+        else root.runAggregator()
     }
 
     Connections {
@@ -498,6 +500,11 @@ PlasmoidItem {
     TaskManager.VirtualDesktopInfo { id: vdInfo }
 
     property var taskWindows: []
+    // The last focused task window. Opening the popup focuses plasmashell,
+    // which is not a task, so this keeps the window the user came from.
+    property var activeTaskWindow: null
+    readonly property string focusedAgentKey:
+        root.focusedAgentKeyFor(root.activeTaskWindow, root.agentSnapshot)
 
     Repeater {
         model: TaskManager.TasksModel {
@@ -518,6 +525,8 @@ PlasmoidItem {
                 return flat
             }
             readonly property bool all: model.IsOnAllVirtualDesktops === true
+            readonly property bool active: model.IsActive === true
+            onActiveChanged: if (active) root.activeTaskWindow = taskWin
             readonly property string caption: model.display !== undefined
                 ? String(model.display) : ""
             readonly property var info: ({
@@ -526,9 +535,14 @@ PlasmoidItem {
                 all: taskWin.all,
                 caption: taskWin.caption
             })
-            Component.onCompleted: root.taskWindows = root.taskWindows.concat([taskWin])
-            Component.onDestruction: root.taskWindows =
-                root.taskWindows.filter(function(w) { return w !== taskWin })
+            Component.onCompleted: {
+                root.taskWindows = root.taskWindows.concat([taskWin])
+                if (active) root.activeTaskWindow = taskWin
+            }
+            Component.onDestruction: {
+                root.taskWindows = root.taskWindows.filter(function(w) { return w !== taskWin })
+                if (root.activeTaskWindow === taskWin) root.activeTaskWindow = null
+            }
         }
     }
 
@@ -603,6 +617,44 @@ PlasmoidItem {
             label: String(idxs[0] + 1),
             onCurrent: idxs.indexOf(cur) >= 0
         }
+    }
+
+    // The live session shown in the focused window, as an AgentsSection
+    // agentKey, or "" when the window shows no session or several could
+    // match. In a Tern window only a visible pane of the session the
+    // caption names counts (`ternSession`); elsewhere a window caption that
+    // holds a session title (kitty tabs) or the folder name (VS Code
+    // windows sharing one process) picks among the candidates.
+    function focusedAgentKeyFor(win, snapshot) {
+        var w = win ? win.info : null
+        if (!w || !w.pid) return ""
+        var candidates = ((snapshot && snapshot.agents) || []).filter(function(a) {
+            return a && (a.ancestorPids || []).indexOf(w.pid) >= 0
+        })
+        var caption = (w.caption || "").toLowerCase()
+        if (candidates.some(function(a) { return a.host === "tern" })) {
+            candidates = candidates.filter(function(a) {
+                return !!a.ternSession && a.ternSession.toLowerCase() === caption
+            })
+        }
+        var sharedPid = taskWindows.filter(function(t) {
+            return t.info && t.info.pid === w.pid
+        }).length > 1
+        if (candidates.length > 1 || sharedPid) {
+            var titled = candidates.filter(function(a) {
+                return a.windowTitle && caption.indexOf(a.windowTitle.toLowerCase()) >= 0
+            })
+            if (titled.length === 1) {
+                candidates = titled
+            } else {
+                candidates = (titled.length > 1 ? titled : candidates).filter(function(a) {
+                    var hint = root._captionHint(a)
+                    return hint && caption.indexOf(hint) >= 0
+                })
+            }
+        }
+        if (candidates.length !== 1) return ""
+        return JSON.stringify([candidates[0].provider, candidates[0].sessionId])
     }
 
     function desktopSnapshot() {

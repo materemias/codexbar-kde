@@ -1265,7 +1265,60 @@ def _build_records() -> list[dict]:
                     provider, sid, cwd, identity_exact, info.get("codexHome")
                 ),
             })
+    _mark_tern_panes(records)
     return records
+
+
+def _tern_visible_panes(socket: str) -> dict[int, str]:
+    """Map each Tern session's visible pane to the session name, which a
+    Tern window shows as its caption. The visible tab is the one Tern's
+    first window shows, else a session's only tab; the pane is that tab's
+    focused block."""
+    env = dict(os.environ, TERN_DAEMON_SOCKET=socket) if socket else None
+    try:
+        proc = subprocess.run(
+            ["tern", "ls", "--json"], capture_output=True, text=True,
+            timeout=3.0, check=False, env=env,
+        )
+        data = json.loads(proc.stdout) if proc.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return {}
+    sessions = data.get("sessions") if isinstance(data, dict) else None
+    panes: dict[int, str] = {}
+    for session in sessions if isinstance(sessions, list) else []:
+        if not isinstance(session, dict) or not isinstance(session.get("name"), str):
+            continue
+        tabs = session.get("tabs")
+        tabs = [t for t in tabs if isinstance(t, dict)] if isinstance(tabs, list) else []
+        shown = [t for t in tabs if t.get("shown") is True] or (tabs if len(tabs) == 1 else [])
+        blocks = shown[0].get("blocks") if shown else None
+        for block in blocks if isinstance(blocks, list) else []:
+            if (
+                isinstance(block, dict)
+                and block.get("focused") is True
+                and isinstance(block.get("id"), int)
+            ):
+                panes[block["id"]] = session["name"][:256]
+    return panes
+
+
+def _mark_tern_panes(records: list[dict]) -> None:
+    """Set `ternSession` on Tern records whose pane is visible, so the popup
+    can tell which session the focused Tern window shows. Agents inherit
+    TERN_PANE and TERN_PANE_SOCKET from the pane's shell."""
+    by_socket: dict[str, list[tuple[dict, int]]] = {}
+    for record in records:
+        if record["host"] != "tern":
+            continue
+        pane = _environ_value(record["pid"], "TERN_PANE")
+        if pane.isdigit():
+            socket = _environ_value(record["pid"], "TERN_PANE_SOCKET")
+            by_socket.setdefault(socket, []).append((record, int(pane)))
+    for socket, rows in by_socket.items():
+        visible = _tern_visible_panes(socket)
+        for record, pane in rows:
+            if pane in visible:
+                record["ternSession"] = visible[pane]
 
 
 def _read_boot_id() -> str:

@@ -345,23 +345,42 @@ ColumnLayout {
                     Layout.rightMargin: 4
                     spacing: Kirigami.Units.smallSpacing
 
-                    Rectangle {
-                        property real pulse: 0
-                        width: 10; height: 10; radius: 5
-                        color: rowItem.recentlyIdle
-                            ? Kirigami.Theme.positiveTextColor : rowItem.tint
-                        opacity: rowItem.recentlyIdle ? 1 - pulse * 0.65 : 1
-                        scale: rowItem.recentlyIdle ? 1 + pulse * 0.35 : 1
+                    // State dot. A thin ring around it marks the session
+                    // shown in the focused window (root.focusedAgentKey);
+                    // the slot keeps the ring's size so rows stay aligned.
+                    Item {
+                        implicitWidth: 16; implicitHeight: 16
                         Layout.alignment: Qt.AlignVCenter
 
-                        // Pulse the state dot's brightness and size for the
-                        // first five minutes after a session goes idle.
-                        SequentialAnimation on pulse {
-                            running: rowItem.recentlyIdle
-                            loops: Animation.Infinite
-                            alwaysRunToEnd: true
-                            NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
-                            NumberAnimation { to: 0; duration: 700; easing.type: Easing.InOutSine }
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: width / 2
+                            color: "transparent"
+                            border.width: 1.5
+                            border.color: Kirigami.Theme.textColor
+                            opacity: 0.75
+                            visible: rowItem.sessionKey !== ""
+                                && rowItem.sessionKey === root.focusedAgentKey
+                        }
+
+                        Rectangle {
+                            property real pulse: 0
+                            anchors.centerIn: parent
+                            width: 10; height: 10; radius: 5
+                            color: rowItem.recentlyIdle
+                                ? Kirigami.Theme.positiveTextColor : rowItem.tint
+                            opacity: rowItem.recentlyIdle ? 1 - pulse * 0.65 : 1
+                            scale: rowItem.recentlyIdle ? 1 + pulse * 0.35 : 1
+
+                            // Pulse the state dot's brightness and size for the
+                            // first five minutes after a session goes idle.
+                            SequentialAnimation on pulse {
+                                running: rowItem.recentlyIdle
+                                loops: Animation.Infinite
+                                alwaysRunToEnd: true
+                                NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+                                NumberAnimation { to: 0; duration: 700; easing.type: Easing.InOutSine }
+                            }
                         }
                     }
 

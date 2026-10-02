@@ -459,6 +459,34 @@ Item {
         self.assertEqual([args[-1] for args in notifications],
                          ["auto · FILL → auto · TARGET"] * 2)
 
+    def test_focused_session_needs_one_candidate_in_the_focused_window(self):
+        self.applet('''
+                if (app.cacheRestoring || app.loading) return
+                function win(pid, caption) { return { info: { pid: pid, caption: caption } } }
+                function key(w, agents) {
+                    return app.focusedAgentKeyFor(w, { agents: agents })
+                }
+                var code = [win(5, "a.cs - alpha - Visual Studio Code"), win(5, "b.js - beta - Visual Studio Code")]
+                app.taskWindows = code.concat([win(7, "π > Fix login"), win(9, "work")])
+                var alpha = { provider: "omp", sessionId: "a", cwd: "/x/alpha", ancestorPids: [11, 5] }
+                check(key(code[0], [alpha]) === '["omp","a"]', "VS Code window of the session's folder")
+                check(key(code[1], [alpha]) === "", "another window of the same VS Code process")
+                var login = { provider: "omp", sessionId: "l", windowTitle: "Fix login", cwd: "/w", ancestorPids: [12, 7] }
+                var other = { provider: "pi", sessionId: "o", windowTitle: "Docs", cwd: "/w", ancestorPids: [13, 7] }
+                check(key(app.taskWindows[2], [other, login]) === '["omp","l"]', "kitty tab named by caption")
+                var shown = { provider: "omp", sessionId: "s", host: "tern", cwd: "/w", ternSession: "work", ancestorPids: [14, 9] }
+                var hidden = { provider: "omp", sessionId: "h", host: "tern", cwd: "/w", ancestorPids: [15, 9] }
+                var elsewhere = { provider: "omp", sessionId: "e", host: "tern", cwd: "/w", ternSession: "Default", ancestorPids: [16, 9] }
+                check(key(app.taskWindows[3], [hidden, elsewhere, shown]) === '["omp","s"]',
+                    "Tern pane visible in the session the window shows")
+                check(key(app.taskWindows[3], [elsewhere]) === "",
+                    "a visible pane of a session the window does not show")
+                check(key(app.taskWindows[3], [hidden]) === "", "a lone hidden Tern pane")
+                check(key(null, [alpha]) === "", "no focused task window")
+                console.log("PASS actual main focused session")
+                Qt.exit(0)
+''')
+
 
 if __name__ == "__main__":
     unittest.main()

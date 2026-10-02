@@ -87,6 +87,14 @@ credentials" for setup.
   opens a Tern window in a systemd scope first unless a non-daemon `tern`
   window runs and the daemon answers `tern ls`.
   `LAUNCH_HOSTS` and QML `launchHost` list the launchable hosts.
+- The focused-session marker (QML `focusedAgentKey`) follows the last
+  active task window, since the open popup is not a task, and draws a ring
+  around the row's state dot. A Tern record carries `ternSession` (the
+  session name, which is the window caption) when its pane is the focused
+  block of the tab `tern ls` shows, or of a session's only tab; a Tern
+  window marks only a record whose `ternSession` equals its caption. Other
+  hosts pick one candidate by pid, then by `windowTitle` or cwd basename in
+  the caption; ambiguity marks nothing.
 - `agents.json` `history` holds ended sessions with `closedBy`: `reboot`
   rows (every session of the previous boot, kept until live again) and
   `exit` rows (same-boot exits, newest 100, untracked excluded). The History

@@ -206,6 +206,11 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
   minutes.
 - **Desktop badges.** The number of the virtual desktop the session's window
   is on, highlighted when it is the current one.
+- **Focused session.** A thin ring around the state dot marks the session
+  shown in the window you last focused. Tern reports its visible
+  pane; kitty and VS Code are told apart by window caption (session title or
+  folder name). When the window could show several sessions, such as two
+  agents in one VS Code window or several T3 Code threads, no row is marked.
 - **Click to focus.** Clicking a row, or `Enter`, raises the terminal hosting
   the session, switching desktop if needed.
 - **Conversation peek.** The arrow or `Space` expands the last eight user,

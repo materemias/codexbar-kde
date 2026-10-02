@@ -905,6 +905,24 @@ class TernHostTests(unittest.TestCase):
         ):
             self.assertEqual(agents._parent_walk_for_host(10), ("tern", 8, [10, 9, 8, 7]))
 
+    def test_visible_pane_is_focused_block_of_shown_or_only_tab(self) -> None:
+        def tab(shown, *blocks):
+            return {"shown": shown, "blocks": [
+                {"id": block, "focused": focused} for block, focused in blocks
+            ]}
+        listing = {"sessions": [
+            # The window shows "work" tab 2; its unfocused split and the
+            # hidden tab's focused block are not visible.
+            {"name": "work", "tabs": [tab(False, (1, True)), tab(True, (2, False), (3, True))]},
+            # A hidden session's only tab is what a window switching to it shows.
+            {"name": "solo", "tabs": [tab(False, (4, True))]},
+            # A hidden session with several tabs has no known visible tab.
+            {"name": "many", "tabs": [tab(False, (5, True)), tab(False, (6, True))]},
+        ]}
+        out = subprocess.CompletedProcess([], 0, stdout=json.dumps(listing))
+        with mock.patch.object(agents.subprocess, "run", return_value=out):
+            self.assertEqual(agents._tern_visible_panes(""), {3: "work", 4: "solo"})
+
 
 class PersistenceTests(unittest.TestCase):
     def test_older_requested_at_is_skipped_only_for_same_boot(self) -> None:
