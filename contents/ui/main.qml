@@ -384,6 +384,11 @@ PlasmoidItem {
     property string historyLaunchError: ""
     property var _launchCommands: ({})
 
+    // Hosts codexbar_focus.py --launch reopens; mirrors LAUNCH_HOSTS.
+    function launchHost(host) {
+        return host === "kitty" || host === "tern"
+    }
+
     function historyLaunchAllowed(key) {
         var started = root.historyLaunches[key]
         return !started || root.nowMs - started > root.historyLaunchCooldownMs
@@ -411,7 +416,7 @@ PlasmoidItem {
         var pairs = []
         for (var i = 0; i < records.length; i++) {
             var r = records[i]
-            if (!r || r.closedBy !== "reboot" || r.host !== "kitty" || !r.resumeCommand) continue
+            if (!r || r.closedBy !== "reboot" || !root.launchHost(r.host) || !r.resumeCommand) continue
             var key = JSON.stringify([r.provider, r.sessionId])
             if (!root.historyLaunchAllowed(key)) continue
             keys.push(key)

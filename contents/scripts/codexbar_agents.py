@@ -45,8 +45,11 @@ KNOWN_HOSTS = {
     "kitty", "konsole", "code", "code-insiders", "code-flatpak",
     "tmux", "tmux: server", "wezterm", "alacritty", "ghostty",
     "gnome-terminal", "gnome-terminal-", "xterm", "foot",
-    "yakuake", "tilix", "ptyhost", "t3code",
+    "yakuake", "tilix", "ptyhost", "t3code", "tern",
 }
+
+# Hosts whose history rows codexbar_focus.py --launch can reopen.
+LAUNCH_HOSTS = {"kitty", "tern"}
 
 # argv[1] verbs that mean a background service rather than an interactive
 # session: `claude daemon run`, `omp browser-relay`, `codex app-server`, mcp
@@ -204,7 +207,24 @@ def _parent_walk_for_host(start_pid: int) -> tuple[str, int, list[int]]:
         chain.append(nxt)
         host_pid = nxt
         depth -= 1
+    if host == "tern":
+        # Tern's session daemon keeps panes alive between windows, so the
+        # window showing a pane may not be its ancestor.
+        chain.extend(p for p in tern_window_pids() if p not in seen)
     return host, host_pid, chain
+
+
+def tern_window_pids() -> list[int]:
+    """Pids of running Tern windows: `tern` processes other than its
+    session daemon."""
+    pids = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if _comm_of(pid) == "tern" and _argv_of(pid)[1:2] != ["daemon"]:
+            pids.append(pid)
+    return pids
 
 
 # ---------------------------------------------------------------------------

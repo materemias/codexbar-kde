@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Bring the terminal window hosting an agent session to the front, or
-relaunch a history record in a new kitty window.
+relaunch a history record in a new kitty window or Tern tab.
 
 Invoked as a URL handler via Qt.openUrlExternally() from the plasmoid:
   codexbar://focus/<sessionId>
 
 It looks up the matching sentinel in ~/.codexbar/agents/, walks the agent's
 process ancestry, and tries (in order):
-  1. kitty's remote control if kitty is somewhere up the tree
+  1. kitty's remote control if kitty is somewhere up the tree, or Tern's
+     `tern focus` for the session's pane
   2. KWin scripting to activate any window owned by an ancestor pid
 
 The KWin step works for any window kwin manages — VS Code, plain kitty,
@@ -15,9 +16,10 @@ Konsole, Yakuake, Wezterm, etc.
 
   codexbar_focus.py --launch <provider> <sessionId>
 
-starts the saved resume command of a history record in a new kitty window,
-in its own systemd scope so a plasmashell restart does not kill it, and
-moves that window to the record's saved virtual desktop.
+starts the saved resume command of a history record. A kitty record gets a
+new kitty window in its own systemd scope, so a plasmashell restart does not
+kill it, moved to the record's saved virtual desktop. A Tern record gets a
+new tab in the running Tern window, whose session daemon owns the process.
 """
 from __future__ import annotations
 
@@ -141,6 +143,28 @@ def _kitty_focus(candidate_pids: list[int]) -> bool:
         if proc.returncode == 0:
             return True
     return False
+
+
+def _tern(args: list[str], socket: str = "") -> subprocess.CompletedProcess | None:
+    """Run one `tern` scripting command; None when tern is missing or hangs."""
+    env = dict(os.environ, TERN_DAEMON_SOCKET=socket) if socket else None
+    try:
+        return subprocess.run(
+            ["tern", *args], capture_output=True, text=True, timeout=5.0,
+            check=False, env=env,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _tern_focus(pid: int) -> bool:
+    """Show the Tern pane running pid in every Tern window. Agents inherit
+    TERN_PANE and TERN_PANE_SOCKET from the pane's shell."""
+    pane = agents._environ_value(pid, "TERN_PANE")
+    if not pane.isdigit():
+        return False
+    proc = _tern(["focus", pane], agents._environ_value(pid, "TERN_PANE_SOCKET"))
+    return proc is not None and proc.returncode == 0
 
 
 KWIN_SCRIPT_TEMPLATE = """
@@ -295,6 +319,8 @@ workspace.windowAdded.connect(place);
 for (const w of workspace.windowList()) place(w);
 """
 PLACE_TIMEOUT = 15.0
+# A Tern window opened by Launch must have its session daemon up by then.
+TERN_START_TIMEOUT = 10.0
 
 
 def _desktop_count() -> int:
@@ -347,7 +373,7 @@ def _kwin_place(pid: int, desktop: str) -> bool:
 
 
 def launch(provider: str, session_id: str) -> int:
-    """Resume one history record in a new kitty window on its saved desktop."""
+    """Resume one history record in a new kitty window or Tern tab."""
     payload = agents._load_payload(AGGREGATE_PATH)
     key = (provider, session_id)
     if any(agents._record_key(r) == key for r in payload["agents"]):
@@ -366,11 +392,14 @@ def launch(provider: str, session_id: str) -> int:
     ):
         sys.stderr.write("codexbar_focus: no verified resume command\n")
         return 6
-    if record.get("host") != "kitty":
-        sys.stderr.write("codexbar_focus: only kitty history records launch\n")
+    host = record.get("host")
+    if host not in agents.LAUNCH_HOSTS:
+        sys.stderr.write("codexbar_focus: only kitty and Tern history records launch\n")
         return 7
     shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell
     shell = shell or "/bin/sh"
+    if host == "tern":
+        return _launch_tern(cwd, shell, command)
     # An interactive shell loads the user's PATH; the trailing shell keeps
     # the window open after the agent exits, like the original terminal.
     argv = [
@@ -404,6 +433,62 @@ def launch(provider: str, session_id: str) -> int:
     return 0
 
 
+def _tern_ready() -> bool:
+    """A Tern window shows the daemon's sessions. The daemon outlives its
+    windows, so an answering daemon alone would take a hidden tab."""
+    if not agents.tern_window_pids():
+        return False
+    proc = _tern(["ls"])
+    return proc is not None and proc.returncode == 0
+
+
+def _start_tern() -> bool:
+    """Open a Tern window, which starts its session daemon, in its own
+    systemd scope so a plasmashell stop does not kill it."""
+    try:
+        subprocess.Popen(
+            ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "tern"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError:
+        return False
+    deadline = time.monotonic() + TERN_START_TIMEOUT
+    while time.monotonic() < deadline:
+        time.sleep(0.3)
+        if _tern_ready():
+            return True
+    return False
+
+
+def _launch_tern(cwd: str, shell: str, command: str) -> int:
+    """Open the resume command in a new tab of the running Tern window and
+    raise that window. Tern's session daemon starts the program, so it
+    outlives plasmashell without a scope."""
+    if not _tern_ready() and not _start_tern():
+        sys.stderr.write("codexbar_focus: launch failed: Tern did not start\n")
+        return 8
+    proc = _tern([
+        "new", "tab", "--json", "--cwd", cwd or str(Path.home()), "--",
+        shell, "-ic", f"{command}; exec {shlex.quote(shell)} -i",
+    ])
+    if proc is None or proc.returncode != 0:
+        detail = (proc.stderr.strip() if proc else "") or "tern is not available"
+        sys.stderr.write(f"codexbar_focus: launch failed: {detail}\n")
+        return 8
+    # A tab created from the command line stays in the background.
+    try:
+        block = json.loads(proc.stdout).get("block")
+    except (ValueError, AttributeError):
+        block = None
+    if isinstance(block, int):
+        _tern(["focus", str(block)])
+    windows = agents.tern_window_pids()
+    if not windows or not _kwin_activate(windows):
+        sys.stderr.write("codexbar_focus: launched, but could not raise Tern\n")
+    return 0
+
+
 def _desktop_rank(record: dict) -> tuple[int, int]:
     """Numbered desktops first, then "all", then unknown, like the UI."""
     desktop = record.get("desktop")
@@ -423,7 +508,7 @@ def launch_all(keys: set[tuple[str, str]]) -> int:
     records = sorted(
         (r for r in payload["history"]
          if agents._record_key(r) in keys and agents._record_key(r) not in live
-         and r.get("closedBy") == "reboot" and r.get("host") == "kitty"
+         and r.get("closedBy") == "reboot" and r.get("host") in agents.LAUNCH_HOSTS
          and r.get("resumeCommand")),
         key=_desktop_rank,
     )
@@ -490,9 +575,11 @@ def focus(session_id: str) -> int:
     if record.get("host") == "t3code":
         _t3_open(session_id)
 
+    if record.get("host") == "tern":
+        _tern_focus(pid)
+        candidates += [p for p in agents.tern_window_pids() if p not in candidates]
     # Skip kitty branch if no kitty in the tree.
-    has_kitty = any(_comm(p) == "kitty" for p in candidates)
-    if has_kitty and _kitty_focus(candidates):
+    elif any(_comm(p) == "kitty" for p in candidates) and _kitty_focus(candidates):
         return 0
 
     if _kwin_activate(candidates, record):

@@ -890,6 +890,22 @@ class T3CodeTests(unittest.TestCase):
             self.assertEqual(agents._parent_walk_for_host(10), ("t3code", 4, [10, 5, 4]))
 
 
+class TernHostTests(unittest.TestCase):
+    # Tern's session daemon outlived the window that started it and was
+    # reparented to systemd; a later window (pid 7) shows its panes.
+    COMM = {10: "omp", 9: "zsh", 8: "tern", 3: "systemd"}
+    PPID = {10: 9, 9: 8, 8: 3, 3: 1}
+
+    def test_daemon_pane_is_a_tern_session_whose_chain_reaches_the_window(self) -> None:
+        with (
+            mock.patch.object(agents, "_comm_of", side_effect=lambda p: self.COMM.get(p, "")),
+            mock.patch.object(agents, "_ppid_of", side_effect=lambda p: self.PPID.get(p, 0)),
+            mock.patch.object(agents, "_argv_of", return_value=[]),
+            mock.patch.object(agents, "tern_window_pids", return_value=[7]),
+        ):
+            self.assertEqual(agents._parent_walk_for_host(10), ("tern", 8, [10, 9, 8, 7]))
+
+
 class PersistenceTests(unittest.TestCase):
     def test_older_requested_at_is_skipped_only_for_same_boot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

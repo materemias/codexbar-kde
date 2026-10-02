@@ -20,8 +20,9 @@ all of that in your Plasma panel:
   fuzzy-finds a session, `↑`/`↓` select it, `Space` peeks and `Enter` jumps
   to its terminal.
 - **Get it all back.** After a reboot or crash, **Restore all** reopens your
-  kitty sessions, each in its own window on the desktop it ran on. Closed one
-  by mistake? Find it in History and bring it back with one click.
+  kitty sessions, each in its own window on the desktop it ran on, and your
+  Tern sessions as tabs. Closed one by mistake? Find it in History and bring
+  it back with one click.
 
 It started as a Linux port of the macOS
 [CodexBar](https://github.com/steipete/CodexBar) menu-bar app and uses its
@@ -54,7 +55,7 @@ Drag the popup's edges to resize it within the available screen space.
 | CMake 3.21+, a C++17 compiler, Qt 6 Core/QML development files | Building. On Arch: `base-devel`, `cmake`, `qt6-declarative` |
 | [`codexbar`](https://github.com/steipete/CodexBar) CLI | Usage tab and tray rings. Without it, Agents and History still work |
 | `qdbus6` (Plasma's Qt tools) | *Optional:* click to focus and desktop switching |
-| kitty | *Optional:* **Launch** and **Restore all**. Other terminals keep the copyable resume command |
+| kitty or Tern | *Optional:* **Launch** and **Restore all**. Other terminals keep the copyable resume command |
 | systemd user session | *Optional:* **Launch**, so restored terminals survive a plasmashell restart |
 | kitty remote control (`allow_remote_control`, `listen_on`) | *Optional:* faster, exact focus of kitty windows. KWin is used otherwise |
 | `notify-send` (libnotify) | *Optional:* desktop usage warnings and agent waiting-for-input notifications |
@@ -226,9 +227,11 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 - **Restore.** Each row has a copyable resume command, shown only when the
   exact provider session is known. Sessions that ran in kitty also get
   **Launch**: CodexBar switches to the saved desktop, opens a new kitty window
-  there and resumes the session in your shell. **Restore all** does this for
-  every restart row in desktop order, one at a time. Running sessions are never
-  launched twice, and a row leaves History once its session is live again.
+  there and resumes the session in your shell. Sessions that ran in Tern
+  resume in a new tab of the running Tern window, which is opened first when
+  none runs. **Restore all** does this for every restart row in desktop order,
+  one at a time. Running sessions are never launched twice, and a row leaves
+  History once its session is live again.
 - **Dismiss.** ✕ removes a row; **Dismiss all** clears the restart rows shown.
 - **Keyboard and filter.** `Up`/`Down` select, `Space` peeks, `Enter`
   launches, and typing filters like on the Agents tab.
@@ -288,9 +291,11 @@ because one terminal does not map to one session: Claude Code's agent view
 background sessions of `claude daemon`, and Codex's Agent Command Center
 after switching to another thread.
 
-Sessions are recognised in kitty, Konsole, WezTerm, Alacritty, Ghostty, foot,
-GNOME Terminal, Tilix, Yakuake, xterm, tmux and VS Code terminals. Claude
-and Codex threads that T3 Code runs are listed too, with T3 Code as the host.
+Sessions are recognised in kitty, Tern, Konsole, WezTerm, Alacritty, Ghostty,
+foot, GNOME Terminal, Tilix, Yakuake, xterm, tmux and VS Code terminals.
+Clicking a Tern session shows its tab with `tern focus`, then raises the Tern
+window. Claude and Codex threads that T3 Code runs are listed too, with T3
+Code as the host.
 Clicking one raises the T3 Code window and sends it the thread's
 `t3code://threads/<environment>/<thread>` link. T3 Code 0.0.44 ignores the
 thread part, so the thread opens only once

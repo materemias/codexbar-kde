@@ -99,9 +99,9 @@ ColumnLayout {
         var index = indexForKey(selectedKey)
         if (index < 0) return
         var record = flatRecords[index]
-        if (record.host !== "kitty" || !(record.resumeCommand || "")) {
+        if (!root.launchHost(record.host) || !(record.resumeCommand || "")) {
             root.historyLaunchError = "This session cannot be launched: "
-                + (record.resumeCommand ? "it did not run in kitty." : "its resume command is unknown.")
+                + (record.resumeCommand ? "it did not run in kitty or Tern." : "its resume command is unknown.")
             return
         }
         root.launchHistory(record)
@@ -150,7 +150,7 @@ ColumnLayout {
     }
 
     readonly property var restorable: history.rebooted.filter(function(r) {
-        return r.host === "kitty" && (r.resumeCommand || "").length > 0
+        return root.launchHost(r.host) && (r.resumeCommand || "").length > 0
             && root.historyLaunchAllowed(history.agentsView.agentKey(r))
     })
 
@@ -173,7 +173,7 @@ ColumnLayout {
             display: QQC2.AbstractButton.TextBesideIcon
             onClicked: root.launchAllHistory(history.rebooted)
             PC3.ToolTip.visible: hovered
-            PC3.ToolTip.text: "Resume every kitty session, desktop by desktop"
+            PC3.ToolTip.text: "Resume every kitty and Tern session, desktop by desktop"
             PC3.ToolTip.delay: 400
         }
 
@@ -229,7 +229,7 @@ ColumnLayout {
         readonly property string sessionKey: history.agentsView.agentKey(modelData)
         readonly property bool peekOpen: sessionKey !== "" && sessionKey === history.peekKey
         readonly property string command: modelData.resumeCommand || ""
-        readonly property bool canLaunch: command.length > 0 && modelData.host === "kitty"
+        readonly property bool canLaunch: command.length > 0 && root.launchHost(modelData.host)
         readonly property bool launchAllowed: root.historyLaunchAllowed(sessionKey)
         readonly property bool selected: sessionKey !== "" && sessionKey === history.selectedKey
         readonly property color tint: Kirigami.Theme.disabledTextColor
@@ -392,11 +392,11 @@ ColumnLayout {
                     padding: 1
                     onClicked: root.launchHistory(closedRow.modelData)
                     PC3.ToolTip.visible: hovered && closedRow.canLaunch
-                    PC3.ToolTip.text: closedRow.launchAllowed
-                        ? "Resume in kitty"
+                    PC3.ToolTip.text: !closedRow.launchAllowed ? "Launched"
+                        : closedRow.modelData.host === "tern" ? "Resume in a new Tern tab"
+                        : "Resume in kitty"
                             + (closedRow.modelData.desktop
                                 ? " on desktop " + closedRow.modelData.desktop : "")
-                        : "Launched"
                     PC3.ToolTip.delay: 400
                 }
 
@@ -793,11 +793,11 @@ ColumnLayout {
                     }
                 }
 
-                // Only kitty rows launch; others keep the copy action.
+                // Only kitty and Tern rows launch; others keep the copy action.
                 PC3.ToolButton {
                     readonly property bool allowed: root.historyLaunchAllowed(
                         history.agentsView.agentKey(historyRow.modelData))
-                    visible: historyRow.modelData.host === "kitty"
+                    visible: root.launchHost(historyRow.modelData.host)
                     enabled: allowed
                     text: allowed ? "Launch" : "Launched"
                     icon.name: "media-playback-start"

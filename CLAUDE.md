@@ -77,8 +77,16 @@ credentials" for setup.
 - omp advisor sidecars named `__advisor.*.jsonl` are never session rollouts.
 - Session filtering uses fuzzy subsequence matching within one field. Recent conversation text uses exact case-insensitive substring matching.
 - `codexbar://focus/<sessionId>` dispatches to `codexbar_focus.py`. It walks
-  process ancestors, tries Kitty remote control, then falls back to KWin
-  activation. `install_integration.py` registers the handler.
+  process ancestors, tries Kitty remote control or `tern focus`, then falls
+  back to KWin activation. `install_integration.py` registers the handler.
+- Tern runs panes under a `tern daemon` that outlives its windows, so a
+  window need not be a pane's ancestor; `tern` host chains append every
+  non-daemon `tern` pid. Focus reads `TERN_PANE` and `TERN_PANE_SOCKET` from
+  the agent's environment. Launch runs `tern new tab`, then `tern focus` on
+  the returned block, since command-line tabs open in the background; it
+  opens a Tern window in a systemd scope first unless a non-daemon `tern`
+  window runs and the daemon answers `tern ls`.
+  `LAUNCH_HOSTS` and QML `launchHost` list the launchable hosts.
 - `agents.json` `history` holds ended sessions with `closedBy`: `reboot`
   rows (every session of the previous boot, kept until live again) and
   `exit` rows (same-boot exits, newest 100, untracked excluded). The History
@@ -104,14 +112,14 @@ credentials" for setup.
   `~/.t3/userdata/state.sqlite`, then activates the window through KWin.
 - Claude Code's agent view runs tasks as `kind: "bg"` sessions under
   `claude daemon`, with no terminal ancestor; they are not listed.
-- `codexbar_focus.py --launch <provider> <sessionId>` resumes a kitty
-  history record only when its saved resume command matches
-  `_resume_command` and the session is not live. It runs kitty under
+- `codexbar_focus.py --launch <provider> <sessionId>` resumes a kitty or
+  Tern history record only when its saved resume command matches
+  `_resume_command` and the session is not live. For kitty it runs kitty under
   `systemd-run --user --scope` so a plasmashell stop does not kill it. It
   switches to the saved desktop before starting kitty, and a self-unloading
   KWin script keeps the window there by pid and activates it.
   `--launch-all <uri-json [[provider, id]]>` runs `launch` sequentially over
-  exactly those kitty reboot rows in desktop order and prints the pairs that
+  exactly those kitty and Tern reboot rows in desktop order and prints the pairs that
   launched; QML keeps the cooldown only for those. `codexbar_agents.py --dismiss <uri-json [[provider, id]]>`
   removes history rows under the aggregate writer lock; QML never edits
   `agents.json` itself.

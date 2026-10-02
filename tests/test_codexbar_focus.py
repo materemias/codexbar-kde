@@ -104,6 +104,55 @@ class LaunchTests(unittest.TestCase):
         switch.assert_not_called()
         self.assertIn("desktop 9 no longer exists", err)
 
+    def tern_launch(self, daemon: bool = True, window: bool = True):
+        calls = []
+        window_checks = []
+
+        def tern(args, socket=""):
+            calls.append(args)
+            ok = args[0] != "ls" or daemon or len(calls) > 2
+            out = '{"session": 4, "tab": 8, "block": 9}' if args[0] == "new" else ""
+            return focus.subprocess.CompletedProcess(args, 0 if ok else 1, out, "")
+
+        def windows():
+            window_checks.append(1)
+            return [77] if window or len(window_checks) > 1 else []
+
+        with (
+            mock.patch.object(focus, "_tern", side_effect=tern),
+            mock.patch.object(focus.time, "sleep"),
+            mock.patch.object(focus.agents, "tern_window_pids", side_effect=windows),
+            mock.patch.object(focus, "_kwin_activate", return_value=True) as activate,
+        ):
+            code, popen, place, switch, _ = self.launch(
+                {"agents": [], "history": [entry(host="tern")]}
+            )
+        return code, popen, place, switch, activate, calls
+
+    def test_tern_record_opens_a_tab_in_running_tern_and_raises_it(self) -> None:
+        code, popen, place, switch, activate, calls = self.tern_launch()
+        self.assertEqual(code, 0)
+        popen.assert_not_called()
+        switch.assert_not_called()
+        place.assert_not_called()
+        tab, shown = calls[-2:]
+        self.assertEqual(tab[:5], ["new", "tab", "--json", "--cwd", "/work/project"])
+        self.assertIn("omp --resume sid-1", tab[-1])
+        self.assertEqual(shown, ["focus", "9"])
+        activate.assert_called_once_with([77])
+
+    def test_tern_record_starts_tern_first_when_none_runs(self) -> None:
+        code, popen, _, _, _, calls = self.tern_launch(daemon=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(popen.call_args.args[0][-2:], ["--", "tern"])
+        self.assertEqual(calls[-2][:2], ["new", "tab"])
+
+    def test_tern_daemon_without_window_opens_a_window_before_the_tab(self) -> None:
+        code, popen, _, _, _, calls = self.tern_launch(window=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(popen.call_args.args[0][-2:], ["--", "tern"])
+        self.assertEqual(calls[-2][:2], ["new", "tab"])
+
     def test_launch_all_restores_reboot_rows_in_desktop_order(self) -> None:
         def row(sid: str, **changes: object) -> dict:
             record = entry(sessionId=sid, closedBy="reboot",
