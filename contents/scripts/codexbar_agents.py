@@ -163,11 +163,11 @@ def _start_ms(pid: int) -> int:
     return int((btime + ticks / os.sysconf("SC_CLK_TCK")) * 1000)
 
 
-def _parent_walk_for_host(start_pid: int) -> tuple[str, int, list[int]]:
-    """Walk up the proc tree from start_pid; return (host_name, host_pid,
+def _parent_walk_for_host(start_pid: int) -> tuple[str, list[int]]:
+    """Walk up the proc tree from start_pid; return (host_name,
     ancestor_chain) where the chain runs [start_pid, ..., host_pid]. The
     chain mirrors codexbar_focus._ancestor_pids and lets the popup match the
-    session to its KWin window by any pid in the family. Returns ("", 0, [])
+    session to its KWin window by any pid in the family. Returns ("", [])
     if no known terminal emulator found."""
     cur = start_pid
     chain: list[int] = []
@@ -193,7 +193,7 @@ def _parent_walk_for_host(start_pid: int) -> tuple[str, int, list[int]]:
             break
         cur = nxt
     if not host:
-        return "", 0, []
+        return "", []
 
     # Electron hosts run several same-named helper processes (pty host,
     # extension host); the window-owning main process may sit further up.
@@ -212,7 +212,7 @@ def _parent_walk_for_host(start_pid: int) -> tuple[str, int, list[int]]:
         # Tern's session daemon keeps panes alive between windows, so the
         # window showing a pane may not be its ancestor.
         chain.extend(p for p in tern_window_pids() if p not in seen)
-    return host, host_pid, chain
+    return host, chain
 
 
 def tern_window_pids() -> list[int]:
@@ -1226,7 +1226,7 @@ def _build_records() -> list[dict]:
     now_ms = int(time.time() * 1000)
     for provider, info_fn in _INFO_FN.items():
         for pid in _pgrep(provider):
-            host, host_pid, ancestors = _parent_walk_for_host(pid)
+            host, ancestors = _parent_walk_for_host(pid)
             # No terminal ancestor means there is no focusable session row.
             if not host:
                 continue
@@ -1247,16 +1247,13 @@ def _build_records() -> list[dict]:
                 "sessionId": sid,
                 "cwd": cwd,
                 "pid": pid,
-                "hostPid": host_pid,
                 "ancestorPids": ancestors,
                 "host": host,
-                "tty": "",
                 "state": (info.get("state") or "working") if known_sid else "untracked",
                 "model": _model_text(info.get("model")),
                 "lastPrompt": info.get("lastPrompt") or "",
                 "recent": info.get("recent") or [],
                 "windowTitle": info.get("windowTitle") or "",
-                "lastEvent": "",
                 "startedAt": 0,
                 "stateChangedAt": now_ms,
                 "updatedAt": now_ms,

@@ -859,11 +859,6 @@ PlasmoidItem {
         return "in " + mins + "m"
     }
 
-    function pad2(n) { return (n < 10 ? "0" : "") + n }
-    function _time24(when) {
-        return pad2(when.getHours()) + ":" + pad2(when.getMinutes())
-    }
-
     function _monthDay(when) {
         var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -873,7 +868,7 @@ PlasmoidItem {
     function _absoluteTime(when, nowMs) {
         var now = new Date(nowMs)
         var sameDay = now.toDateString() === when.toDateString()
-        var hhmm = _time24(when)
+        var hhmm = Qt.formatDateTime(when, "HH:mm")
 
         if (sameDay) return hhmm
         return _monthDay(when) + ", " + hhmm
@@ -1006,10 +1001,6 @@ PlasmoidItem {
         return -1
     }
 
-    function _isoDate(when) {
-        return when.getFullYear() + "-" + pad2(when.getMonth() + 1) + "-" + pad2(when.getDate())
-    }
-
     // "2 saved resets · soonest expires in 16d 8h (2026-10-04)", or just
     // "2 saved resets" when brief. Empty when the account has no usable
     // reset credit.
@@ -1025,7 +1016,7 @@ PlasmoidItem {
                 var left = when.getTime() - now
                 text += " · soonest expires " + (left <= 0 ? "now"
                     : "in " + _forecastTimeLeft(when, now))
-                    + " (" + _isoDate(when) + ")"
+                    + " (" + Qt.formatDateTime(when, "yyyy-MM-dd") + ")"
             }
         }
         return text

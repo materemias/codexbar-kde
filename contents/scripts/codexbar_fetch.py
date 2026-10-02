@@ -146,13 +146,8 @@ def _read_codex_rotation() -> dict | None:
     return result
 
 
-def _result_error(provider: str, code: str, message: str, source: str | None = None) -> dict:
-    return {
-        "id": provider,
-        "ok": False,
-        "source": source,
-        "error": {"code": code, "message": message},
-    }
+def _result_error(provider: str, code: str, message: str) -> dict:
+    return {"id": provider, "ok": False, "error": {"code": code, "message": message}}
 
 
 # Money as the balance details rows format it, e.g. "$6.17" or "$1,234.50".
@@ -332,7 +327,6 @@ def _normalize_record(provider: str, record: dict) -> dict:
             str(error.get("message") or (
                 raw_error if isinstance(raw_error, str) else "unknown error"
             )),
-            record.get("source"),
         )
         result.update({
             "identity": identity,
@@ -393,7 +387,6 @@ def _normalize_record(provider: str, record: dict) -> dict:
     return {
         "id": provider,
         "ok": True,
-        "source": record.get("source"),
         "identity": identity,
         "loginMethod": login_method,
         "accountEmail": account_email,
@@ -425,9 +418,9 @@ def _run_cli(cli: str, provider: str, source: str | None, timeout: float) -> lis
     except subprocess.TimeoutExpired:
         return [_result_error(provider, "timeout", f"CLI timed out after {timeout}s")]
     except OSError as exc:
-        return [_result_error(provider, "cli_error", str(exc), source)]
+        return [_result_error(provider, "cli_error", str(exc))]
     except UnicodeError as exc:
-        return [_result_error(provider, "parse", str(exc), source)]
+        return [_result_error(provider, "parse", str(exc))]
 
     stdout = (proc.stdout or "").strip()
     if not stdout:
@@ -660,7 +653,7 @@ def _cached_usage_record(record: object, now: _dt.datetime) -> dict | None:
         "id": record["id"], "ok": True, "error": None,
         "updatedAt": measured.isoformat(), "cachedAt": measured.isoformat(),
     }
-    for key in ("source", "accountEmail", "loginMethod", "balanceText"):
+    for key in ("accountEmail", "loginMethod", "balanceText"):
         value = record.get(key)
         if value is not None and not isinstance(value, str):
             return None
@@ -1103,7 +1096,6 @@ def _normalize_forecast(data: dict) -> dict:
             and summary.strip()
         ):
             alert_summary = summary.strip()
-    teased = data.get("teased_window")
     signal = _forecast_signal(data, cutoff, now)
     hint = None
     raw_hint = data.get("latest_hint")
@@ -1111,11 +1103,7 @@ def _normalize_forecast(data: dict) -> dict:
         hint_at = _parse_iso(raw_hint.get("at"))
         quote = raw_hint.get("quote")
         if hint_at is not None and hint_at > cutoff and isinstance(quote, str) and quote.strip():
-            hint = {
-                "at": hint_at.isoformat(),
-                "quote": quote.strip(),
-                "url": str(raw_hint.get("url") or "") or None,
-            }
+            hint = {"at": hint_at.isoformat(), "quote": quote.strip()}
     wait = None
     raw_wait = _obj("wait_comparison")
     wait_days = _as_float(raw_wait.get("wait_days"))
@@ -1124,22 +1112,13 @@ def _normalize_forecast(data: dict) -> dict:
         wait = {
             "days": wait_days,
             "shorterShare": share if share is not None and 0 <= share <= 1 else None,
-            "sample": _as_float(raw_wait.get("sample")),
-            "medianDays": _as_float(raw_wait.get("median_days")),
-            "longestDays": _as_float(raw_wait.get("longest_days")),
         }
     return {
         "ok": True,
         "stale": False,
-        "source": "codex-reset.com",
-        "fetchedAt": now.isoformat(),
-        "modelUpdatedAt": (_parse_iso(data.get("updated_at")) or now).isoformat(),
         "expectedAt": eta.isoformat() if eta is not None else None,
-        "windowLabel": str(window.get("label") or ""),
-        "windowTimezone": str(window.get("timezone") or ""),
         "windowStartHour": window_start_hour,
         "windowEndHour": window_end_hour,
-        "teasedWindow": teased if isinstance(teased, str) and teased.strip() else None,
         "signal": signal,
         "hint": hint,
         "wait": wait,
@@ -1147,9 +1126,7 @@ def _normalize_forecast(data: dict) -> dict:
         "prob24h": _percent("rounded_24h", "raw_24h"),
         "prob48h": _percent("rounded_48h", "raw_48h"),
         "confidence": str(data.get("confidence") or ""),
-        "lastResetAt": last_reset.isoformat() if last_reset is not None else None,
         "alertSummary": alert_summary,
-        "medianDays": median_days,
         "error": None,
     }
 
@@ -1198,14 +1175,9 @@ def _forecast_signal(
                 percent = _as_float(probs.get("signal_percent"))
         if percent is not None and not 0 <= percent <= 100:
             percent = None
-        summary = raw.get("summary")
         return {
             "percent": percent,
-            "band": str(raw.get("signal_type") or data.get("signal_tier") or ""),
             "deadlineAt": deadline.isoformat() if deadline is not None else None,
-            "summary": summary.strip() if isinstance(summary, str) and summary.strip() else None,
-            "url": str(raw.get("url") or "") or None,
-            "at": at.isoformat(),
         }
     return None
 
@@ -1265,7 +1237,6 @@ def _forecast_failure(exc: Exception) -> dict:
     return {
         "ok": False,
         "stale": False,
-        "source": "codex-reset.com",
         "expectedAt": None,
         "error": {"code": "forecast_unavailable", "message": str(exc)},
     }
@@ -1291,13 +1262,7 @@ def _normalize_incident(data: dict) -> dict | None:
         for surface in (surfaces if isinstance(surfaces, list) else [])
         if isinstance(surface, dict) and surface.get("status") not in (None, "operational")
     ]
-    name = active.get("name") if isinstance(active, dict) else None
-    return {
-        "open": True,
-        "name": name.strip() if isinstance(name, str) and name.strip() else None,
-        "codexStatus": codex_status or None,
-        "surfaces": [label for label in degraded if label],
-    }
+    return {"open": True, "surfaces": [label for label in degraded if label]}
 
 
 def _fetch_incident(forecast_url: str, timeout: float) -> dict | None:

@@ -61,9 +61,7 @@ def active(provider: str, session_id: str, **changes: object) -> dict:
         "stateChangedAt": 75,
         "identityExact": True,
         "pid": 123,
-        "hostPid": 100,
         "ancestorPids": [123, 100],
-        "tty": "pts/1",
         "recent": [{"role": "user", "text": "private live data"}],
     }
     record.update(changes)
@@ -247,7 +245,7 @@ class SnapshotMergeTests(unittest.TestCase):
             f"{shlex.join(['omp', '--resume', old['sessionId']])}",
         )
         self.assertTrue(
-            {"pid", "hostPid", "ancestorPids", "tty", "identityExact"}
+            {"pid", "ancestorPids", "identityExact"}
             .isdisjoint(restored)
         )
 
@@ -848,7 +846,7 @@ class ResumeAndIdentityTests(unittest.TestCase):
             mock.patch.object(agents, "_INFO_FN", {"claude": info, "omp": info}),
             mock.patch.object(agents, "_pgrep", return_value=[42]),
             mock.patch.object(
-                agents, "_parent_walk_for_host", return_value=("kitty", 10, [42, 10])
+                agents, "_parent_walk_for_host", return_value=("kitty", [42, 10])
             ),
         ):
             records = agents._build_records()
@@ -890,7 +888,7 @@ class T3CodeTests(unittest.TestCase):
     def test_host_walk_stops_at_t3_not_code_in_args(self) -> None:
         a, b, c = self._patch()
         with a, b, c:
-            self.assertEqual(agents._parent_walk_for_host(10), ("t3code", 4, [10, 5, 4]))
+            self.assertEqual(agents._parent_walk_for_host(10), ("t3code", [10, 5, 4]))
 
 
 class TernHostTests(unittest.TestCase):
@@ -906,7 +904,7 @@ class TernHostTests(unittest.TestCase):
             mock.patch.object(agents, "_argv_of", return_value=[]),
             mock.patch.object(agents, "tern_window_pids", return_value=[7]),
         ):
-            self.assertEqual(agents._parent_walk_for_host(10), ("tern", 8, [10, 9, 8, 7]))
+            self.assertEqual(agents._parent_walk_for_host(10), ("tern", [10, 9, 8, 7]))
 
     def test_visible_pane_is_focused_block_of_shown_or_only_tab(self) -> None:
         def tab(shown, *blocks):
@@ -1179,7 +1177,7 @@ class IncrementalParserTests(unittest.TestCase):
             sessions.mkdir(parents=True)
             for pid, record in enumerate([[], 3, {"sessionId": []}, {"sessionId": "healthy", "cwd": "/work", "status": "idle"}], 1):
                 (sessions / f"{pid}.json").write_text(json.dumps(record))
-            with mock.patch.object(agents.Path, "home", return_value=home), mock.patch.object(agents, "_INFO_FN", {"claude": agents._claude_info}), mock.patch.object(agents, "_pgrep", return_value=[1, 2, 3, 4]), mock.patch.object(agents, "_parent_walk_for_host", return_value=("kitty", 10, [])), mock.patch.object(agents, "_cwd_of", return_value="/work"):
+            with mock.patch.object(agents.Path, "home", return_value=home), mock.patch.object(agents, "_INFO_FN", {"claude": agents._claude_info}), mock.patch.object(agents, "_pgrep", return_value=[1, 2, 3, 4]), mock.patch.object(agents, "_parent_walk_for_host", return_value=("kitty", [])), mock.patch.object(agents, "_cwd_of", return_value="/work"):
                 rows = agents._build_records()
             self.assertEqual(len(rows), 4)
             self.assertEqual(rows[-1]["sessionId"], "healthy")
@@ -1190,7 +1188,7 @@ class IncrementalParserTests(unittest.TestCase):
             if pid == 1:
                 raise ValueError("bad session")
             return {"sessionId": [] if pid == 2 else "healthy", "state": "idle", "identityExact": True}
-        with mock.patch.object(agents, "_INFO_FN", {"claude": info}), mock.patch.object(agents, "_pgrep", return_value=[1, 2, 3]), mock.patch.object(agents, "_parent_walk_for_host", return_value=("kitty", 10, [])), mock.patch.object(agents, "_cwd_of", return_value="/work"):
+        with mock.patch.object(agents, "_INFO_FN", {"claude": info}), mock.patch.object(agents, "_pgrep", return_value=[1, 2, 3]), mock.patch.object(agents, "_parent_walk_for_host", return_value=("kitty", [])), mock.patch.object(agents, "_cwd_of", return_value="/work"):
             rows = agents._build_records()
         snapshot = agents._merge_snapshot(rows, {}, "boot", 1)
         self.assertEqual(snapshot["counts"], {"working": 0, "blocked": 0, "idle": 1, "untracked": 2, "total": 3})

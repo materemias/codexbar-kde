@@ -986,7 +986,6 @@ class ForecastTests(IsolatedUsageTestCase):
         cached = {
             "ok": True,
             "stale": False,
-            "source": "codex-reset.com",
             "expectedAt": "2026-09-02T23:00:00+00:00",
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -1009,7 +1008,6 @@ class ForecastTests(IsolatedUsageTestCase):
         cached = {
             "ok": True,
             "stale": False,
-            "source": "codex-reset.com",
             "expectedAt": None,
             "windowStartHour": 23,
             "windowEndHour": 2,
@@ -1053,7 +1051,6 @@ class ForecastTests(IsolatedUsageTestCase):
         cached = {
             "ok": True,
             "stale": False,
-            "source": "codex-reset.com",
             "expectedAt": "2026-09-16T02:00:00+00:00",
         }
         timeout = 0.4

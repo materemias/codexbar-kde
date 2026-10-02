@@ -91,9 +91,9 @@ def fixture():
 
 
 # Extract only named pure presentation functions; fail if the source contract moves.
-HELPERS = """colorFor relativeMs pad2 _time24 _monthDay _absoluteTime _forecastTimeLeft
+HELPERS = """colorFor relativeMs _monthDay _absoluteTime _forecastTimeLeft
 _forecastPercent codexForecastState formatCodexForecast formatCodexForecastIncident
-formatCodexForecastAlert lastCodexIndex _isoDate formatResetCredits formatReset
+formatCodexForecastAlert lastCodexIndex formatResetCredits formatReset
 windowSpanMs compositeStats _compositeWindow codexCompositeRecord firstProviderIndex
 windowLabel accountAvailabilityIndicator providerDisplayName agentStateColor cwdLabel ageFrom
 historyLaunchAllowed""".split()
