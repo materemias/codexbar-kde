@@ -922,15 +922,17 @@ PlasmoidItem {
 
         var details = []
         if (state === "announced") {
-            // Promised window, its deadline and the site's signal score. Model
-            // confidence is about the cadence model, so it is left off here.
+            // The deadline in local time, its countdown and the site's signal
+            // score. The site's own window label ("end of Friday") is in its
+            // zone, so it is not shown. Model confidence is about the cadence
+            // model, so it is left off here.
             var signal = forecast.signal
-            var head = signal.windowLabel || "reset"
+            var head = "reset"
             var deadline = typeof signal.deadlineAt === "string"
                 ? new Date(signal.deadlineAt) : null
             if (deadline && !isNaN(deadline.getTime())) {
-                head += " (by " + _absoluteTime(deadline, now)
-                    + ", " + _forecastTimeLeft(deadline, now) + ")"
+                head = "by " + _absoluteTime(deadline, now)
+                    + " (" + _forecastTimeLeft(deadline, now) + ")"
             }
             var sp = _forecastPercent(signal.percent)
             if (!isNaN(sp)) head += " · " + sp + "% chance"

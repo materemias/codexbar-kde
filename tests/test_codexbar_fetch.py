@@ -832,7 +832,7 @@ class ForecastTests(IsolatedUsageTestCase):
         last_reset = dt.datetime(2026, 8, 31, 2, 34, 27, tzinfo=dt.timezone.utc)
         now = dt.datetime(2026, 9, 2, 10, 0, tzinfo=dt.timezone.utc)
 
-        eta = fetch._forecast_eta(last_reset, 2.1, 23, 2, now)
+        eta = fetch._forecast_eta(last_reset, 2.1, 23, 2, "UTC", now)
 
         self.assertEqual(eta, dt.datetime(2026, 9, 2, 23, tzinfo=dt.timezone.utc))
 
@@ -840,7 +840,7 @@ class ForecastTests(IsolatedUsageTestCase):
         last_reset = dt.datetime(2026, 9, 1, 22, 30, tzinfo=dt.timezone.utc)
         now = dt.datetime(2026, 9, 2, 10, 0, tzinfo=dt.timezone.utc)
 
-        eta = fetch._forecast_eta(last_reset, 25 / 24, 23, 2, now)
+        eta = fetch._forecast_eta(last_reset, 25 / 24, 23, 2, "UTC", now)
 
         self.assertEqual(eta, dt.datetime(2026, 9, 2, 23, 30, tzinfo=dt.timezone.utc))
 
@@ -848,9 +848,38 @@ class ForecastTests(IsolatedUsageTestCase):
         last_reset = dt.datetime(2026, 9, 1, 22, 30, tzinfo=dt.timezone.utc)
         now = dt.datetime(2026, 9, 2, 23, 45, tzinfo=dt.timezone.utc)
 
-        eta = fetch._forecast_eta(last_reset, 25 / 24, 23, 2, now)
+        eta = fetch._forecast_eta(last_reset, 25 / 24, 23, 2, "UTC", now)
 
         self.assertEqual(eta, dt.datetime(2026, 9, 3, 23, 30, tzinfo=dt.timezone.utc))
+
+    def test_eta_window_hours_are_in_the_window_zone(self) -> None:
+        # Projection 2026-11-01 12:00Z is 04:00 PST, after the DST change; the
+        # 23:00 Los Angeles window start that day is 07:00Z on Nov 2.
+        last_reset = dt.datetime(2026, 10, 31, 12, tzinfo=dt.timezone.utc)
+        now = dt.datetime(2026, 10, 31, 13, tzinfo=dt.timezone.utc)
+
+        eta = fetch._forecast_eta(last_reset, 1, 23, 2, "America/Los_Angeles", now)
+        unknown = fetch._forecast_eta(last_reset, 1, 23, 2, "Mars/Olympus", now)
+
+        self.assertEqual(eta, dt.datetime(2026, 11, 2, 7, tzinfo=dt.timezone.utc))
+        self.assertEqual(unknown, dt.datetime(2026, 11, 1, 12, tzinfo=dt.timezone.utc))
+
+    def test_eta_rolls_in_window_zone_across_dst(self) -> None:
+        # Projection Oct 31 23:30 PDT is inside the window but elapsed; one
+        # day later is Nov 1 23:30 PST, not 22:30.
+        last_reset = dt.datetime(2026, 10, 31, 6, 30, tzinfo=dt.timezone.utc)
+        now = dt.datetime(2026, 11, 1, 6, 45, tzinfo=dt.timezone.utc)
+
+        eta = fetch._forecast_eta(last_reset, 1, 23, 2, "America/Los_Angeles", now)
+
+        self.assertEqual(eta, dt.datetime(2026, 11, 2, 7, 30, tzinfo=dt.timezone.utc))
+
+    def test_end_of_day_deadline_rounds_up_to_the_minute(self) -> None:
+        deadline = fetch._announcement_deadline(
+            {"window": {"target_at": "2026-10-03T06:59:59.999Z"}}
+        )
+
+        self.assertEqual(deadline, dt.datetime(2026, 10, 3, 7, tzinfo=dt.timezone.utc))
 
     def test_normalizes_forecast_fields(self) -> None:
         payload = fetch._normalize_forecast(

@@ -35,6 +35,7 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Per-provider source flag. None = let the CLI auto-pick.
 # Claude defaults to OAuth so we get extraRateWindows (Claude Design,
@@ -979,25 +980,33 @@ def _forecast_eta(
     median_days: float | None,
     start_hour: int | None,
     end_hour: int | None,
+    zone: str,
     now: _dt.datetime,
 ) -> _dt.datetime | None:
-    """Project the next reset from the last one plus the observed cadence."""
+    """Project the next reset from the last one plus the observed cadence.
+
+    The window hours are wall-clock hours in `zone`; an unknown zone skips
+    the window snap rather than misplacing it by the zone offset.
+    """
     if last_reset is None or median_days is None or median_days <= 0:
         return None
+    try:
+        tz = ZoneInfo(zone or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = None
     projected = last_reset + _dt.timedelta(days=median_days)
     eta = projected
-    if start_hour is not None and end_hour is not None:
-        start_at = projected.replace(
-            hour=start_hour, minute=0, second=0, microsecond=0
-        )
-        end_at = start_at.replace(
-            hour=end_hour, minute=0, second=0, microsecond=0
-        )
+    if tz is not None and start_hour is not None and end_hour is not None:
+        local = projected.astimezone(tz)
+        # Roll in the window zone so a day across a DST change keeps the hour.
+        eta = local
+        start_at = local.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        end_at = start_at.replace(hour=end_hour)
         if end_hour <= start_hour:
             end_at += _dt.timedelta(days=1)
-        if projected < start_at:
+        if local < start_at:
             eta = start_at
-        elif projected >= end_at:
+        elif local >= end_at:
             eta = start_at + _dt.timedelta(days=1)
     # Keep the displayed instant in the future by rolling it forward one day
     # at a time when the projection has already elapsed.
@@ -1005,7 +1014,7 @@ def _forecast_eta(
     while eta <= now and guard < 400:
         eta += _dt.timedelta(days=1)
         guard += 1
-    return eta
+    return eta.astimezone(_dt.timezone.utc)
 
 
 def _forecast_cache_read(max_age: float | None) -> dict | None:
@@ -1067,7 +1076,8 @@ def _normalize_forecast(data: dict) -> dict:
     window_start_hour = _as_hour(window.get("start_hour"))
     window_end_hour = _as_hour(window.get("end_hour"))
     eta = _forecast_eta(
-        last_reset, median_days, window_start_hour, window_end_hour, now
+        last_reset, median_days, window_start_hour, window_end_hour,
+        str(window.get("timezone") or ""), now,
     )
     # Announcements outlive the reset they promise when it is delivered as a
     # banked reset, which never moves `last_reset_at`. Once one lapses, its
@@ -1144,15 +1154,19 @@ def _normalize_forecast(data: dict) -> dict:
     }
 
 
-def _announcement_window(raw: dict) -> tuple[dict, _dt.datetime | None]:
+def _announcement_deadline(raw: dict) -> _dt.datetime | None:
+    """The announced deadline. Sites write "end of day" as 06:59:59.999, so a
+    deadline in the last second of a minute is rounded up to the minute."""
     window = raw.get("window")
     window = window if isinstance(window, dict) else {}
     deadline = _parse_iso(window.get("target_at")) or _parse_iso(window.get("end_at"))
-    return window, deadline
+    if deadline is not None and deadline.second == 59:
+        deadline = deadline.replace(second=0, microsecond=0) + _dt.timedelta(minutes=1)
+    return deadline
 
 
 def _announcement_lapsed(raw: dict, now: _dt.datetime) -> bool:
-    _, deadline = _announcement_window(raw)
+    deadline = _announcement_deadline(raw)
     return raw.get("state") == "expired" or (deadline is not None and deadline <= now)
 
 
@@ -1171,7 +1185,7 @@ def _forecast_signal(
         at = _parse_iso(raw.get(at_key))
         if at is None or at <= cutoff:
             continue
-        window, deadline = _announcement_window(raw)
+        deadline = _announcement_deadline(raw)
         score = raw.get("score")
         percent = None
         if isinstance(score, dict):
@@ -1184,12 +1198,10 @@ def _forecast_signal(
                 percent = _as_float(probs.get("signal_percent"))
         if percent is not None and not 0 <= percent <= 100:
             percent = None
-        label = window.get("label")
         summary = raw.get("summary")
         return {
             "percent": percent,
             "band": str(raw.get("signal_type") or data.get("signal_tier") or ""),
-            "windowLabel": label.strip() if isinstance(label, str) and label.strip() else None,
             "deadlineAt": deadline.isoformat() if deadline is not None else None,
             "summary": summary.strip() if isinstance(summary, str) and summary.strip() else None,
             "url": str(raw.get("url") or "") or None,
