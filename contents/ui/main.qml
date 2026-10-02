@@ -1253,17 +1253,16 @@ PlasmoidItem {
         return p
     }
 
-    // Compact age string from a unix-ms timestamp. "2m", "15s", "1h 5m".
+    // Compact age string from a unix-ms timestamp, largest unit only:
+    // "15s", "7m", "23h", "4d".
     function ageFrom(ms, now) {
         if (!ms) return ""
-        var diff = Math.max(0, now - ms)
-        var secs = Math.floor(diff / 1000)
+        var secs = Math.floor(Math.max(0, now - ms) / 1000)
         if (secs < 60) return secs + "s"
         var mins = Math.floor(secs / 60)
         if (mins < 60) return mins + "m"
         var hrs = Math.floor(mins / 60)
-        if (hrs < 24) return hrs + "h " + (mins % 60) + "m"
-        var days = Math.floor(hrs / 24)
-        return days + "d " + (hrs % 24) + "h"
+        if (hrs < 24) return hrs + "h"
+        return Math.floor(hrs / 24) + "d"
     }
 }

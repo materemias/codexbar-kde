@@ -77,7 +77,7 @@ ColumnLayout {
         if (index < 0 || index >= flatRecords.length) return
         var followPeek = history.peekKey !== ""
         selectedKey = history.agentsView.agentKey(flatRecords[index])
-        if (followPeek) history.peekKey = _peekable(flatRecords[index]) ? selectedKey : ""
+        if (followPeek) history.peekKey = selectedKey
     }
     function selectNext() {
         if (flatRecords.length === 0) return
@@ -88,13 +88,9 @@ ColumnLayout {
         var n = flatRecords.length
         selectAt(((selectedIndex < 0 ? 0 : selectedIndex) - 1 + n) % n)
     }
-    // Restart rows are full cards; only recently closed rows peek.
-    function _peekable(record) {
-        return !!record && record.closedBy === "exit"
-    }
     function togglePeek() {
         var index = indexForKey(selectedKey)
-        if (index < 0 || !_peekable(flatRecords[index])) return
+        if (index < 0) return
         history.peekKey = history.peekKey === selectedKey ? "" : selectedKey
     }
     function activateSelected() {
@@ -110,6 +106,7 @@ ColumnLayout {
     }
     onFlatRecordsChanged: {
         if (selectedKey && indexForKey(selectedKey) < 0) selectedKey = ""
+        if (peekKey && indexForKey(peekKey) < 0) peekKey = ""
     }
 
     PC3.Label {
@@ -187,9 +184,14 @@ ColumnLayout {
         }
     }
 
-    Repeater {
-        model: history.rebootedAll
-        delegate: HistoryRow {}
+    ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 1
+
+        Repeater {
+            model: history.rebootedAll
+            delegate: EndedRow {}
+        }
     }
 
     PC3.Label {
@@ -201,15 +203,9 @@ ColumnLayout {
         Layout.fillWidth: true
     }
 
-    // Recently closed rows mirror live agent rows: one line per session,
-    // with a peek panel for its last turns and resume command.
+    // Ended rows mirror live agent rows: one line per session, with a peek
+    // panel for its last turns and resume command.
     property string peekKey: ""
-    onExitedChanged: {
-        for (var i = 0; i < history.exited.length; i++) {
-            if (history.agentsView.agentKey(history.exited[i]) === history.peekKey) return
-        }
-        history.peekKey = ""
-    }
 
     ColumnLayout {
         Layout.fillWidth: true
@@ -217,11 +213,11 @@ ColumnLayout {
 
         Repeater {
             model: history.exitedAll
-            delegate: ClosedRow {}
+            delegate: EndedRow {}
         }
     }
 
-    component ClosedRow: Item {
+    component EndedRow: Item {
         id: closedRow
         required property var modelData
         visible: history.agentsView.recordMatches(modelData)
@@ -284,6 +280,8 @@ ColumnLayout {
             anchors.top: parent.top
             spacing: 0
 
+            // Right-hand fields sit in fixed-width columns so they line up
+            // across rows; the launch slot ends at the row's edge.
             RowLayout {
                 id: closedLine
                 Layout.fillWidth: true
@@ -324,70 +322,68 @@ ColumnLayout {
                     text: history.agentsView.highlighted(
                         history.agentsView._modelName(closedRow.modelData.model))
                     textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
-                    visible: text.length > 0
                     color: Kirigami.Theme.linkColor
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                     font.weight: Font.DemiBold
                     elide: Text.ElideMiddle
-                    Layout.maximumWidth: Kirigami.Units.gridUnit * 9
+                    horizontalAlignment: Text.AlignRight
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 5
                     Layout.alignment: Qt.AlignVCenter
                 }
 
                 PC3.Label {
                     text: root.cwdLabel(closedRow.modelData.cwd || "")
-                    visible: text.length > 0
                     textFormat: Text.PlainText
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                     opacity: 0.55
                     elide: Text.ElideMiddle
-                    Layout.maximumWidth: Kirigami.Units.gridUnit * 7
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 4
                     Layout.alignment: Qt.AlignVCenter
                 }
 
                 PC3.Label {
-                    text: "closed " + root.ageFrom(Number(closedRow.modelData.lastSeenAt) || 0, root.nowMs)
+                    text: root.ageFrom(Number(closedRow.modelData.lastSeenAt) || 0, root.nowMs)
                     color: closedRow.tint
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                     font.weight: Font.DemiBold
+                    horizontalAlignment: Text.AlignRight
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 2
                     Layout.alignment: Qt.AlignVCenter
                 }
 
-                Rectangle {
-                    visible: (closedRow.modelData.desktop || "").length > 0
-                    width: closedDesktopLabel.implicitWidth + 8
-                    height: closedDesktopLabel.implicitHeight + 3
-                    radius: 3
-                    color: "transparent"
-                    border.width: 1
-                    border.color: Qt.rgba(Kirigami.Theme.textColor.r,
-                        Kirigami.Theme.textColor.g,
-                        Kirigami.Theme.textColor.b, 0.3)
+                // Desktop chip; its slot stays when the desktop is unknown.
+                Item {
+                    implicitWidth: Math.max(Kirigami.Units.gridUnit * 1.4, closedDesktop.width)
+                    implicitHeight: closedDesktop.height
                     Layout.alignment: Qt.AlignVCenter
 
-                    PC3.Label {
-                        id: closedDesktopLabel
-                        anchors.centerIn: parent
-                        text: closedRow.modelData.desktop || ""
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        font.weight: Font.DemiBold
-                        opacity: 0.65
+                    Rectangle {
+                        id: closedDesktop
+                        anchors.right: parent.right
+                        visible: (closedRow.modelData.desktop || "").length > 0
+                        width: closedDesktopLabel.implicitWidth + 8
+                        height: closedDesktopLabel.implicitHeight + 3
+                        radius: 3
+                        color: "transparent"
+                        border.width: 1
+                        border.color: Qt.rgba(Kirigami.Theme.textColor.r,
+                            Kirigami.Theme.textColor.g,
+                            Kirigami.Theme.textColor.b, 0.3)
+
+                        PC3.Label {
+                            id: closedDesktopLabel
+                            anchors.centerIn: parent
+                            text: closedRow.modelData.desktop || ""
+                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            font.weight: Font.DemiBold
+                            opacity: 0.65
+                        }
                     }
-                }
-
-                PC3.ToolButton {
-                    icon.name: closedRow.peekOpen ? "arrow-up" : "arrow-down"
-                    opacity: closedMouse.containsMouse || closedRow.peekOpen || hovered ? 1 : 0
-                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
-                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
-                    padding: 1
-                    onClicked: history.peekKey = closedRow.peekOpen ? "" : closedRow.sessionKey
-                    PC3.ToolTip.visible: hovered
-                    PC3.ToolTip.text: "Peek at recent messages and the resume command"
-                    PC3.ToolTip.delay: 400
                 }
 
                 // Keeps its slot on rows that cannot launch so columns align.
                 PC3.ToolButton {
+                    id: launchButton
                     icon.name: "media-playback-start"
                     opacity: closedRow.canLaunch ? 1 : 0
                     enabled: closedRow.canLaunch && closedRow.launchAllowed
@@ -401,18 +397,6 @@ ColumnLayout {
                         : "Resume in kitty"
                             + (closedRow.modelData.desktop
                                 ? " on desktop " + closedRow.modelData.desktop : "")
-                    PC3.ToolTip.delay: 400
-                }
-
-                PC3.ToolButton {
-                    icon.name: "window-close"
-                    opacity: closedMouse.containsMouse || closedRow.peekOpen || hovered ? 1 : 0
-                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
-                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
-                    padding: 1
-                    onClicked: root.dismissHistory([closedRow.modelData])
-                    PC3.ToolTip.visible: hovered
-                    PC3.ToolTip.text: "Dismiss from History"
                     PC3.ToolTip.delay: 400
                 }
             }
@@ -549,6 +533,51 @@ ColumnLayout {
                 }
             }
         }
+
+        // Peek and dismiss float left of the launch slot on hover, so they
+        // take no column space.
+        Rectangle {
+            readonly property bool shown: closedMouse.containsMouse || closedRow.peekOpen
+                || peekButton.hovered || dismissButton.hovered
+            anchors.right: parent.right
+            anchors.rightMargin: 4 + launchButton.width + Kirigami.Units.smallSpacing
+            y: (closedLine.height - height) / 2
+            width: hoverButtons.implicitWidth
+            height: hoverButtons.implicitHeight
+            radius: 4
+            color: Kirigami.Theme.backgroundColor
+            opacity: shown ? 1 : 0
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 120 } }
+
+            Row {
+                id: hoverButtons
+
+                PC3.ToolButton {
+                    id: peekButton
+                    icon.name: closedRow.peekOpen ? "arrow-up" : "arrow-down"
+                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                    padding: 1
+                    onClicked: history.peekKey = closedRow.peekOpen ? "" : closedRow.sessionKey
+                    PC3.ToolTip.visible: hovered
+                    PC3.ToolTip.text: "Peek at recent messages and the resume command"
+                    PC3.ToolTip.delay: 400
+                }
+
+                PC3.ToolButton {
+                    id: dismissButton
+                    icon.name: "window-close"
+                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                    padding: 1
+                    onClicked: root.dismissHistory([closedRow.modelData])
+                    PC3.ToolTip.visible: hovered
+                    PC3.ToolTip.text: "Dismiss from History"
+                    PC3.ToolTip.delay: 400
+                }
+            }
+        }
     }
 
     // The conversation lines that matched the active filter, query
@@ -593,246 +622,4 @@ ColumnLayout {
         }
     }
 
-    component HistoryRow: Rectangle {
-        id: historyRow
-        required property var modelData
-        visible: history.agentsView.recordMatches(modelData)
-        readonly property bool selected: history.agentsView.agentKey(modelData) === history.selectedKey
-        Layout.fillWidth: true
-        implicitHeight: historyCol.implicitHeight + 10
-        radius: 4
-        color: Kirigami.Theme.alternateBackgroundColor
-        border.width: selected ? 2 : 1
-        border.color: selected ? Kirigami.Theme.highlightColor : Qt.rgba(
-            Kirigami.Theme.textColor.r,
-            Kirigami.Theme.textColor.g,
-            Kirigami.Theme.textColor.b,
-            0.14
-        )
-
-        readonly property string lastSeenText: {
-            var value = Number(modelData.lastSeenAt) || 0
-            if (!value) return "last seen unknown"
-            return "last seen " + new Date(value).toLocaleString(
-                Qt.locale(), Locale.ShortFormat)
-        }
-
-        ColumnLayout {
-            id: historyCol
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: 5
-            spacing: 3
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
-
-                Kirigami.Icon {
-                    source: historyRow.modelData.provider
-                        ? Qt.resolvedUrl("../icons/"
-                            + historyRow.modelData.provider + ".svg")
-                        : ""
-                    implicitWidth: Kirigami.Units.iconSizes.small
-                    implicitHeight: Kirigami.Units.iconSizes.small
-                    smooth: true
-                    visible: source.toString().length > 0
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                PC3.Label {
-                    text: history.agentsView.highlighted(
-                        history.agentsView._providerName(historyRow.modelData.provider))
-                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
-                    font.weight: Font.DemiBold
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                PC3.Label {
-                    id: historyModel
-                    text: history.agentsView.highlighted(
-                        history.agentsView._modelName(historyRow.modelData.model))
-                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
-                    visible: text.length > 0
-                    color: Kirigami.Theme.linkColor
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    font.weight: Font.DemiBold
-                    elide: Text.ElideMiddle
-                    Layout.maximumWidth: Kirigami.Units.gridUnit * 9
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                PC3.Label {
-                    id: historyTitle
-                    text: history.agentsView.highlighted(historyRow.modelData.windowTitle
-                        || historyRow.modelData.sessionId
-                        || "session")
-                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                PC3.Label {
-                    text: historyRow.lastSeenText
-                    textFormat: Text.PlainText
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    opacity: 0.6
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                PC3.ToolButton {
-                    icon.name: "window-close"
-                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
-                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
-                    padding: 1
-                    onClicked: root.dismissHistory([historyRow.modelData])
-                    PC3.ToolTip.visible: hovered
-                    PC3.ToolTip.text: "Dismiss from History"
-                    PC3.ToolTip.delay: 400
-                }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
-
-                PC3.Label {
-                    id: historyCwd
-                    text: history.agentsView.highlighted(historyRow.modelData.cwd || "cwd unknown")
-                    textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
-                    elide: Text.ElideMiddle
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    opacity: 0.75
-                    Layout.fillWidth: true
-                }
-
-                PC3.Label {
-                    text: historyRow.modelData.host
-                        ? "host " + historyRow.modelData.host
-                        : "host unknown"
-                    textFormat: Text.PlainText
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    opacity: 0.65
-                }
-
-                Rectangle {
-                    width: historyDesktopLabel.implicitWidth + 8
-                    height: historyDesktopLabel.implicitHeight + 3
-                    radius: 3
-                    color: "transparent"
-                    border.width: 1
-                    border.color: Qt.rgba(
-                        Kirigami.Theme.textColor.r,
-                        Kirigami.Theme.textColor.g,
-                        Kirigami.Theme.textColor.b,
-                        0.3
-                    )
-                    Layout.alignment: Qt.AlignVCenter
-
-                    PC3.Label {
-                        id: historyDesktopLabel
-                        anchors.centerIn: parent
-                        text: historyRow.modelData.desktop
-                            ? "desktop " + historyRow.modelData.desktop
-                            : "desktop unknown"
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        font.weight: Font.DemiBold
-                        opacity: 0.65
-                    }
-                }
-            }
-
-            PC3.Label {
-                visible: text.length > 0
-                text: history.agentsView.highlighted(historyRow.modelData.lastPrompt || "", true)
-                textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
-                wrapMode: Text.WordWrap
-                maximumLineCount: 2
-                elide: Text.ElideRight
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                opacity: 0.8
-                Layout.fillWidth: true
-            }
-
-            SnippetPanel {
-                // The prompt label is an excerpt starting near the match.
-                snippets: history.agentsView.filterSnippets(historyRow.modelData,
-                    ["provider", "lastPrompt"].concat(history.agentsView.shownFields([
-                        ["windowTitle", historyTitle], ["cwd", historyCwd],
-                        ["model", historyModel]])))
-                Layout.leftMargin: 0
-            }
-
-            RowLayout {
-                visible: (historyRow.modelData.resumeCommand || "").length > 0
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: resumeText.contentHeight + 8
-                    radius: 3
-                    color: Kirigami.Theme.backgroundColor
-                    border.width: 1
-                    border.color: Qt.rgba(
-                        Kirigami.Theme.textColor.r,
-                        Kirigami.Theme.textColor.g,
-                        Kirigami.Theme.textColor.b,
-                        0.2
-                    )
-
-                    TextEdit {
-                        id: resumeText
-                        anchors.fill: parent
-                        anchors.margins: 4
-                        text: historyRow.modelData.resumeCommand || ""
-                        textFormat: TextEdit.PlainText
-                        readOnly: true
-                        selectByMouse: true
-                        wrapMode: TextEdit.NoWrap
-                        clip: true
-                        color: Kirigami.Theme.textColor
-                        selectionColor: Kirigami.Theme.highlightColor
-                        selectedTextColor: Kirigami.Theme.highlightedTextColor
-                        font.family: "monospace"
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    }
-                }
-
-                PC3.ToolButton {
-                    text: "Copy resume command"
-                    icon.name: "edit-copy"
-                    display: QQC2.AbstractButton.TextBesideIcon
-                    onClicked: {
-                        resumeText.selectAll()
-                        resumeText.copy()
-                    }
-                }
-
-                // Only kitty and Tern rows launch; others keep the copy action.
-                PC3.ToolButton {
-                    readonly property bool allowed: root.historyLaunchAllowed(
-                        history.agentsView.agentKey(historyRow.modelData))
-                    visible: root.launchHost(historyRow.modelData.host)
-                    enabled: allowed
-                    text: allowed ? "Launch" : "Launched"
-                    icon.name: "media-playback-start"
-                    display: QQC2.AbstractButton.TextBesideIcon
-                    onClicked: root.launchHistory(historyRow.modelData)
-                }
-            }
-
-            PC3.Label {
-                visible: (historyRow.modelData.resumeCommand || "").length === 0
-                text: "Resume command unavailable for this record."
-                textFormat: Text.PlainText
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                opacity: 0.65
-                Layout.fillWidth: true
-            }
-        }
-    }
 }

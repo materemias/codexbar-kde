@@ -251,12 +251,14 @@ ColumnLayout {
         return names[provider] || provider || "Agent"
     }
 
+    // Model family for display and filtering: provider path and the
+    // redundant "claude-" vendor prefix dropped (claude-opus-5-5 -> opus-5-5).
     function _modelName(model) {
         if (typeof model !== "string") return ""
         var value = model.trim()
-        if (!value) return ""
         var slash = value.lastIndexOf("/")
-        return slash >= 0 ? value.slice(slash + 1) : value
+        if (slash >= 0) value = value.slice(slash + 1)
+        return value.replace(/^claude-/, "")
     }
 
     function agentKey(record) {
@@ -455,12 +457,16 @@ ColumnLayout {
                 anchors.top: parent.top
                 spacing: 0
 
+                // Right-hand fields sit in fixed-width columns so they line
+                // up across rows; the desktop chip ends at the row's edge.
                 RowLayout {
                     id: rowContent
                     Layout.fillWidth: true
                     Layout.leftMargin: 4
                     Layout.rightMargin: 4
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium + 6
                     spacing: Kirigami.Units.smallSpacing
+                    opacity: rowItem.staleIdle ? 0.55 : 1
 
                     // State dot. A thin ring around it marks the session
                     // shown in the focused window (root.focusedAgentKey);
@@ -525,82 +531,74 @@ ColumnLayout {
                         id: modelText
                         text: agents.highlighted(agents._modelName(rowItem.modelData.model))
                         textFormat: agents.filterText ? Text.StyledText : Text.PlainText
-                        visible: text.length > 0
                         color: Kirigami.Theme.linkColor
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                         font.weight: Font.DemiBold
                         elide: Text.ElideMiddle
-                        Layout.maximumWidth: Kirigami.Units.gridUnit * 9
+                        horizontalAlignment: Text.AlignRight
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 5
                         Layout.alignment: Qt.AlignVCenter
                     }
 
                     PC3.Label {
                         text: rowItem.modelData.host || ""
-                        visible: text.length > 0
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                         opacity: 0.55
+                        elide: Text.ElideRight
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 3
                         Layout.alignment: Qt.AlignVCenter
                     }
 
                     PC3.Label {
-                        text: rowItem.state + " " + agents._ageLabel(rowItem.modelData.stateChangedAt)
+                        text: agents._ageLabel(rowItem.modelData.stateChangedAt)
                         color: rowItem.tint
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                         font.weight: Font.DemiBold
+                        horizontalAlignment: Text.AlignRight
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 2
                         Layout.alignment: Qt.AlignVCenter
                     }
 
                     // Desktop chip: the virtual desktop hosting this
                     // session's terminal window. Highlighted when that
                     // desktop (or "all" desktops) is the current one;
-                    // absent when no window resolved. Visibility never
-                    // depends on hover, so the row cannot jump.
-                    Rectangle {
-                        visible: rowItem.desktopInfo !== null
-                        width: desktopChipLabel.implicitWidth + 8
-                        height: desktopChipLabel.implicitHeight + 3
-                        radius: 3
-                        color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
-                            ? Kirigami.Theme.highlightColor : "transparent"
-                        border.width: 1
-                        border.color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
-                            ? Kirigami.Theme.highlightColor
-                            : Qt.rgba(Kirigami.Theme.textColor.r,
-                                Kirigami.Theme.textColor.g,
-                                Kirigami.Theme.textColor.b, 0.3)
+                    // absent when no window resolved, its slot kept so
+                    // the columns stay aligned.
+                    Item {
+                        implicitWidth: Math.max(Kirigami.Units.gridUnit * 1.4,
+                            desktopChip.width)
+                        implicitHeight: desktopChip.height
                         Layout.alignment: Qt.AlignVCenter
 
-                        PC3.Label {
-                            id: desktopChipLabel
-                            anchors.centerIn: parent
-                            text: rowItem.desktopInfo ? rowItem.desktopInfo.label : ""
-                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            font.weight: Font.DemiBold
+                        Rectangle {
+                            id: desktopChip
+                            anchors.right: parent.right
+                            visible: rowItem.desktopInfo !== null
+                            width: desktopChipLabel.implicitWidth + 8
+                            height: desktopChipLabel.implicitHeight + 3
+                            radius: 3
                             color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
-                                ? Kirigami.Theme.highlightedTextColor
-                                : Kirigami.Theme.textColor
-                            opacity: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
-                                ? 1 : 0.65
-                        }
-                    }
+                                ? Kirigami.Theme.highlightColor : "transparent"
+                            border.width: 1
+                            border.color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
+                                ? Kirigami.Theme.highlightColor
+                                : Qt.rgba(Kirigami.Theme.textColor.r,
+                                    Kirigami.Theme.textColor.g,
+                                    Kirigami.Theme.textColor.b, 0.3)
 
-                    PC3.ToolButton {
-                        // Keep the button's slot in the layout when its icon is hidden.
-                        visible: true
-                        opacity: rowMouse.containsMouse || rowItem.peekOpen ? 1 : 0
-                        enabled: rowMouse.containsMouse || rowItem.peekOpen
-                        icon.name: rowItem.peekOpen ? "arrow-up" : "arrow-down"
-                        Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium + 6
-                        Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium + 6
-                        implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
-                        implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
-                        padding: 1
-                        onClicked: {
-                            agents.peekKey = rowItem.peekOpen ? "" : rowItem.sessionKey
+                            PC3.Label {
+                                id: desktopChipLabel
+                                anchors.centerIn: parent
+                                text: rowItem.desktopInfo ? rowItem.desktopInfo.label : ""
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                font.weight: Font.DemiBold
+                                color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
+                                    ? Kirigami.Theme.highlightedTextColor
+                                    : Kirigami.Theme.textColor
+                                opacity: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
+                                    ? 1 : 0.65
+                            }
                         }
-                        PC3.ToolTip.visible: hovered
-                        PC3.ToolTip.text: "Peek at recent messages (or press Space)"
-                        PC3.ToolTip.delay: 400
                     }
                 }
 
@@ -863,6 +861,10 @@ ColumnLayout {
             // value remains above zero.
             readonly property bool recentlyIdle: _idleFreshness > 0
 
+            // Idle for over a day: the row content is dimmed.
+            readonly property bool staleIdle: state === "idle"
+                && (modelData.stateChangedAt || 0) > 0
+                && root.nowMs - modelData.stateChangedAt >= 86400000
 
             MouseArea {
                 id: rowMouse
@@ -880,6 +882,38 @@ ColumnLayout {
                     Qt.openUrlExternally(
                         "codexbar://focus/" + rowItem.modelData.sessionId
                     )
+                }
+            }
+
+            // Peek button floats over the row's right end, so it takes no
+            // column space; shown on hover and while the peek is open.
+            Rectangle {
+                readonly property bool shown: rowMouse.containsMouse
+                    || peekButton.hovered || rowItem.peekOpen
+                anchors.right: parent.right
+                anchors.rightMargin: 4
+                y: (rowContent.height - height) / 2
+                width: peekButton.implicitWidth
+                height: peekButton.implicitHeight
+                radius: 4
+                color: Kirigami.Theme.backgroundColor
+                opacity: shown ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: 120 } }
+
+                PC3.ToolButton {
+                    id: peekButton
+                    anchors.fill: parent
+                    icon.name: rowItem.peekOpen ? "arrow-up" : "arrow-down"
+                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                    padding: 1
+                    onClicked: {
+                        agents.peekKey = rowItem.peekOpen ? "" : rowItem.sessionKey
+                    }
+                    PC3.ToolTip.visible: hovered
+                    PC3.ToolTip.text: "Peek at recent messages (or press Space)"
+                    PC3.ToolTip.delay: 400
                 }
             }
 

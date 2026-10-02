@@ -200,10 +200,12 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 
 - **Live sessions.** Every Claude Code, Codex, OpenCode, pi and omp session in
   a terminal, grouped by project folder, newest first. Each row shows the task
-  title, model, terminal, state and how long it has been in it: working
-  (green), blocked on your input (red), idle (grey), or untracked (blue) when
-  the process has no resolvable session. Freshly idle rows pulse for five
-  minutes.
+  title, then aligned columns for the model family (`opus-5-5`, `gpt-6-astra`),
+  terminal and how long the session has been in its state (`7m`, `23h`, `4d`).
+  The dot and the age share the state colour: working (green), blocked on your
+  input (red), idle (grey), or untracked (blue) when the process has no
+  resolvable session. Freshly idle rows pulse for five minutes; rows idle for
+  over a day are dimmed.
 - **Desktop badges.** The number of the virtual desktop the session's window
   is on, highlighted when it is the current one.
 - **Focused session.** A thin ring around the state dot marks the session
@@ -213,8 +215,8 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
   agents in one VS Code window or several T3 Code threads, no row is marked.
 - **Click to focus.** Clicking a row, or `Enter`, raises the terminal hosting
   the session, switching desktop if needed.
-- **Conversation peek.** The arrow or `Space` expands the last eight user,
-  assistant and tool turns.
+- **Conversation peek.** The arrow shown on hover, or `Space`, expands the
+  last eight user, assistant and tool turns.
 - **Type to filter.** Typing filters by title, prompt, folder, provider and
   model, and by recent conversation text (exact). A field matches when it
   contains the query, or when the query's letters start words in order
@@ -230,8 +232,11 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 - **Interrupted by restart.** After a reboot, every session from the last scan
   before it, ordered by desktop. They stay until the session runs again.
 - **Recently closed.** The most recent sessions that exited during this boot,
-  100 by default (Settings → Agents → Keep recently closed, 10–1000), as
-  compact rows with a peek of their last turns.
+  100 by default (Settings → Agents → Keep recently closed, 10–1000).
+- **Rows.** Both lists use one line per session: title, then aligned columns
+  for model family, folder, time since it ended, desktop and **Launch**.
+  Clicking a row, or the arrow shown on hover, peeks at its folder, host,
+  resume command and last turns.
 - **Restore.** Each row has a copyable resume command, shown only when the
   exact provider session is known. Sessions that ran in kitty also get
   **Launch**: CodexBar switches to the saved desktop, opens a new kitty window
@@ -240,7 +245,8 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
   none runs. **Restore all** does this for every restart row in desktop order,
   one at a time. Running sessions are never launched twice, and a row leaves
   History once its session is live again.
-- **Dismiss.** ✕ removes a row; **Dismiss all** clears the restart rows shown.
+- **Dismiss.** ✕ (on hover) removes a row; **Dismiss all** clears the restart
+  rows shown.
 - **Keyboard and filter.** `Up`/`Down` select, `Space` peeks, `Enter`
   launches, and typing filters like on the Agents tab.
 
