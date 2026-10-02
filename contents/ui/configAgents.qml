@@ -14,6 +14,7 @@ Item {
     property bool cfg_showAgentPrompts: false
     property bool cfg_includeUntrackedAgents: true
     property int  cfg_agentsRefreshSeconds: 5
+    property int  cfg_agentHistoryLimit: 100
     property bool cfg_showAgentStateDots: true
     property int  cfg_agentStateDotsScale: 100
     property bool cfg_closePopupOnFocusLoss: true
@@ -104,6 +105,20 @@ Item {
                     onValueModified: cfg_agentsRefreshSeconds = value
                 }
                 QQC2.Label { text: "seconds" }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Keep recently closed:"
+                QQC2.SpinBox {
+                    objectName: "agentHistoryLimitSpinBox"
+                    from: 10
+                    to: 1000
+                    stepSize: 10
+                    editable: true
+                    value: cfg_agentHistoryLimit
+                    onValueModified: cfg_agentHistoryLimit = value
+                }
+                QQC2.Label { text: "sessions" }
             }
 
             Kirigami.Separator {

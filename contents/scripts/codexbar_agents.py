@@ -17,6 +17,7 @@ Usage:
   codexbar_agents.py                  one-shot, prints aggregate to stdout
   codexbar_agents.py --once           one-shot, writes ~/.codexbar/agents.json
   codexbar_agents.py --watch [-i N]   daemon; sweep + write every N seconds
+  --history-limit N                   keep the N newest same-boot exits
 """
 from __future__ import annotations
 
@@ -1428,8 +1429,9 @@ def _apply_desktop_map(
     return mapped
 
 
-# Sessions that ended while this boot kept running. Sessions cut off by a
-# reboot stay until they run again, however many there are.
+# Sessions that ended while this boot kept running, unless --history-limit
+# says otherwise. Sessions cut off by a reboot stay until they run again,
+# however many there are.
 HISTORY_LIMIT = 100
 _CLOSED_BY = ("reboot", "exit")
 
@@ -1501,7 +1503,8 @@ def _history_record(record: dict, active: bool, closed_by: str = "") -> dict:
 
 
 def _merge_snapshot(
-    records: list[dict], previous: dict, boot_id: str, now_ms: int
+    records: list[dict], previous: dict, boot_id: str, now_ms: int,
+    history_limit: int = HISTORY_LIMIT,
 ) -> dict:
     """Reduce one live scan and one saved snapshot into the next snapshot."""
     previous = previous if isinstance(previous, dict) else {}
@@ -1603,7 +1606,7 @@ def _merge_snapshot(
     exited = sorted(
         (r for r in history_by_key.values() if r["closedBy"] == "exit"),
         key=lambda r: r["lastSeenAt"], reverse=True,
-    )[:HISTORY_LIMIT]
+    )[:history_limit]
 
     counts = {
         "working": 0, "blocked": 0, "idle": 0, "untracked": 0, "total": 0
@@ -1633,6 +1636,7 @@ def _merge_snapshot(
 def _aggregate(
     desktop_map: dict[tuple[str, str], str] | None = None,
     path: Path = AGGREGATE_PATH,
+    history_limit: int = HISTORY_LIMIT,
 ) -> dict:
     previous = _load_payload(path)
     boot_id = _read_boot_id()
@@ -1640,7 +1644,7 @@ def _aggregate(
     if not _confirmed_boot_change(previous, boot_id):
         records = _apply_desktop_map(records, desktop_map or {})
     return _merge_snapshot(
-        records, previous, boot_id, int(time.time() * 1000)
+        records, previous, boot_id, int(time.time() * 1000), history_limit
     )
 
 
@@ -1764,6 +1768,7 @@ def _locked_sweep(
     requested_at: int | None = None,
     aggregate_path: Path = AGGREGATE_PATH,
     lock_path: Path | None = None,
+    history_limit: int = HISTORY_LIMIT,
 ) -> tuple[dict, bool]:
     aggregate_path = Path(aggregate_path)
     with _aggregate_lock(aggregate_path, lock_path):
@@ -1790,7 +1795,9 @@ def _locked_sweep(
             _CACHE_ACTIVE = None
         if not _confirmed_boot_change(previous, boot_id):
             records = _apply_desktop_map(records, desktop_map or {})
-        payload = _merge_snapshot(records, previous, boot_id, int(time.time() * 1000))
+        payload = _merge_snapshot(
+            records, previous, boot_id, int(time.time() * 1000), history_limit
+        )
         _write_aggregate(payload, aggregate_path)
         return payload, True
 
@@ -1799,14 +1806,25 @@ def _watch(
     interval: float,
     desktop_map: dict[tuple[str, str], str] | None = None,
     requested_at: int | None = None,
+    history_limit: int = HISTORY_LIMIT,
 ) -> int:
     """Run forever and retain the prior complete snapshot after failures."""
     while True:
         try:
-            _locked_sweep(desktop_map, requested_at)
+            _locked_sweep(desktop_map, requested_at, history_limit=history_limit)
         except Exception as exc:
             sys.stderr.write(f"codexbar_agents: sweep failed: {exc}\n")
         time.sleep(interval)
+
+
+def _history_limit(value: str) -> int:
+    try:
+        limit = int(value)
+    except ValueError:
+        limit = -1
+    if not 1 <= limit <= 1000:
+        raise argparse.ArgumentTypeError("history limit must be 1-1000")
+    return limit
 
 
 def main(argv: list[str]) -> int:
@@ -1823,6 +1841,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--desktop-map")
     parser.add_argument("--requested-at")
     parser.add_argument("--dismiss")
+    parser.add_argument("--history-limit", type=_history_limit, default=HISTORY_LIMIT)
     args = parser.parse_args(argv)
     desktop_map = _parse_desktop_map(args.desktop_map)
     requested_at = _parse_requested_at(args.requested_at)
@@ -1831,12 +1850,12 @@ def main(argv: list[str]) -> int:
         _dismiss_history(_parse_session_keys(args.dismiss))
         return 0
     if args.watch:
-        return _watch(args.interval, desktop_map, requested_at)
+        return _watch(args.interval, desktop_map, requested_at, args.history_limit)
     if args.once:
-        _locked_sweep(desktop_map, requested_at)
+        _locked_sweep(desktop_map, requested_at, history_limit=args.history_limit)
         return 0
 
-    payload = _aggregate(desktop_map)
+    payload = _aggregate(desktop_map, history_limit=args.history_limit)
     json.dump(payload, sys.stdout, separators=(",", ":"))
     sys.stdout.write("\n")
     return 0

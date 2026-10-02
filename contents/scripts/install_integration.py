@@ -302,13 +302,16 @@ def install_all() -> str:
         remove_legacy_systemd_service(),
     ]
     # Seed the aggregate so the widget has something to read on first open.
-    try:
-        subprocess.run(
-            [sys.executable or "python3", str(AGGREGATOR_PATH), "--once"],
-            capture_output=True, timeout=10.0, check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    # An existing one is left alone: this sweep would trim History to the
+    # default limit instead of the configured one.
+    if not (Path.home() / ".codexbar" / "agents.json").exists():
+        try:
+            subprocess.run(
+                [sys.executable or "python3", str(AGGREGATOR_PATH), "--once"],
+                capture_output=True, timeout=10.0, check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     return "\n".join(p for p in parts if p)
 
 

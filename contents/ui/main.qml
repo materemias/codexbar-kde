@@ -681,6 +681,7 @@ PlasmoidItem {
         var cmd = "python3 " + Command.shellQuote(root.aggregatorScriptPath) + " --once"
             + " --desktop-map " + Command.shellQuote(desktopMap)
             + " --requested-at " + requestedAt
+            + " --history-limit " + Plasmoid.configuration.agentHistoryLimit
         aggregatorRunner.run(cmd)
     }
 

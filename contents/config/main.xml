@@ -114,6 +114,12 @@
             <min>2</min>
             <max>120</max>
         </entry>
+        <entry name="agentHistoryLimit" type="Int">
+            <label>How many sessions that exited during this boot History keeps</label>
+            <default>100</default>
+            <min>10</min>
+            <max>1000</max>
+        </entry>
         <entry name="showAgentTopicInPanel" type="Bool">
             <label>Show the most interesting agent's task next to the tray indicators</label>
             <default>false</default>

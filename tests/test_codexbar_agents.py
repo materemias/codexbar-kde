@@ -318,9 +318,10 @@ class SnapshotMergeTests(unittest.TestCase):
         self.assertEqual(snapshot["history"][0]["lastSeenAt"], 200)
 
     def test_same_boot_exit_enters_history_newest_first_and_capped(self) -> None:
+        limit = 3
         ended = [
             active("omp", f"exit-{n}", updatedAt=1000 + n)
-            for n in range(agents.HISTORY_LIMIT + 3)
+            for n in range(limit + 3)
         ]
         previous = {
             "bootId": "boot-a",
@@ -328,16 +329,18 @@ class SnapshotMergeTests(unittest.TestCase):
                 *ended,
                 active("omp", "untracked-omp-7", state="untracked"),
             ],
-            "history": [history("omp", "rebooted", lastSeenAt=1)],
+            "history": [
+                history("omp", f"rebooted-{n}", lastSeenAt=1) for n in range(limit + 1)
+            ],
         }
-        snapshot = agents._merge_snapshot([], previous, "boot-a", 5000)
+        snapshot = agents._merge_snapshot([], previous, "boot-a", 5000, limit)
         rows = [(row["sessionId"], row["closedBy"]) for row in snapshot["history"]]
-        newest = agents.HISTORY_LIMIT + 2
+        newest = limit + 2
         self.assertEqual(
             rows,
-            [("rebooted", "reboot")]
+            [(f"rebooted-{n}", "reboot") for n in range(limit + 1)]
             + [(f"exit-{n}", "exit")
-               for n in range(newest, newest - agents.HISTORY_LIMIT, -1)],
+               for n in range(newest, newest - limit, -1)],
         )
 
     def test_identity_change_of_a_live_process_is_not_an_exit(self) -> None:
@@ -1215,7 +1218,7 @@ def counted(*args):
 a._parse_record = counted
 a._build_records = lambda: (a._tail_claude_transcript(sys.argv[2]) and []) if sys.argv[4] != "prune" else []
 sweep = a._locked_sweep
-a._locked_sweep = lambda *args: sweep(*args, aggregate_path=Path(sys.argv[3]))
+a._locked_sweep = lambda *args, **kwargs: sweep(*args, **kwargs, aggregate_path=Path(sys.argv[3]))
 a.main(["--once"])
 print(count[0])
 """
