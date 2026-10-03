@@ -6,6 +6,7 @@ import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
 import "process" as Process
 import org.kde.taskmanager as TaskManager
+import org.kde.kirigami as Kirigami
 import "Command.js" as Command
 import "Usage.js" as Usage
 import "Notifications.js" as Notifications
@@ -662,6 +663,12 @@ PlasmoidItem {
         }
     }
 
+    // Whether a saved desktop label ("2", "all") names the current desktop.
+    function isCurrentDesktop(label) {
+        if (label === "all") return true
+        return String(label || "") === String(_desktopIndexOf(vdInfo.currentDesktop) + 1)
+    }
+
     // The live session shown in the focused window, as an AgentsSection
     // agentKey, or "" when the window shows no session or several could
     // match. In a Tern window only a visible pane of the session the
@@ -1035,15 +1042,6 @@ PlasmoidItem {
         return ""
     }
 
-    function lastCodexIndex() {
-        var records = root.snapshot && Array.isArray(root.snapshot.providers)
-            ? root.snapshot.providers : []
-        for (var i = records.length - 1; i >= 0; i--) {
-            if (records[i] && records[i].id === "codex") return i
-        }
-        return -1
-    }
-
     // "2 saved resets · soonest expires in 16d 8h (2026-10-04)", or just
     // "2 saved resets" when brief. Empty when the account has no usable
     // reset credit.
@@ -1199,15 +1197,6 @@ PlasmoidItem {
         }
     }
 
-    function firstProviderIndex(providerId) {
-        var records = root.snapshot && Array.isArray(root.snapshot.providers)
-            ? root.snapshot.providers : []
-        for (var i = 0; i < records.length; i++) {
-            if (records[i] && records[i].id === providerId) return i
-        }
-        return -1
-    }
-
     function windowLabel(providerId, slot, rec, extraTitle) {
         return Usage.windowLabel(providerId, slot, rec, extraTitle) || slot
     }
@@ -1247,6 +1236,17 @@ PlasmoidItem {
         if (state === "idle") return "#9ca3af"
         if (state === "untracked") return "#3b82f6"
         return "#9ca3af"
+    }
+
+    // Vendor tints shared by every tab: Anthropic orange, OpenAI violet
+    // (orange/violet stays apart under red-green color blindness). A
+    // model is tinted by its vendor, not its harness; others are neutral.
+    function modelTint(model) {
+        var m = String(model || "").trim().toLowerCase()
+        m = m.slice(m.lastIndexOf("/") + 1)
+        if (/^(claude|opus|sonnet|haiku)/.test(m)) return "#e08a5f"
+        if (/^(gpt|codex|o\d)/.test(m)) return "#a78bfa"
+        return Kirigami.Theme.textColor
     }
 
     // Pick the most "interesting" agent to feature in the panel:

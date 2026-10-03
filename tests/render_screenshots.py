@@ -96,10 +96,10 @@ def fixture():
 # Extract only named pure presentation functions; fail if the source contract moves.
 HELPERS = """colorFor relativeMs _monthDay _absoluteTime _forecastTimeLeft
 _forecastPercent codexForecastState formatCodexForecast formatCodexForecastIncident
-formatCodexForecastAlert lastCodexIndex formatResetCredits formatReset
-windowSpanMs compositeStats _compositeWindow codexCompositeRecord firstProviderIndex
+formatCodexForecastAlert formatResetCredits formatReset
+windowSpanMs compositeStats _compositeWindow codexCompositeRecord
 windowLabel accountAvailabilityIndicator providerDisplayName agentStateColor cwdLabel ageFrom
-historyLaunchAllowed launchHost canTeleport""".split()
+historyLaunchAllowed launchHost canTeleport modelTint""".split()
 
 
 def display_helpers():
@@ -151,6 +151,7 @@ Window {
         property string notificationError: ""
         property string historyLaunchError: ""
         function desktopInfoFor(record) { return null }
+        function isCurrentDesktop(label) { return label === "1" }
         property var historyLaunches: ({})
         property var teleports: ({})
         property string teleportError: ""

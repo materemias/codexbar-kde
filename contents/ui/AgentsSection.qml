@@ -261,16 +261,6 @@ ColumnLayout {
         return value.replace(/^claude-/, "")
     }
 
-    // Model vendor tint, not the harness: Claude models orange, OpenAI
-    // models violet (orange/violet stays apart under red-green color
-    // blindness), anything else neutral.
-    function modelTint(model) {
-        var m = _modelName(model).toLowerCase()
-        if (/^(opus|sonnet|haiku|claude)/.test(m)) return "#e08a5f"
-        if (/^(gpt|codex|o\d)/.test(m)) return "#a78bfa"
-        return Kirigami.Theme.textColor
-    }
-
     // Age brightness by recency: the last 15 minutes full, hours muted,
     // a day or more dim.
     function ageOpacity(ms) {
@@ -483,50 +473,17 @@ ColumnLayout {
     // uppercase folder header followed by its session rows.
     Repeater {
         model: agents.groups
-        delegate: Rectangle {
+        delegate: SectionCard {
             id: groupItem
-            Layout.fillWidth: true
-            // With the column's smallSpacing, cards sit 10 px apart.
-            Layout.topMargin: 6
             required property var modelData
+            title: groupItem.modelData.folder
             visible: groupItem.modelData.sessions.some(function(s) {
                 return agents.recordMatches(s)
             })
-            implicitHeight: groupCol.implicitHeight + 10
-            radius: 6
-            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                Kirigami.Theme.textColor.b, 0.035)
-            border.width: 1
-            border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
-                Kirigami.Theme.textColor.b, 0.08)
 
-            ColumnLayout {
-                id: groupCol
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: 4
-                anchors.topMargin: 6
-                spacing: 1
-
-                PC3.Label {
-                    text: groupItem.modelData.folder
-                    textFormat: Text.PlainText
-                    font.capitalization: Font.AllUppercase
-                    font.weight: Font.DemiBold
-                    font.letterSpacing: 0.8
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize * 0.92
-                    opacity: 0.55
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 6
-                    Layout.bottomMargin: 3
-                }
-
-                Repeater {
-                    model: groupItem.modelData.sessions
-                    delegate: sessionRow
-                }
+            Repeater {
+                model: groupItem.modelData.sessions
+                delegate: sessionRow
             }
         }
     }
@@ -620,7 +577,7 @@ ColumnLayout {
                         id: modelText
                         text: agents.highlighted(agents._modelName(rowItem.modelData.model))
                         textFormat: agents.filterText ? Text.StyledText : Text.PlainText
-                        color: agents.modelTint(rowItem.modelData.model)
+                        color: root.modelTint(rowItem.modelData.model)
                         opacity: 0.85
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                         elide: Text.ElideMiddle
@@ -796,47 +753,7 @@ ColumnLayout {
 
                         Repeater {
                             model: rowItem.modelData.recent || []
-                            delegate: Rectangle {
-                                id: turnCard
-                                required property var modelData
-                                readonly property bool toolTurn: modelData.kind === "tools"
-                                readonly property bool userTurn: modelData.role === "user"
-                                readonly property int padX: userTurn ? 8 : 0
-                                readonly property int padY: userTurn ? 4 : 0
-
-                                Layout.fillWidth: !userTurn
-                                Layout.alignment: userTurn ? Qt.AlignRight : Qt.AlignLeft
-                                Layout.preferredWidth: userTurn ? turnText.implicitWidth + 2 * padX : -1
-                                Layout.maximumWidth: userTurn ? peekCol.width * 0.85 : peekCol.width
-                                implicitHeight: turnText.implicitHeight + 2 * padY
-                                radius: 8
-                                color: userTurn
-                                    ? Qt.rgba(Kirigami.Theme.highlightColor.r,
-                                        Kirigami.Theme.highlightColor.g,
-                                        Kirigami.Theme.highlightColor.b, 0.22)
-                                    : "transparent"
-
-                                PC3.Label {
-                                    id: turnText
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.top: parent.top
-                                    anchors.leftMargin: turnCard.padX
-                                    anchors.rightMargin: turnCard.padX
-                                    anchors.topMargin: turnCard.padY
-                                    text: (turnCard.toolTurn ? "Tools: " : "")
-                                        + (turnCard.modelData.text || "")
-                                    textFormat: Text.PlainText
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                    font.italic: turnCard.toolTurn
-                                    opacity: turnCard.toolTurn ? 0.45 : 0.92
-                                    wrapMode: turnCard.toolTurn ? Text.NoWrap : Text.Wrap
-                                    maximumLineCount: turnCard.toolTurn ? 1 : 4
-                                    elide: Text.ElideRight
-                                    lineHeight: 1.15
-                                    lineHeightMode: Text.ProportionalHeight
-                                }
-                            }
+                            delegate: TurnBubble {}
                         }
 
                         PC3.Label {

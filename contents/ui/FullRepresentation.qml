@@ -262,20 +262,30 @@ Item {
                         : "No providers enabled. Open Settings to enable some."
                 }
 
+                // One card per provider; consecutive Codex accounts share a
+                // card under one header.
                 Repeater {
-                    model: root.snapshot.providers || []
-                    delegate: ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing
+                    model: {
+                        var out = []
+                        var providers = root.snapshot.providers || []
+                        for (var i = 0; i < providers.length; i++) {
+                            var p = providers[i]
+                            var last = out[out.length - 1]
+                            if (p && p.id === "codex" && last && last.id === "codex") {
+                                last.records.push(p)
+                            } else {
+                                out.push({ id: p ? p.id : "", records: [p] })
+                            }
+                        }
+                        return out
+                    }
+                    delegate: SectionCard {
+                        id: providerCard
                         required property var modelData
-                        required property int index
-
-                        readonly property var providers: root.snapshot.providers || []
                         readonly property bool isCodex: modelData.id === "codex"
-                        readonly property bool codexFirst: isCodex
-                            && index === root.firstProviderIndex("codex")
-                        readonly property bool nextIsCodex: isCodex && index + 1 < providers.length
-                            && providers[index + 1] && providers[index + 1].id === "codex"
+                        Layout.topMargin: 2
+                        contentMargins: 6
+                        bodySpacing: Kirigami.Units.smallSpacing
 
                         // Codex group header: one provider title for all
                         // accounts, with the omp rotation mode as a chip whose
@@ -286,7 +296,7 @@ Item {
                             readonly property bool stalled: !!rotationState && rotationState.stalled === true
                             readonly property color stateColor: stalled
                                 ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
-                            visible: parent.codexFirst
+                            visible: providerCard.isCodex
                             Layout.fillWidth: true
                             Layout.minimumHeight: Kirigami.Units.iconSizes.smallMedium
                             spacing: Kirigami.Units.smallSpacing
@@ -300,9 +310,9 @@ Item {
                             }
                             PC3.Label {
                                 text: root.providerDisplayName("codex")
-                                font.weight: Font.Bold
+                                font.weight: Font.DemiBold
                                 font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
-                                font.letterSpacing: 0.4
+                                font.letterSpacing: 0.8
                                 Layout.alignment: Qt.AlignVCenter
                             }
                             Item { Layout.fillWidth: true }
@@ -352,7 +362,7 @@ Item {
 
                         ProviderSection {
                             id: compositeSection
-                            readonly property var compositeRecord: parent.codexFirst
+                            readonly property var compositeRecord: providerCard.isCodex
                                 ? root.codexCompositeRecord() : null
                             Layout.fillWidth: true
                             visible: !!compositeRecord
@@ -360,32 +370,34 @@ Item {
                             subheading: true
                         }
 
-                        Kirigami.Separator {
-                            Layout.fillWidth: true
-                            visible: compositeSection.visible
-                            Layout.topMargin: Kirigami.Units.smallSpacing / 2
-                            opacity: 0.2
-                        }
+                        Repeater {
+                            model: providerCard.modelData.records
+                            delegate: ColumnLayout {
+                                required property var modelData
+                                required property int index
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
 
-                        ProviderSection {
-                            Layout.fillWidth: true
-                            record: parent.modelData
-                            subheading: parent.isCodex
-                            forecast: showForecast ? root.snapshot.forecast : null
-                            showForecast: root.codexForecastEnabled
-                                && parent.isCodex
-                                && index === root.lastCodexIndex()
-                        }
+                                // Accounts inside the Codex card get a faint
+                                // divider above them.
+                                Kirigami.Separator {
+                                    Layout.fillWidth: true
+                                    visible: providerCard.isCodex
+                                        && (parent.index > 0 || compositeSection.visible)
+                                    Layout.topMargin: Kirigami.Units.smallSpacing / 2
+                                    opacity: 0.2
+                                }
 
-                        // Accounts inside the Codex group get a faint divider;
-                        // provider boundaries keep the stronger one.
-                        Kirigami.Separator {
-                            Layout.fillWidth: true
-                            visible: parent.index < parent.providers.length - 1
-                            Layout.topMargin: parent.nextIsCodex
-                                ? Kirigami.Units.smallSpacing / 2 : Kirigami.Units.smallSpacing
-                            Layout.bottomMargin: parent.nextIsCodex ? 0 : Kirigami.Units.smallSpacing / 2
-                            opacity: parent.nextIsCodex ? 0.2 : 0.4
+                                ProviderSection {
+                                    Layout.fillWidth: true
+                                    record: parent.modelData
+                                    subheading: providerCard.isCodex
+                                    forecast: showForecast ? root.snapshot.forecast : null
+                                    showForecast: root.codexForecastEnabled
+                                        && providerCard.isCodex
+                                        && parent.index === providerCard.modelData.records.length - 1
+                                }
+                            }
                         }
                     }
                 }

@@ -153,40 +153,37 @@ ColumnLayout {
             && root.historyLaunchAllowed(history.agentsView.agentKey(r))
     })
 
-    RowLayout {
+    // Ended rows mirror live agent rows: one line per session, with a peek
+    // panel for its last turns and resume command.
+    property string peekKey: ""
+
+    SectionCard {
+        title: "Interrupted by restart"
         visible: history.rebooted.length > 0
-        Layout.fillWidth: true
-        spacing: Kirigami.Units.smallSpacing
-
-        PC3.Label {
-            text: "Interrupted by restart"
-            font.weight: Font.Bold
-            font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
-            Layout.fillWidth: true
-        }
-
-        PC3.ToolButton {
-            visible: history.restorable.length > 0
-            text: "Restore all (" + history.restorable.length + ")"
-            icon.name: "media-playback-start"
-            display: QQC2.AbstractButton.TextBesideIcon
-            onClicked: root.launchAllHistory(history.rebooted)
-            PC3.ToolTip.visible: hovered
-            PC3.ToolTip.text: "Resume every kitty and Tern session, desktop by desktop"
-            PC3.ToolTip.delay: 400
-        }
-
-        PC3.ToolButton {
-            text: "Dismiss all"
-            icon.name: "edit-clear-history"
-            display: QQC2.AbstractButton.TextBesideIcon
-            onClicked: root.dismissHistory(history.rebooted)
-        }
-    }
-
-    ColumnLayout {
-        Layout.fillWidth: true
-        spacing: 1
+        headerData: [
+            PC3.ToolButton {
+                visible: history.restorable.length > 0
+                text: "Restore all (" + history.restorable.length + ")"
+                icon.name: "media-playback-start"
+                icon.width: Kirigami.Units.iconSizes.small
+                icon.height: Kirigami.Units.iconSizes.small
+                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                display: QQC2.AbstractButton.TextBesideIcon
+                onClicked: root.launchAllHistory(history.rebooted)
+                PC3.ToolTip.visible: hovered
+                PC3.ToolTip.text: "Resume every kitty and Tern session, desktop by desktop"
+                PC3.ToolTip.delay: 400
+            },
+            PC3.ToolButton {
+                text: "Dismiss all"
+                icon.name: "edit-clear-history"
+                icon.width: Kirigami.Units.iconSizes.small
+                icon.height: Kirigami.Units.iconSizes.small
+                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                display: QQC2.AbstractButton.TextBesideIcon
+                onClicked: root.dismissHistory(history.rebooted)
+            }
+        ]
 
         Repeater {
             model: history.rebootedAll
@@ -194,22 +191,9 @@ ColumnLayout {
         }
     }
 
-    PC3.Label {
+    SectionCard {
+        title: "Recently closed"
         visible: history.exited.length > 0
-        text: "Recently closed"
-        font.weight: Font.Bold
-        font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
-        Layout.topMargin: history.rebooted.length > 0 ? Kirigami.Units.smallSpacing : 0
-        Layout.fillWidth: true
-    }
-
-    // Ended rows mirror live agent rows: one line per session, with a peek
-    // panel for its last turns and resume command.
-    property string peekKey: ""
-
-    ColumnLayout {
-        Layout.fillWidth: true
-        spacing: 1
 
         Repeater {
             model: history.exitedAll
@@ -222,7 +206,6 @@ ColumnLayout {
         required property var modelData
         visible: history.agentsView.recordMatches(modelData)
         Layout.fillWidth: true
-        Layout.leftMargin: 6
         implicitHeight: closedCol.implicitHeight + 4
 
         readonly property string sessionKey: history.agentsView.agentKey(modelData)
@@ -231,7 +214,13 @@ ColumnLayout {
         readonly property bool canLaunch: command.length > 0 && root.launchHost(modelData.host)
         readonly property bool launchAllowed: root.historyLaunchAllowed(sessionKey)
         readonly property bool selected: sessionKey !== "" && sessionKey === history.selectedKey
-        readonly property color tint: Kirigami.Theme.disabledTextColor
+        // Brightness by recency: the last hour full, today muted, older dim.
+        readonly property real ageOpacity: {
+            var ended = Number(modelData.lastSeenAt) || 0
+            if (!ended) return 0.5
+            var age = root.nowMs - ended
+            return age < 3600000 ? 1 : age < 86400000 ? 0.7 : 0.5
+        }
         readonly property string taskLabel:
             modelData[history.agentsView.labelField(modelData)] || "agent"
 
@@ -293,7 +282,7 @@ ColumnLayout {
                     width: 10; height: 10; radius: 5
                     color: "transparent"
                     border.width: 2
-                    border.color: closedRow.tint
+                    border.color: Kirigami.Theme.disabledTextColor
                     Layout.alignment: Qt.AlignVCenter
                 }
 
@@ -322,9 +311,9 @@ ColumnLayout {
                     text: history.agentsView.highlighted(
                         history.agentsView._modelName(closedRow.modelData.model))
                     textFormat: history.agentsView.filterText ? Text.StyledText : Text.PlainText
-                    color: Kirigami.Theme.linkColor
+                    color: root.modelTint(closedRow.modelData.model)
+                    opacity: 0.85
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    font.weight: Font.DemiBold
                     elide: Text.ElideMiddle
                     horizontalAlignment: Text.AlignRight
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 5
@@ -343,9 +332,9 @@ ColumnLayout {
 
                 PC3.Label {
                     text: root.ageFrom(Number(closedRow.modelData.lastSeenAt) || 0, root.nowMs)
-                    color: closedRow.tint
+                    opacity: closedRow.ageOpacity
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    font.weight: Font.DemiBold
+                    font.weight: closedRow.ageOpacity === 1 ? Font.DemiBold : Font.Normal
                     horizontalAlignment: Text.AlignRight
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 2
                     Layout.alignment: Qt.AlignVCenter
@@ -359,16 +348,28 @@ ColumnLayout {
 
                     Rectangle {
                         id: closedDesktop
+                        // Same styling as the Agents badge: soft fill on
+                        // the current desktop, outline elsewhere.
+                        readonly property bool onCurrent:
+                            root.isCurrentDesktop(closedRow.modelData.desktop)
                         anchors.right: parent.right
                         visible: (closedRow.modelData.desktop || "").length > 0
                         width: closedDesktopLabel.implicitWidth + 8
                         height: closedDesktopLabel.implicitHeight + 3
                         radius: 3
-                        color: "transparent"
+                        color: onCurrent
+                            ? Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                Kirigami.Theme.highlightColor.g,
+                                Kirigami.Theme.highlightColor.b, 0.3)
+                            : "transparent"
                         border.width: 1
-                        border.color: Qt.rgba(Kirigami.Theme.textColor.r,
-                            Kirigami.Theme.textColor.g,
-                            Kirigami.Theme.textColor.b, 0.3)
+                        border.color: onCurrent
+                            ? Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                Kirigami.Theme.highlightColor.g,
+                                Kirigami.Theme.highlightColor.b, 0.6)
+                            : Qt.rgba(Kirigami.Theme.textColor.r,
+                                Kirigami.Theme.textColor.g,
+                                Kirigami.Theme.textColor.b, 0.3)
 
                         PC3.Label {
                             id: closedDesktopLabel
@@ -376,7 +377,7 @@ ColumnLayout {
                             text: closedRow.modelData.desktop || ""
                             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                             font.weight: Font.DemiBold
-                            opacity: 0.65
+                            opacity: closedDesktop.onCurrent ? 0.9 : 0.55
                         }
                     }
                 }
@@ -426,36 +427,34 @@ ColumnLayout {
                         ["model", closedModel]]))
             }
 
+            // Peek panel, styled like the Agents peek: folder and host,
+            // the resume command, then the last turns as a chat.
             Rectangle {
                 visible: closedRow.peekOpen
                 Layout.fillWidth: true
-                Layout.leftMargin: 18
+                Layout.leftMargin: 26
+                Layout.rightMargin: 4
                 Layout.topMargin: 2
-                Layout.bottomMargin: 4
-                implicitHeight: closedPeek.implicitHeight + 10
-                radius: 4
-                color: Kirigami.Theme.backgroundColor
-                border.width: 1
-                border.color: Qt.rgba(Kirigami.Theme.textColor.r,
-                    Kirigami.Theme.textColor.g,
-                    Kirigami.Theme.textColor.b, 0.14)
+                Layout.bottomMargin: 6
+                implicitHeight: closedPeek.implicitHeight + 16
+                radius: 6
+                color: Qt.rgba(0, 0, 0, 0.18)
 
                 ColumnLayout {
                     id: closedPeek
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
-                    anchors.margins: 5
-                    spacing: 3
+                    anchors.margins: 8
+                    spacing: 6
 
                     PC3.Label {
                         Layout.fillWidth: true
-                        text: (closedRow.modelData.cwd || "cwd unknown")
+                        text: (closedRow.modelData.cwd || "cwd unknown").replace(/^\/home\/[^\/]+/, "~")
                             + (closedRow.modelData.host ? "  ·  " + closedRow.modelData.host : "")
                         textFormat: Text.PlainText
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        font.weight: Font.DemiBold
-                        opacity: 0.75
+                        opacity: 0.5
                         elide: Text.ElideMiddle
                     }
 
@@ -504,41 +503,7 @@ ColumnLayout {
 
                     Repeater {
                         model: closedRow.modelData.recent || []
-                        delegate: RowLayout {
-                            id: closedTurn
-                            required property var modelData
-                            readonly property bool toolTurn: modelData.kind === "tools"
-                            readonly property bool userTurn: modelData.role === "user"
-                            readonly property color accent: toolTurn
-                                ? Kirigami.Theme.neutralTextColor
-                                : userTurn ? Kirigami.Theme.highlightColor : Kirigami.Theme.linkColor
-                            Layout.fillWidth: true
-                            spacing: Kirigami.Units.smallSpacing
-
-                            PC3.Label {
-                                text: closedTurn.toolTurn ? "TOOLS"
-                                    : closedTurn.userTurn ? "YOU" : "AI"
-                                color: closedTurn.accent
-                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                font.weight: Font.DemiBold
-                                font.italic: closedTurn.toolTurn
-                                horizontalAlignment: Text.AlignRight
-                                Layout.preferredWidth: Kirigami.Units.gridUnit * 2
-                                Layout.alignment: Qt.AlignTop
-                            }
-
-                            PC3.Label {
-                                text: closedTurn.modelData.text || ""
-                                textFormat: Text.PlainText
-                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                font.italic: closedTurn.toolTurn
-                                opacity: closedTurn.toolTurn ? 0.7 : 1
-                                wrapMode: closedTurn.toolTurn ? Text.NoWrap : Text.Wrap
-                                maximumLineCount: closedTurn.toolTurn ? 1 : 3
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                        }
+                        delegate: TurnBubble { maxLines: 3 }
                     }
 
                     PC3.Label {

@@ -88,9 +88,9 @@ ColumnLayout {
 
         PC3.Label {
             text: root.providerDisplayName(section.record.id || "")
-            font.weight: Font.Bold
+            font.weight: Font.DemiBold
             font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.02
-            font.letterSpacing: 0.4
+            font.letterSpacing: 0.8
             verticalAlignment: Text.AlignVCenter
             Layout.alignment: Qt.AlignVCenter
         }

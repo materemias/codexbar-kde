@@ -111,7 +111,8 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 ### Usage tab
 
 - **Provider meters.** Rate-limit bars with percent used and reset countdowns
-  for Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo and TypeSafe. Balance
+  for Claude, Codex, z.ai, OpenCode Go, OpenRouter, Kilo and TypeSafe, one
+  card per provider; all Codex accounts share one card. Balance
   providers (OpenRouter, Kilo, TypeSafe) show what is left instead of a bar.
 - **Pace.** Each windowed bar has a tick where even use would sit right now.
   A white tick ahead of the fill means the current pace lasts until the reset;
@@ -253,10 +254,13 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
   before it, ordered by desktop. They stay until the session runs again.
 - **Recently closed.** The most recent sessions that exited during this boot,
   100 by default (Settings → Agents → Keep recently closed, 10–1000).
-- **Rows.** Both lists use one line per session: title, then aligned columns
-  for model family, folder, time since it ended, desktop and **Launch**.
-  Clicking a row, or the arrow shown on hover, peeks at its folder, host,
-  resume command and last turns.
+- **Rows.** Each list is a card, and both use one line per session: title,
+  then aligned columns for model family (tinted by vendor as on Agents),
+  folder, time since it ended, desktop (softly filled when it is the current
+  one) and **Launch**. The time is brightest
+  within the last hour, muted later that day and dim after. Clicking a row, or
+  the arrow shown on hover, peeks at its folder, host, resume command and last
+  turns, laid out like the Agents peek.
 - **Restore.** Each row has a copyable resume command, shown only when the
   exact provider session is known. Sessions that ran in kitty also get
   **Launch**: CodexBar switches to the saved desktop, opens a new kitty window
