@@ -574,6 +574,7 @@ def focus(session_id: str) -> int:
 
     if record.get("host") == "t3code":
         _t3_open(session_id)
+        candidates += [p for p in agents.t3_window_pids() if p not in candidates]
 
     if record.get("host") == "tern":
         _tern_focus(pid)

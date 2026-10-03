@@ -401,6 +401,24 @@ ColumnLayout {
                 }
             }
 
+            // The agent's recap of the session's final exchange, shown
+            // under the keyboard-selected row as in Agents.
+            PC3.Label {
+                visible: !!closedRow.modelData.recap && closedRow.selected
+                Layout.fillWidth: true
+                Layout.leftMargin: 18
+                Layout.rightMargin: 4
+                Layout.bottomMargin: 2
+                text: closedRow.modelData.recap || ""
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+                font.italic: true
+                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                opacity: 0.6
+            }
+
             SnippetPanel {
                 snippets: history.agentsView.filterSnippets(closedRow.modelData,
                     history.agentsView.shownFields([

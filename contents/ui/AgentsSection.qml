@@ -602,6 +602,26 @@ ColumnLayout {
                     }
                 }
 
+                // The agent's latest recap (omp when a session goes idle,
+                // Claude when you return to one); "Earlier:" marks one that
+                // turns have since followed.
+                PC3.Label {
+                    visible: !!rowItem.modelData.recap && rowItem.selected
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 26
+                    Layout.rightMargin: 4
+                    Layout.bottomMargin: 2
+                    text: (rowItem.modelData.recapStale ? "Earlier: " : "")
+                        + (rowItem.modelData.recap || "")
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 3
+                    elide: Text.ElideRight
+                    font.italic: true
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                    opacity: 0.6
+                }
+
                 // Filter-hit snippet panel: the conversation lines that
                 // matched the active filter, query highlighted.
                 Rectangle {

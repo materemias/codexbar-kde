@@ -213,6 +213,13 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
   pane; kitty and VS Code are told apart by window caption (session title or
   folder name). When the window could show several sessions, such as two
   agents in one VS Code window or several T3 Code threads, no row is marked.
+- **Session recap.** The session selected with the keyboard shows its agent's
+  latest recap below the row in small gray italics. omp writes one at the end
+  of each turn (`session_recaps` in `~/.omp/agent/history.db`); Claude Code
+  writes an away summary when you return to an idle session, unless recaps are
+  off in its `/config`. A running session keeps showing its latest recap after
+  new turns, prefixed `Earlier:`. History keeps the recap of a session that
+  ended idle, only when it covers the final exchange. Codex writes no recap.
 - **Click to focus.** Clicking a row, or `Enter`, raises the terminal hosting
   the session, switching desktop if needed.
 - **Conversation peek.** The arrow shown on hover, or `Space`, expands the

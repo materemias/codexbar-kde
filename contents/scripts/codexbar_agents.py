@@ -29,6 +29,7 @@ import fcntl
 import json
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -163,17 +164,20 @@ def _start_ms(pid: int) -> int:
     return int((btime + ticks / os.sysconf("SC_CLK_TCK")) * 1000)
 
 
-def _parent_walk_for_host(start_pid: int) -> tuple[str, list[int]]:
+def _parent_walk_for_host(
+    start_pid: int, windows: dict[str, list[int]] | None = None
+) -> tuple[str, list[int]]:
     """Walk up the proc tree from start_pid; return (host_name,
     ancestor_chain) where the chain runs [start_pid, ..., host_pid]. The
     chain mirrors codexbar_focus._ancestor_pids and lets the popup match the
     session to its KWin window by any pid in the family. Returns ("", [])
-    if no known terminal emulator found."""
+    if no known terminal emulator found. `windows` caches the Tern and T3
+    window scans across the calls of one sweep."""
     cur = start_pid
     chain: list[int] = []
     seen: set[int] = set()
     depth = 12
-    host, host_pid = "", 0
+    host, host_pid, t3_server = "", 0, False
     while cur > 1 and cur not in seen and depth > 0:
         seen.add(cur)
         chain.append(cur)
@@ -181,6 +185,9 @@ def _parent_walk_for_host(start_pid: int) -> tuple[str, list[int]]:
         comm = _comm_of(cur)
         if comm in KNOWN_HOSTS:
             host, host_pid = comm, cur
+            break
+        if _is_t3_server(cur):
+            host, host_pid, t3_server = "t3code", cur, True
             break
         # Match the executable only; arguments can name any path, such as
         # ~/code/<project> passed to the agent.
@@ -208,10 +215,20 @@ def _parent_walk_for_host(start_pid: int) -> tuple[str, list[int]]:
         chain.append(nxt)
         host_pid = nxt
         depth -= 1
+    if windows is None:
+        windows = {}
     if host == "tern":
         # Tern's session daemon keeps panes alive between windows, so the
         # window showing a pane may not be its ancestor.
-        chain.extend(p for p in tern_window_pids() if p not in seen)
+        if "tern" not in windows:
+            windows["tern"] = tern_window_pids()
+        chain.extend(p for p in windows["tern"] if p not in seen)
+    elif t3_server:
+        # A service-managed T3 server runs sessions outside the window's
+        # tree; a session under a window already has that window above.
+        if "t3code" not in windows:
+            windows["t3code"] = t3_window_pids()
+        chain.extend(p for p in windows["t3code"] if p not in seen)
     return host, chain
 
 
@@ -224,6 +241,32 @@ def tern_window_pids() -> list[int]:
             continue
         pid = int(entry.name)
         if _comm_of(pid) == "tern" and _argv_of(pid)[1:2] != ["daemon"]:
+            pids.append(pid)
+    return pids
+
+
+def _is_t3_server(pid: int) -> bool:
+    """True for the `t3` backend that T3 Code 0.0.44 runs as a systemd user
+    service; its sessions are not under the Electron window. It is a Node
+    single-executable whose comm is `node-MainThread`, so match the binary."""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return False
+    # A self-update deletes the version the running server was started from.
+    exe = exe.removesuffix(" (deleted)")
+    return "/.t3/runtime/" in exe and exe.endswith("/t3")
+
+
+def t3_window_pids() -> list[int]:
+    """Pids of T3 Code Electron main processes, which own its windows.
+    Electron helpers rewrite their cmdline into one string with `--type=`."""
+    pids = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if _comm_of(pid) == "t3code" and "--type=" not in " ".join(_argv_of(pid)):
             pids.append(pid)
     return pids
 
@@ -249,13 +292,14 @@ def _is_service_argv(argv: list[str]) -> bool:
 
 
 def _under_t3(pid: int) -> bool:
-    """True when T3 Code started the process. T3 drives Claude through
-    stream-json and Codex through one `app-server` per thread, so these
-    look like services but are its interactive sessions."""
+    """True when T3 Code started the process, from its window or its
+    service-managed server. T3 drives Claude through stream-json and Codex
+    through one `app-server` per thread, so these look like services but
+    are its interactive sessions."""
     seen: set[int] = set()
     cur = _ppid_of(pid)
     while cur > 1 and cur not in seen and len(seen) < 12:
-        if _comm_of(cur) == "t3code":
+        if _comm_of(cur) == "t3code" or _is_t3_server(cur):
             return True
         seen.add(cur)
         cur = _ppid_of(cur)
@@ -364,12 +408,13 @@ def _content_preview(content) -> str:
     return "→ " + tool if tool else ""
 
 
-def _peek_add(buf: list, role: str, text: str, ts, kind: str = "text") -> None:
+def _peek_add(buf: list, role: str, text: str, ts, kind: str = "text") -> bool:
+    """Add a turn to the peek buffer; False when the record is not a turn."""
     if role not in ("user", "assistant") or not isinstance(text, str) or not text:
-        return
+        return False
     text = _peek_squash(text)
     if not text or (role == "user" and not _is_real_user_prompt(text)):
-        return
+        return False
     kind = kind if kind == "tools" else "text"
     timestamp = _ts_ms(ts)
     if kind == "tools" and buf and buf[-1]["kind"] == "tools":
@@ -382,6 +427,7 @@ def _peek_add(buf: list, role: str, text: str, ts, kind: str = "text") -> None:
         buf.append({"role": role, "kind": kind, "text": text, "ts": timestamp,
                     "names": [text] if kind == "tools" else [], "count": 1})
         del buf[:-_PEEK_MSGS]
+    return True
 
 
 def _peek_finalize(buf: list) -> list[dict]:
@@ -414,7 +460,8 @@ def _session_id(value) -> str:
 
 def _parser_state() -> dict:
     return {"sessionId": "", "cwd": "", "windowTitle": "", "model": "",
-            "state": "working", "last_real": "", "last_any": "", "peek": []}
+            "state": "working", "last_real": "", "last_any": "", "recap": "",
+            "recap_stale": False, "peek": []}
 
 
 def _parse_record(provider: str, state: dict, rec: dict) -> None:
@@ -427,6 +474,13 @@ def _parse_record(provider: str, state: dict, rec: dict) -> None:
     if provider == "claude":
         if t == "ai-title":
             state["windowTitle"] = _text(rec.get("aiTitle")).strip()[:4096] or state["windowTitle"]
+            return
+        if t == "system" and rec.get("subtype") == "away_summary":
+            # Claude's recap of an idle session; any later turn outdates it.
+            content = _text(rec.get("content")).strip()
+            recap = content.removesuffix("(disable recaps in /config)")
+            state["recap"] = " ".join(recap.split())[:_RECAP_CHARS]
+            state["recap_stale"] = False
             return
         role = t if t in ("user", "assistant") else rec.get("role")
         if role not in ("user", "assistant"):
@@ -493,8 +547,10 @@ def _parse_record(provider: str, state: dict, rec: dict) -> None:
                         if isinstance(part, dict):
                             text = _text(part.get("text")) or text
     if not (provider == "claude" and rec.get("isSidechain")):
-        _peek_add(state["peek"], role, text or tool, rec.get("timestamp"),
-                  "text" if text else "tools")
+        added = _peek_add(state["peek"], role, text or tool, rec.get("timestamp"),
+                          "text" if text else "tools")
+        if added and provider == "claude":
+            state["recap_stale"] = bool(state["recap"])
     if role == "user" and (text or tool):
         prompt = text or tool
         state["last_any"] = " ".join(prompt.split())[:200]
@@ -505,8 +561,9 @@ def _parse_record(provider: str, state: dict, rec: dict) -> None:
 def _valid_parser_state(state) -> bool:
     if not isinstance(state, dict):
         return False
-    if any(not isinstance(state.get(key), str) or len(state[key]) > 4096
-           for key in _parser_state() if key != "peek"):
+    if any(not isinstance(state.get(key), type(default))
+           or (isinstance(default, str) and len(state[key]) > 4096)
+           for key, default in _parser_state().items() if key != "peek"):
         return False
     peek = state.get("peek")
     if not isinstance(peek, list) or len(peek) > _PEEK_MSGS:
@@ -597,15 +654,11 @@ def _read_transcript(path: str, provider: str) -> dict:
 
 def _transcript_info(path: str, provider: str) -> dict:
     state = _read_transcript(path, provider)
-    return {key: state[key] for key in ("sessionId", "cwd", "windowTitle", "model", "state")} | {
+    return {key: state[key] for key in ("sessionId", "cwd", "windowTitle", "model", "state", "recap")} | {
+        "recapStale": state["recap_stale"],
         "lastPrompt": state["last_real"] or state["last_any"],
         "recent": _peek_finalize(state["peek"]), "identityExact": False,
     }
-
-
-def _tail_claude_transcript(path: str) -> tuple[str, str, list, str]:
-    info = _transcript_info(path, "claude")
-    return info["windowTitle"], info["lastPrompt"], info["recent"], info["model"]
 
 
 # ---------------------------------------------------------------------------
@@ -647,15 +700,10 @@ def _claude_info(pid: int) -> dict:
 
     if sid and cwd:
         transcript = Path.home() / ".claude" / "projects" / _claude_slug(cwd) / f"{sid}.jsonl"
-        title, prompt, recent, model = _tail_claude_transcript(str(transcript))
-        if title:
-            info["windowTitle"] = title
-        if prompt:
-            info["lastPrompt"] = prompt
-        if model:
-            info["model"] = model
-        if recent:
-            info["recent"] = recent
+        parsed = _transcript_info(str(transcript), "claude")
+        for field in ("windowTitle", "lastPrompt", "model", "recent", "recap", "recapStale"):
+            if parsed[field]:
+                info[field] = parsed[field]
     return info
 
 
@@ -803,7 +851,6 @@ def _opencode_info(pid: int) -> dict:
     cwd = _cwd_of(pid)
     peek: list = []
     try:
-        import sqlite3
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
         try:
             row = con.execute(
@@ -1224,9 +1271,10 @@ def _build_records() -> list[dict]:
     records: list[dict] = []
     seen_sids: set[str] = set()
     now_ms = int(time.time() * 1000)
+    windows: dict[str, list[int]] = {}
     for provider, info_fn in _INFO_FN.items():
         for pid in _pgrep(provider):
-            host, ancestors = _parent_walk_for_host(pid)
+            host, ancestors = _parent_walk_for_host(pid, windows)
             # No terminal ancestor means there is no focusable session row.
             if not host:
                 continue
@@ -1242,6 +1290,7 @@ def _build_records() -> list[dict]:
             seen_sids.add(sid)
             cwd = _text(info.get("cwd")) or _cwd_of(pid)
             identity_exact = bool(known_sid) and info.get("identityExact") is True
+            state = (info.get("state") or "working") if known_sid else "untracked"
             records.append({
                 "provider": provider,
                 "sessionId": sid,
@@ -1249,11 +1298,14 @@ def _build_records() -> list[dict]:
                 "pid": pid,
                 "ancestorPids": ancestors,
                 "host": host,
-                "state": (info.get("state") or "working") if known_sid else "untracked",
+                "state": state,
                 "model": _model_text(info.get("model")),
                 "lastPrompt": info.get("lastPrompt") or "",
                 "recent": info.get("recent") or [],
                 "windowTitle": info.get("windowTitle") or "",
+                # Claude's away summary; omp recaps are attached below.
+                "recap": _text(info.get("recap")),
+                "recapStale": info.get("recapStale") is True,
                 "startedAt": 0,
                 "stateChangedAt": now_ms,
                 "updatedAt": now_ms,
@@ -1263,8 +1315,58 @@ def _build_records() -> list[dict]:
                     provider, sid, cwd, identity_exact, info.get("codexHome")
                 ),
             })
+    _attach_omp_recaps([r for r in records if r["provider"] == "omp"], keep_stale=True)
     _mark_tern_panes(records)
     return records
+
+
+_RECAP_CHARS = 600
+
+
+def _attach_omp_recaps(
+    records: list[dict], db: Path | None = None, keep_stale: bool = False
+) -> None:
+    """Set `recap` on omp records from omp's `session_recaps` table.
+
+    omp writes a one-paragraph recap when a session goes idle. A recap older
+    than the session's last turn belongs to an earlier exchange: it is
+    skipped, or with `keep_stale` kept and flagged `recapStale`.
+    `created_at` holds whole seconds, so it may trail by one."""
+    by_id = {r["sessionId"]: r for r in records}
+    if not by_id:
+        return
+    db = db or Path.home() / ".omp" / "agent" / "history.db"
+    if not db.is_file():
+        return
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+        try:
+            # Oldest first, so the newest recap of each session wins; `id`
+            # orders recaps written within one second.
+            rows = con.execute(
+                "SELECT session_id, recap, created_at FROM session_recaps"
+                f" WHERE session_id IN ({','.join('?' * len(by_id))})"
+                " ORDER BY created_at, id",
+                list(by_id),
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return
+    newest = {session_id: (recap, created_at) for session_id, recap, created_at in rows}
+    for session_id, (recap, created_at) in newest.items():
+        record = by_id.get(session_id)
+        if record is None or not isinstance(recap, str) or not isinstance(created_at, int):
+            continue
+        last_turn = max((t.get("ts") or 0 for t in record.get("recent") or []), default=0)
+        stale = (created_at + 1) * 1000 < last_turn
+        if stale and not keep_stale:
+            continue
+        recap = " ".join(recap.split())
+        if recap:
+            record["recap"] = recap[:_RECAP_CHARS]
+            if keep_stale:
+                record["recapStale"] = stale
 
 
 def _tern_visible_panes(socket: str) -> dict[int, str]:
@@ -1445,11 +1547,15 @@ def _history_turns(value: object) -> list[dict]:
             and entry.get("kind") in ("text", "tools")
             and isinstance(entry.get("text"), str)
         ):
-            turns.append({
+            turn = {
                 "role": entry["role"],
                 "kind": entry["kind"],
                 "text": entry["text"][:_PEEK_CHARS],
-            })
+            }
+            ts = entry.get("ts")
+            if isinstance(ts, int) and not isinstance(ts, bool) and ts > 0:
+                turn["ts"] = ts
+            turns.append(turn)
     return turns
 
 
@@ -1496,6 +1602,8 @@ def _history_record(record: dict, active: bool, closed_by: str = "") -> dict:
         "codexHome": codex_home,
         "closedBy": closed_by,
         "recent": _history_turns(record.get("recent")),
+        # History shows only a recap of the session's final exchange.
+        "recap": "" if record.get("recapStale") is True else text("recap")[:_RECAP_CHARS],
     }
 
 
@@ -1640,9 +1748,40 @@ def _aggregate(
     records = _build_records()
     if not _confirmed_boot_change(previous, boot_id):
         records = _apply_desktop_map(records, desktop_map or {})
-    return _merge_snapshot(
+    payload = _merge_snapshot(
         records, previous, boot_id, int(time.time() * 1000), history_limit
     )
+    _backfill_history_recaps(payload["history"])
+    return payload
+
+
+def _backfill_history_recaps(history: list[dict]) -> None:
+    """Rows saved before history kept recaps, or that ended before omp wrote
+    one, pick theirs up later. Rows saved before history kept turn times
+    recover them from the rollout, so an older recap is still rejected."""
+    backfill = []
+    rollouts: dict[str, str] | None = None
+    for row in history:
+        if row["provider"] != "omp" or row["lastState"] != "idle":
+            continue
+        if not any("ts" in turn for turn in row["recent"]):
+            # Saved before turn times were kept: its recap was never dated.
+            row["recap"] = ""
+            if rollouts is None:
+                # One listing serves every row, since rows whose rollout is
+                # gone stay undated and come back on every sweep.
+                rollouts = {
+                    path.stem.rpartition("_")[2]: str(path)
+                    for path in (Path.home() / ".omp" / "agent" / "sessions").glob("*/*_*.jsonl")
+                }
+            rollout = rollouts.get(row["sessionId"])
+            if rollout:
+                row["recent"] = _history_turns(_transcript_info(rollout, "pi")["recent"])
+        elif row["recap"]:
+            continue
+        if any("ts" in turn for turn in row["recent"]):
+            backfill.append(row)
+    _attach_omp_recaps(backfill)
 
 
 def _write_aggregate(payload: dict, path: Path = AGGREGATE_PATH) -> None:
@@ -1785,16 +1924,18 @@ def _locked_sweep(
         _CACHE_ACTIVE = set()
         try:
             records = _build_records()
+            if not _confirmed_boot_change(previous, boot_id):
+                records = _apply_desktop_map(records, desktop_map or {})
+            payload = _merge_snapshot(
+                records, previous, boot_id, int(time.time() * 1000), history_limit
+            )
+            # Inside the cache window, so rollouts it parses stay cached.
+            _backfill_history_recaps(payload["history"])
             _TRANSCRIPT_CACHE = {key: value for key, value in _TRANSCRIPT_CACHE.items()
                                  if key in _CACHE_ACTIVE}
             _write_aggregate({"version": _CACHE_VERSION, "entries": _TRANSCRIPT_CACHE}, cache_path)
         finally:
             _CACHE_ACTIVE = None
-        if not _confirmed_boot_change(previous, boot_id):
-            records = _apply_desktop_map(records, desktop_map or {})
-        payload = _merge_snapshot(
-            records, previous, boot_id, int(time.time() * 1000), history_limit
-        )
         _write_aggregate(payload, aggregate_path)
         return payload, True
 

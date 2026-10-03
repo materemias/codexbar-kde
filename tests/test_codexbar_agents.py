@@ -42,6 +42,7 @@ HISTORY_FIELDS = {
     "codexHome",
     "closedBy",
     "recent",
+    "recap",
 }
 
 
@@ -118,7 +119,7 @@ class ModelExtractionTests(unittest.TestCase):
                 json.dumps(row, separators=(",", ":")) for row in rows
             ) + "\n")
 
-            *_, model = agents._tail_claude_transcript(str(path))
+            model = agents._transcript_info(str(path), "claude")["model"]
 
         self.assertEqual(model, "anthropic/claude-opus-5")
 
@@ -271,7 +272,7 @@ class SnapshotMergeTests(unittest.TestCase):
             [turn["text"] for turn in row["recent"]],
             [f"turn {n}" for n in range(2, 8)] + ["x" * 320],
         )
-        self.assertEqual(set(row["recent"][0]), {"role", "kind", "text"})
+        self.assertEqual(set(row["recent"][0]), {"role", "kind", "text", "ts"})
 
     def test_unresolved_reboot_history_survives_reboots_and_unions_new_active(self) -> None:
         first = agents._merge_snapshot(
@@ -887,8 +888,126 @@ class T3CodeTests(unittest.TestCase):
 
     def test_host_walk_stops_at_t3_not_code_in_args(self) -> None:
         a, b, c = self._patch()
-        with a, b, c:
+        with a, b, c, mock.patch.object(agents, "t3_window_pids", return_value=[4, 9]):
+            # Window 9 is another T3 window; this session sits under window 4.
             self.assertEqual(agents._parent_walk_for_host(10), ("t3code", [10, 5, 4]))
+
+    def test_service_managed_server_hosts_sessions(self) -> None:
+        # T3 Code 0.0.44 runs its server as a systemd user service: a Node
+        # single-executable named node-MainThread, away from the window.
+        comm = {20: "claude", 21: "codex", 7: "node-MainThread", 6: "node-MainThread",
+                3: "systemd", 4: "t3code"}
+        ppid = {20: 7, 21: 7, 7: 6, 6: 3, 4: 3, 3: 1}
+        argv = {
+            20: ["claude", "--output-format", "stream-json"],
+            21: ["codex", "app-server"],
+            7: ["/home/u/.t3/runtime/versions/0.0.44/t3", "serve"],
+            6: ["/home/u/.t3/runtime/versions/0.0.44/t3", "__service-launcher"],
+            3: ["/usr/lib/systemd/systemd", "--user"],
+            4: ["/opt/t3code-bin/t3code"],
+        }
+
+        def readlink(path: str) -> str:
+            pid = int(path.split("/")[2])
+            if pid not in argv:
+                raise OSError
+            # The running server's version was deleted by a self-update.
+            return argv[pid][0] + (" (deleted)" if pid == 7 else "")
+
+        out = subprocess.CompletedProcess([], 0, stdout="20\n21\n")
+        with mock.patch.object(agents, "_comm_of", side_effect=lambda p: comm.get(p, "")), \
+                mock.patch.object(agents, "_ppid_of", side_effect=lambda p: ppid.get(p, 0)), \
+                mock.patch.object(agents, "_argv_of", side_effect=lambda p: argv.get(p, [])), \
+                mock.patch.object(agents.os, "readlink", side_effect=readlink), \
+                mock.patch.object(agents, "t3_window_pids", return_value=[4]), \
+                mock.patch.object(agents.subprocess, "run", return_value=out):
+            self.assertEqual(agents._pgrep("claude"), [20, 21])
+            self.assertEqual(agents._parent_walk_for_host(20), ("t3code", [20, 7, 4]))
+
+
+class OmpRecapTests(unittest.TestCase):
+    def test_latest_recap_is_skipped_or_flagged_when_a_later_turn_followed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "history.db"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE session_recaps (id INTEGER PRIMARY KEY,"
+                        " session_id TEXT, cwd TEXT, recap TEXT, created_at INTEGER)")
+            con.executemany(
+                "INSERT INTO session_recaps (session_id, cwd, recap, created_at)"
+                " VALUES (?, '/w', ?, ?)",
+                [("a", "old", 100), ("a", "first", 200), ("a", "Done:\n  next   step", 200),
+                 ("b", "stale", 100), ("c", "working", 100)],
+            )
+            con.commit()
+            con.close()
+            def records():
+                return [
+                    {"provider": "omp", "sessionId": "a", "recent": [{"ts": 200_900}]},
+                    {"provider": "omp", "sessionId": "b", "recent": [{"ts": 150_000}]},
+                ]
+            ended, live = records(), records()
+            agents._attach_omp_recaps(ended, db)
+            agents._attach_omp_recaps(live, db, keep_stale=True)
+        self.assertEqual(ended[0]["recap"], "Done: next step")
+        self.assertNotIn("recapStale", ended[0])
+        self.assertNotIn("recap", ended[1])
+        self.assertEqual((live[1]["recap"], live[1]["recapStale"]), ("stale", True))
+
+    def test_history_keeps_only_a_recap_of_the_final_exchange(self) -> None:
+        fresh = active("omp", "fresh", state="idle", recap="Done.")
+        stale = active("omp", "stale", state="idle", recap="Earlier.", recapStale=True)
+        running = agents._merge_snapshot([fresh, stale], {"bootId": "boot-a"}, "boot-a", 100)
+        rows = agents._merge_snapshot([], running, "boot-a", 200)["history"]
+        self.assertEqual({row["sessionId"]: row["recap"] for row in rows},
+                         {"fresh": "Done.", "stale": ""})
+
+    def test_claude_away_summary_turns_stale_after_the_next_turn(self) -> None:
+        summary = {"type": "system", "subtype": "away_summary",
+                   "content": "Done.\nNext: ship. (disable recaps in /config)\n"}
+        aside = [{"type": "assistant", "isSidechain": True,
+                  "message": {"role": "assistant", "content": "subagent"}},
+                 {"type": "user", "message": {"role": "user",
+                                              "content": "<command-name>/model</command-name>"}}]
+        turn = {"type": "user", "message": {"role": "user", "content": "go on"}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "claude.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in [summary, *aside]))
+            info = agents._transcript_info(str(path), "claude")
+            self.assertEqual((info["recap"], info["recapStale"]), ("Done. Next: ship.", False))
+            path.write_text("".join(json.dumps(r) + "\n" for r in [summary, *aside, turn]))
+            info = agents._transcript_info(str(path), "claude")
+            self.assertEqual((info["recap"], info["recapStale"]), ("Done. Next: ship.", True))
+
+    def test_legacy_history_row_rejects_recap_older_than_its_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / ".omp" / "agent").mkdir(parents=True)
+            con = sqlite3.connect(home / ".omp" / "agent" / "history.db")
+            con.execute("CREATE TABLE session_recaps (id INTEGER PRIMARY KEY,"
+                        " session_id TEXT, cwd TEXT, recap TEXT, created_at INTEGER)")
+            con.execute("INSERT INTO session_recaps (session_id, cwd, recap, created_at)"
+                        " VALUES ('old', '/w', 'earlier exchange', 100)")
+            con.commit()
+            con.close()
+            slug = home / ".omp" / "agent" / "sessions" / "-w"
+            slug.mkdir(parents=True)
+            (slug / "2026_old.jsonl").write_text(json.dumps({
+                "type": "message", "timestamp": 500_000,
+                "message": {"role": "assistant", "content": "later", "stopReason": "stop"},
+            }) + "\n")
+            saved = home / "agents.json"
+            saved.write_text(json.dumps({"bootId": "boot-a", "agents": [], "history": [
+                history("omp", "old", lastState="idle", closedBy="exit",
+                        recap="earlier exchange",
+                        recent=[{"role": "assistant", "kind": "text", "text": "later"}]),
+            ]}))
+            with (mock.patch.object(agents.Path, "home", return_value=home),
+                  mock.patch.object(agents, "_read_boot_id", return_value="boot-a"),
+                  mock.patch.object(agents, "_build_records", return_value=[])):
+                agents._locked_sweep(aggregate_path=saved)
+            row = json.loads(saved.read_text())["history"][0]
+        self.assertEqual(row["recap"], "")
+        self.assertEqual(row["recent"][0]["ts"], 500_000_000)
 
 
 class TernHostTests(unittest.TestCase):
@@ -1214,7 +1333,7 @@ def counted(*args):
     count[0] += 1
     return parse(*args)
 a._parse_record = counted
-a._build_records = lambda: (a._tail_claude_transcript(sys.argv[2]) and []) if sys.argv[4] != "prune" else []
+a._build_records = lambda: (a._transcript_info(sys.argv[2], "claude") and []) if sys.argv[4] != "prune" else []
 sweep = a._locked_sweep
 a._locked_sweep = lambda *args, **kwargs: sweep(*args, **kwargs, aggregate_path=Path(sys.argv[3]))
 a.main(["--once"])
