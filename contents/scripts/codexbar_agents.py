@@ -29,6 +29,7 @@ import fcntl
 import json
 import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1735,6 +1736,8 @@ def _merge_snapshot(
         "counts": counts,
         "agents": current,
         "history": rebooted + exited,
+        # Live kitty rows offer a move to Tern only when it is installed.
+        "ternInstalled": shutil.which("tern") is not None,
     }
 
 

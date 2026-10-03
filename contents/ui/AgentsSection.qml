@@ -261,6 +261,82 @@ ColumnLayout {
         return value.replace(/^claude-/, "")
     }
 
+    // Model vendor tint, not the harness: Claude models orange, OpenAI
+    // models violet (orange/violet stays apart under red-green color
+    // blindness), anything else neutral.
+    function modelTint(model) {
+        var m = _modelName(model).toLowerCase()
+        if (/^(opus|sonnet|haiku|claude)/.test(m)) return "#e08a5f"
+        if (/^(gpt|codex|o\d)/.test(m)) return "#a78bfa"
+        return Kirigami.Theme.textColor
+    }
+
+    // Age brightness by recency: the last 15 minutes full, hours muted,
+    // a day or more dim.
+    function ageOpacity(ms) {
+        if (!ms) return 0.55
+        var age = root.nowMs - ms
+        return age < 900000 ? 1 : age < 86400000 ? 0.7 : 0.5
+    }
+
+    // State marker, distinct by shape as well as color: working is a
+    // filled dot with an expanding halo, blocked a diamond, idle a hollow
+    // ring (green and breathing while `fresh`), untracked a filled dot.
+    component StateMark: Item {
+        id: mark
+        property string agentState: "idle"
+        property bool fresh: false
+        property bool animated: true
+        property real size: 10
+        readonly property color tint: fresh
+            ? Kirigami.Theme.positiveTextColor : root.agentStateColor(agentState)
+        implicitWidth: size
+        implicitHeight: size
+
+        Rectangle {
+            id: halo
+            property real t: 0
+            anchors.centerIn: parent
+            width: mark.size; height: mark.size; radius: width / 2
+            color: "transparent"
+            border.width: 1.5
+            border.color: mark.tint
+            visible: mark.animated && mark.agentState === "working"
+            scale: 1 + t * 1.1
+            opacity: 0.8 * (1 - t)
+            NumberAnimation on t {
+                running: halo.visible
+                loops: Animation.Infinite
+                from: 0; to: 1
+                duration: 1400
+                easing.type: Easing.OutQuad
+            }
+        }
+
+        Rectangle {
+            id: core
+            readonly property bool diamond: mark.agentState === "blocked"
+            readonly property bool ring: mark.agentState === "idle"
+            property real pulse: 0
+            anchors.centerIn: parent
+            width: diamond ? mark.size * 0.78 : mark.size
+            height: width
+            radius: diamond ? 1.5 : width / 2
+            rotation: diamond ? 45 : 0
+            color: ring ? "transparent" : mark.tint
+            border.width: ring ? 1.5 : 0
+            border.color: mark.tint
+            opacity: mark.fresh ? 1 - pulse * 0.6 : 1
+            SequentialAnimation on pulse {
+                running: mark.animated && mark.fresh
+                loops: Animation.Infinite
+                alwaysRunToEnd: true
+                NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+                NumberAnimation { to: 0; duration: 700; easing.type: Easing.InOutSine }
+            }
+        }
+    }
+
     function agentKey(record) {
         if (!record || !record.provider || !record.sessionId) return ""
         return JSON.stringify([record.provider, record.sessionId])
@@ -331,26 +407,22 @@ ColumnLayout {
         // Count chips. Render only non-zero states so the row stays compact
         // when most agents are idle.
         Repeater {
-            model: [
-                { key: "blocked",   label: "blocked",   color: "#ef4444" },
-                { key: "working",   label: "working",   color: "#22c55e" },
-                { key: "idle",      label: "idle",      color: "#9ca3af" },
-                { key: "untracked", label: "untracked", color: "#3b82f6" }
-            ]
+            model: ["blocked", "working", "idle", "untracked"]
             delegate: RowLayout {
-                required property var modelData
-                readonly property int v: agents.counts[modelData.key] || 0
+                required property string modelData
+                readonly property int v: agents.counts[modelData] || 0
                 visible: v > 0
                 spacing: 3
                 Layout.alignment: Qt.AlignVCenter
 
-                Rectangle {
-                    width: 8; height: 8; radius: 4
-                    color: modelData.color
+                StateMark {
+                    agentState: modelData
+                    animated: false
+                    size: 8
                     Layout.alignment: Qt.AlignVCenter
                 }
                 PC3.Label {
-                    text: v + " " + modelData.label
+                    text: v + " " + modelData
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                     opacity: 0.85
                     Layout.alignment: Qt.AlignVCenter
@@ -397,32 +469,64 @@ ColumnLayout {
         text: root.agentsError
     }
 
-    // Folder-grouped session rows. Each group: a small bold folder header
-    // followed by indented per-session rows.
+    PC3.Label {
+        visible: root.teleportError.length > 0
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
+        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+        color: Kirigami.Theme.negativeTextColor
+        text: root.teleportError
+    }
+
+    // Folder-grouped session rows. Each group is a card: a small
+    // uppercase folder header followed by its session rows.
     Repeater {
         model: agents.groups
-        delegate: ColumnLayout {
+        delegate: Rectangle {
             id: groupItem
             Layout.fillWidth: true
-            spacing: 1
+            // With the column's smallSpacing, cards sit 10 px apart.
+            Layout.topMargin: 6
             required property var modelData
             visible: groupItem.modelData.sessions.some(function(s) {
                 return agents.recordMatches(s)
             })
+            implicitHeight: groupCol.implicitHeight + 10
+            radius: 6
+            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                Kirigami.Theme.textColor.b, 0.035)
+            border.width: 1
+            border.color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                Kirigami.Theme.textColor.b, 0.08)
 
-            PC3.Label {
-                text: groupItem.modelData.folder
-                font.weight: Font.Bold
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                opacity: 0.8
-                Layout.fillWidth: true
-                Layout.topMargin: 4
-                Layout.bottomMargin: 1
-            }
+            ColumnLayout {
+                id: groupCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 4
+                anchors.topMargin: 6
+                spacing: 1
 
-            Repeater {
-                model: groupItem.modelData.sessions
-                delegate: sessionRow
+                PC3.Label {
+                    text: groupItem.modelData.folder
+                    textFormat: Text.PlainText
+                    font.capitalization: Font.AllUppercase
+                    font.weight: Font.DemiBold
+                    font.letterSpacing: 0.8
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize * 0.92
+                    opacity: 0.55
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 6
+                    Layout.bottomMargin: 3
+                }
+
+                Repeater {
+                    model: groupItem.modelData.sessions
+                    delegate: sessionRow
+                }
             }
         }
     }
@@ -434,7 +538,6 @@ ColumnLayout {
         Item {
             id: rowItem
             Layout.fillWidth: true
-            Layout.leftMargin: 6
             required property var modelData
             visible: agents.recordMatches(modelData)
 
@@ -486,24 +589,10 @@ ColumnLayout {
                                 && rowItem.sessionKey === root.focusedAgentKey
                         }
 
-                        Rectangle {
-                            property real pulse: 0
+                        StateMark {
                             anchors.centerIn: parent
-                            width: 10; height: 10; radius: 5
-                            color: rowItem.recentlyIdle
-                                ? Kirigami.Theme.positiveTextColor : rowItem.tint
-                            opacity: rowItem.recentlyIdle ? 1 - pulse * 0.65 : 1
-                            scale: rowItem.recentlyIdle ? 1 + pulse * 0.35 : 1
-
-                            // Pulse the state dot's brightness and size for the
-                            // first five minutes after a session goes idle.
-                            SequentialAnimation on pulse {
-                                running: rowItem.recentlyIdle
-                                loops: Animation.Infinite
-                                alwaysRunToEnd: true
-                                NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
-                                NumberAnimation { to: 0; duration: 700; easing.type: Easing.InOutSine }
-                            }
+                            agentState: rowItem.state
+                            fresh: rowItem.recentlyIdle
                         }
                     }
 
@@ -531,9 +620,9 @@ ColumnLayout {
                         id: modelText
                         text: agents.highlighted(agents._modelName(rowItem.modelData.model))
                         textFormat: agents.filterText ? Text.StyledText : Text.PlainText
-                        color: Kirigami.Theme.linkColor
+                        color: agents.modelTint(rowItem.modelData.model)
+                        opacity: 0.85
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        font.weight: Font.DemiBold
                         elide: Text.ElideMiddle
                         horizontalAlignment: Text.AlignRight
                         Layout.preferredWidth: Kirigami.Units.gridUnit * 5
@@ -551,9 +640,9 @@ ColumnLayout {
 
                     PC3.Label {
                         text: agents._ageLabel(rowItem.modelData.stateChangedAt)
-                        color: rowItem.tint
+                        opacity: agents.ageOpacity(rowItem.modelData.stateChangedAt)
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        font.weight: Font.DemiBold
+                        font.weight: opacity === 1 ? Font.DemiBold : Font.Normal
                         horizontalAlignment: Text.AlignRight
                         Layout.preferredWidth: Kirigami.Units.gridUnit * 2
                         Layout.alignment: Qt.AlignVCenter
@@ -577,11 +666,18 @@ ColumnLayout {
                             width: desktopChipLabel.implicitWidth + 8
                             height: desktopChipLabel.implicitHeight + 3
                             radius: 3
+                            // Current desktop: a soft fill instead of the
+                            // solid highlight, so a column of them stays quiet.
                             color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
-                                ? Kirigami.Theme.highlightColor : "transparent"
+                                ? Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                    Kirigami.Theme.highlightColor.g,
+                                    Kirigami.Theme.highlightColor.b, 0.3)
+                                : "transparent"
                             border.width: 1
                             border.color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
-                                ? Kirigami.Theme.highlightColor
+                                ? Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                    Kirigami.Theme.highlightColor.g,
+                                    Kirigami.Theme.highlightColor.b, 0.6)
                                 : Qt.rgba(Kirigami.Theme.textColor.r,
                                     Kirigami.Theme.textColor.g,
                                     Kirigami.Theme.textColor.b, 0.3)
@@ -592,11 +688,9 @@ ColumnLayout {
                                 text: rowItem.desktopInfo ? rowItem.desktopInfo.label : ""
                                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                                 font.weight: Font.DemiBold
-                                color: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
-                                    ? Kirigami.Theme.highlightedTextColor
-                                    : Kirigami.Theme.textColor
+                                color: Kirigami.Theme.textColor
                                 opacity: rowItem.desktopInfo && rowItem.desktopInfo.onCurrent
-                                    ? 1 : 0.65
+                                    ? 0.9 : 0.55
                             }
                         }
                     }
@@ -668,52 +762,36 @@ ColumnLayout {
 
                 // Inline peek panel: the last few turns of the session,
                 // straight from its transcript via the aggregator's
-                // `recent` field.
+                // `recent` field. Reads like a chat: your turns in tinted
+                // bubbles on the right, the agent's as plain text, tool
+                // runs as one muted line.
                 Rectangle {
                     visible: rowItem.peekOpen
                     Layout.fillWidth: true
-                    Layout.leftMargin: 18
+                    Layout.leftMargin: 26
+                    Layout.rightMargin: 4
                     Layout.topMargin: 2
-                    Layout.bottomMargin: 4
-                    implicitHeight: peekCol.implicitHeight + 10
-                    radius: 4
-                    color: Kirigami.Theme.backgroundColor
-                    border.color: Qt.rgba(
-                        Kirigami.Theme.textColor.r,
-                        Kirigami.Theme.textColor.g,
-                        Kirigami.Theme.textColor.b,
-                        0.14
-                    )
-                    border.width: 1
+                    Layout.bottomMargin: 6
+                    implicitHeight: peekCol.implicitHeight + 16
+                    radius: 6
+                    color: Qt.rgba(0, 0, 0, 0.18)
 
                     ColumnLayout {
                         id: peekCol
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
-                        anchors.margins: 5
-                        spacing: 3
+                        anchors.margins: 8
+                        spacing: 6
 
                         PC3.Label {
                             Layout.fillWidth: true
-                            text: (rowItem.modelData.cwd || "")
+                            text: (rowItem.modelData.cwd || "").replace(/^\/home\/[^\/]+/, "~")
                                 + (rowItem.modelData.host ? "  ·  " + rowItem.modelData.host : "")
                             textFormat: Text.PlainText
                             font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            font.weight: Font.DemiBold
-                            opacity: 0.75
+                            opacity: 0.5
                             elide: Text.ElideMiddle
-                        }
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 1
-                            color: Qt.rgba(
-                                Kirigami.Theme.textColor.r,
-                                Kirigami.Theme.textColor.g,
-                                Kirigami.Theme.textColor.b,
-                                0.14
-                            )
                         }
 
                         Repeater {
@@ -723,76 +801,40 @@ ColumnLayout {
                                 required property var modelData
                                 readonly property bool toolTurn: modelData.kind === "tools"
                                 readonly property bool userTurn: modelData.role === "user"
-                                readonly property color accent: {
-                                    if (toolTurn) return Kirigami.Theme.neutralTextColor
-                                    if (userTurn) return Kirigami.Theme.highlightColor
-                                    return Kirigami.Theme.linkColor
-                                }
+                                readonly property int padX: userTurn ? 8 : 0
+                                readonly property int padY: userTurn ? 4 : 0
 
-                                Layout.fillWidth: true
-                                implicitHeight: turnRow.implicitHeight + 6
-                                radius: 3
-                                color: Qt.rgba(
-                                    accent.r,
-                                    accent.g,
-                                    accent.b,
-                                    0.14
-                                )
-                                border.color: Qt.rgba(
-                                    accent.r,
-                                    accent.g,
-                                    accent.b,
-                                    0.40
-                                )
-                                border.width: 1
+                                Layout.fillWidth: !userTurn
+                                Layout.alignment: userTurn ? Qt.AlignRight : Qt.AlignLeft
+                                Layout.preferredWidth: userTurn ? turnText.implicitWidth + 2 * padX : -1
+                                Layout.maximumWidth: userTurn ? peekCol.width * 0.85 : peekCol.width
+                                implicitHeight: turnText.implicitHeight + 2 * padY
+                                radius: 8
+                                color: userTurn
+                                    ? Qt.rgba(Kirigami.Theme.highlightColor.r,
+                                        Kirigami.Theme.highlightColor.g,
+                                        Kirigami.Theme.highlightColor.b, 0.22)
+                                    : "transparent"
 
-                                Rectangle {
+                                PC3.Label {
+                                    id: turnText
                                     anchors.left: parent.left
+                                    anchors.right: parent.right
                                     anchors.top: parent.top
-                                    anchors.bottom: parent.bottom
-                                    anchors.leftMargin: 1
-                                    anchors.topMargin: 1
-                                    anchors.bottomMargin: 1
-                                    width: 3
-                                    color: turnCard.accent
-                                }
-
-                                RowLayout {
-                                    id: turnRow
-                                    anchors.fill: parent
-                                    anchors.margins: 3
-                                    anchors.leftMargin: 8
-                                    spacing: Kirigami.Units.smallSpacing
-
-                                    PC3.Label {
-                                        text: turnCard.toolTurn
-                                            ? "TOOLS"
-                                            : (turnCard.userTurn ? "YOU" : "AI")
-                                        textFormat: Text.PlainText
-                                        color: turnCard.accent
-                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                        font.weight: Font.DemiBold
-                                        font.italic: turnCard.toolTurn
-                                        Layout.preferredWidth: Kirigami.Units.gridUnit * 2
-                                        Layout.minimumWidth: implicitWidth
-                                        Layout.alignment: Qt.AlignTop
-                                        horizontalAlignment: Text.AlignRight
-                                    }
-
-                                    PC3.Label {
-                                        text: turnCard.modelData.text || ""
-                                        textFormat: Text.PlainText
-                                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                        font.italic: turnCard.toolTurn
-                                        color: Kirigami.Theme.textColor
-                                        opacity: turnCard.toolTurn ? 0.7 : 1
-                                        wrapMode: turnCard.toolTurn ? Text.NoWrap : Text.Wrap
-                                        maximumLineCount: turnCard.toolTurn ? 1 : 4
-                                        elide: Text.ElideRight
-                                        lineHeight: 1.17
-                                        lineHeightMode: Text.ProportionalHeight
-                                        Layout.fillWidth: true
-                                    }
+                                    anchors.leftMargin: turnCard.padX
+                                    anchors.rightMargin: turnCard.padX
+                                    anchors.topMargin: turnCard.padY
+                                    text: (turnCard.toolTurn ? "Tools: " : "")
+                                        + (turnCard.modelData.text || "")
+                                    textFormat: Text.PlainText
+                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    font.italic: turnCard.toolTurn
+                                    opacity: turnCard.toolTurn ? 0.45 : 0.92
+                                    wrapMode: turnCard.toolTurn ? Text.NoWrap : Text.Wrap
+                                    maximumLineCount: turnCard.toolTurn ? 1 : 4
+                                    elide: Text.ElideRight
+                                    lineHeight: 1.15
+                                    lineHeightMode: Text.ProportionalHeight
                                 }
                             }
                         }
@@ -828,8 +870,9 @@ ColumnLayout {
                 return age >= 300000 ? 0 : (300000 - age) / 300000
             }
 
-            // "Just finished" green wash. Sits below the selection/hover
-            // highlight so both can apply at once.
+            // State wash: working green and blocked red while in that
+            // state; "just finished" green fading over five minutes. Sits
+            // below the selection/hover highlight so both can apply.
             Rectangle {
                 z: -1
                 anchors.left: parent.left
@@ -837,8 +880,10 @@ ColumnLayout {
                 anchors.top: parent.top
                 height: rowContent.implicitHeight + 4
                 radius: 4
-                color: root.agentStateColor("working")
-                opacity: rowItem._idleFreshness * 0.08
+                color: root.agentStateColor(rowItem.state === "blocked" ? "blocked" : "working")
+                opacity: rowItem.state === "working" ? 0.09
+                    : rowItem.state === "blocked" ? 0.12
+                    : rowItem._idleFreshness * 0.08
             }
 
             Rectangle {
@@ -861,7 +906,8 @@ ColumnLayout {
                 height: rowContent.implicitHeight + 4
                 radius: 1
                 color: rowItem.tint
-                opacity: rowItem.selected ? 1
+                opacity: rowItem.selected || rowItem.state === "working"
+                    || rowItem.state === "blocked" ? 1
                     : rowMouse.containsMouse ? 0.7 : 0
                 Behavior on opacity { NumberAnimation { duration: 120 } }
             }
@@ -905,35 +951,57 @@ ColumnLayout {
                 }
             }
 
-            // Peek button floats over the row's right end, so it takes no
+            // Row actions float over the row's right end, so they take no
             // column space; shown on hover and while the peek is open.
             Rectangle {
                 readonly property bool shown: rowMouse.containsMouse
-                    || peekButton.hovered || rowItem.peekOpen
+                    || peekButton.hovered || teleportButton.hovered || rowItem.peekOpen
                 anchors.right: parent.right
                 anchors.rightMargin: 4
                 y: (rowContent.height - height) / 2
-                width: peekButton.implicitWidth
-                height: peekButton.implicitHeight
+                width: rowActions.implicitWidth
+                height: rowActions.implicitHeight
                 radius: 4
                 color: Kirigami.Theme.backgroundColor
                 opacity: shown ? 1 : 0
                 visible: opacity > 0
                 Behavior on opacity { NumberAnimation { duration: 120 } }
 
-                PC3.ToolButton {
-                    id: peekButton
-                    anchors.fill: parent
-                    icon.name: rowItem.peekOpen ? "arrow-up" : "arrow-down"
-                    implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
-                    implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
-                    padding: 1
-                    onClicked: {
-                        agents.peekKey = rowItem.peekOpen ? "" : rowItem.sessionKey
+                Row {
+                    id: rowActions
+
+                    // Moves a live kitty session into a new Tern tab.
+                    PC3.ToolButton {
+                        id: teleportButton
+                        readonly property bool idle: rowItem.state === "idle"
+                        visible: root.canTeleport(rowItem.modelData)
+                        enabled: !root.teleports[rowItem.sessionKey]
+                        opacity: idle ? 1 : 0.4
+                        icon.name: "tab-new"
+                        implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                        implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                        padding: 1
+                        onClicked: root.teleportAgent(rowItem.modelData)
+                        PC3.ToolTip.visible: hovered
+                        PC3.ToolTip.text: idle
+                            ? "Teleport to a new Tern tab (closes this kitty window)"
+                            : "Teleport to Tern once the session is idle"
+                        PC3.ToolTip.delay: 400
                     }
-                    PC3.ToolTip.visible: hovered
-                    PC3.ToolTip.text: "Peek at recent messages (or press Space)"
-                    PC3.ToolTip.delay: 400
+
+                    PC3.ToolButton {
+                        id: peekButton
+                        icon.name: rowItem.peekOpen ? "arrow-up" : "arrow-down"
+                        implicitWidth: Kirigami.Units.iconSizes.smallMedium + 6
+                        implicitHeight: Kirigami.Units.iconSizes.smallMedium + 6
+                        padding: 1
+                        onClicked: {
+                            agents.peekKey = rowItem.peekOpen ? "" : rowItem.sessionKey
+                        }
+                        PC3.ToolTip.visible: hovered
+                        PC3.ToolTip.text: "Peek at recent messages (or press Space)"
+                        PC3.ToolTip.delay: 400
+                    }
                 }
             }
 

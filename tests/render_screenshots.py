@@ -64,9 +64,11 @@ def fixture():
         ("beacon", "Review webhook errors", "claude", "blocked", "claude-sonnet-4-6"),
         ("beacon", "Improve log grouping", "codex", "working", "gpt-5.4"),
     ]):
-        agents.append({"provider": provider, "sessionId": f"00000000-0000-4000-8000-{i + 1:012d}",
+        session_id = f"00000000-0000-4000-8000-{i + 1:012d}"
+        agents.append({"provider": provider, "sessionId": session_id,
                        "cwd": f"/workspace/{folder}", "windowTitle": title, "state": state,
                        "model": model, "host": "kitty", "stateChangedAt": NOW_MS - (i + 10) * 60000,
+                       "resumeCommand": f"cd -- /workspace/{folder} && {provider} --resume {session_id}",
                        "recent": [
                            {"role": "user", "text": "Check whether a failed cache refresh keeps the previous result."},
                            {"role": "assistant", "text": "The previous value stays available while refresh runs. I am checking the failure path."},
@@ -87,7 +89,8 @@ def fixture():
               for state in ("working", "blocked", "idle", "untracked")}
     counts["total"] = len(agents)
     return {"snapshot": {"cliVersion": "0.68.0", "updatedAt": NOW.isoformat(), "providers": providers},
-            "agentSnapshot": {"agents": agents, "history": history, "counts": counts}}
+            "agentSnapshot": {"agents": agents, "history": history, "counts": counts,
+                              "ternInstalled": True}}
 
 
 # Extract only named pure presentation functions; fail if the source contract moves.
@@ -96,7 +99,7 @@ _forecastPercent codexForecastState formatCodexForecast formatCodexForecastIncid
 formatCodexForecastAlert lastCodexIndex formatResetCredits formatReset
 windowSpanMs compositeStats _compositeWindow codexCompositeRecord firstProviderIndex
 windowLabel accountAvailabilityIndicator providerDisplayName agentStateColor cwdLabel ageFrom
-historyLaunchAllowed""".split()
+historyLaunchAllowed launchHost canTeleport""".split()
 
 
 def display_helpers():
@@ -149,6 +152,9 @@ Window {
         property string historyLaunchError: ""
         function desktopInfoFor(record) { return null }
         property var historyLaunches: ({})
+        property var teleports: ({})
+        property string teleportError: ""
+        function teleportAgent(record) { throw new Error("Preview must never move a session") }
         function launchHistory(record) { throw new Error("Preview must never launch a session") }
         function launchAllHistory(records) { throw new Error("Preview must never launch sessions") }
         function dismissHistory(records) { throw new Error("Preview must never mutate history") }

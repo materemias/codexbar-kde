@@ -462,6 +462,49 @@ PlasmoidItem {
         }
     }
 
+    // Live kitty sessions moved to a new Tern tab. Keys are agentKey() JSON
+    // of moves in flight; the row's button stays disabled until it ends.
+    property var teleports: ({})
+    property string teleportError: ""
+    property var _teleportCommands: ({})
+
+    function canTeleport(record) {
+        return !!record && record.host === "kitty" && !!record.resumeCommand
+            && root.agentSnapshot.ternInstalled === true
+    }
+
+    function teleportAgent(record) {
+        if (!root.canTeleport(record)) return
+        if (record.state !== "idle") {
+            root.teleportError = "Teleport waits until the session is idle."
+            return
+        }
+        var key = JSON.stringify([record.provider, record.sessionId])
+        if (root.teleports[key]) return
+        var moving = Object.assign({}, root.teleports)
+        moving[key] = true
+        root.teleports = moving
+        root.teleportError = ""
+        var cmd = "python3 " + Command.shellQuote(root.focusScriptPath)
+            + " --teleport " + Command.shellQuote(record.provider)
+            + " " + Command.shellQuote(record.sessionId)
+        root._teleportCommands[cmd] = key
+        teleportRunner.run(cmd)
+    }
+
+    Process.CommandRunner {
+        id: teleportRunner
+        onFinished: function(command, exitCode, standardOutput, standardError) {
+            var moving = Object.assign({}, root.teleports)
+            delete moving[root._teleportCommands[command]]
+            delete root._teleportCommands[command]
+            root.teleports = moving
+            root.teleportError = exitCode === 0 ? ""
+                : (standardError.trim() || "teleport failed (exit " + exitCode + ")")
+            root.runAggregator()
+        }
+    }
+
     // Removes ended sessions from History. The aggregator owns agents.json,
     // so it performs the write under its lock; the rows hide immediately.
     function dismissHistory(records) {

@@ -229,7 +229,8 @@ class SnapshotMergeTests(unittest.TestCase):
         snapshot = agents._merge_snapshot([], previous, "boot-b", 200)
 
         self.assertEqual(
-            set(snapshot), {"bootId", "updatedAt", "counts", "agents", "history"}
+            set(snapshot),
+            {"bootId", "updatedAt", "counts", "agents", "history", "ternInstalled"},
         )
         self.assertEqual(snapshot["bootId"], "boot-b")
         self.assertEqual(snapshot["agents"], [])

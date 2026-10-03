@@ -132,6 +132,13 @@ credentials" for setup.
   launched; QML keeps the cooldown only for those. `codexbar_agents.py --dismiss <uri-json [[provider, id]]>`
   removes history rows under the aggregate writer lock; QML never edits
   `agents.json` itself.
+- `codexbar_focus.py --teleport <provider> <sessionId>` moves an idle live
+  kitty session to a new Tern tab. It re-reads the pid's session id and
+  state, starts Tern first, sends the agent SIGHUP (SIGTERM after 3 s),
+  hangs up its shell when that shell is kitty's direct child (closing the
+  window), and resumes only after the agent exited, since a session file has
+  one live writer. QML shows the button when `agents.json` `ternInstalled`
+  is true and the row has a `resumeCommand`.
 
 ## Plasma constraints
 

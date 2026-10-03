@@ -192,5 +192,70 @@ class LaunchTests(unittest.TestCase):
                          [["omp", "d2"], ["omp", "unknown"]])
 
 
+class TeleportTests(unittest.TestCase):
+    AGENT, SHELL, KITTY = 500, 400, 300
+
+    def teleport(self, info: dict | None = None, tern_ready: bool = True,
+                 exits: bool = True, host: str = "kitty"):
+        live = {"provider": "omp", "sessionId": "sid-1", "pid": self.AGENT, "host": "kitty"}
+        info = {"sessionId": "sid-1", "identityExact": True, "state": "idle",
+                "cwd": "/work/project", **(info or {})}
+        parents = {self.AGENT: self.SHELL, self.SHELL: self.KITTY}
+        comms = {self.SHELL: "zsh", self.KITTY: "kitty"}
+        signals: list[tuple[int, int]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agents.json"
+            path.write_text(json.dumps({"agents": [live], "history": []}))
+            with (
+                mock.patch.object(focus, "AGGREGATE_PATH", path),
+                mock.patch.object(focus.shutil, "which", return_value="/usr/bin/tern"),
+                mock.patch.dict(focus.agents._INFO_FN, {"omp": lambda _pid: info}),
+                mock.patch.object(focus.agents, "_parent_walk_for_host",
+                                  return_value=(host, [])),
+                mock.patch.object(focus.agents, "_ppid_of", side_effect=parents.get),
+                mock.patch.object(focus, "_comm", side_effect=lambda p: comms.get(p, "")),
+                mock.patch.object(focus, "_tern_ready", return_value=tern_ready),
+                mock.patch.object(focus, "_start_tern", return_value=False),
+                mock.patch.object(focus, "_wait_exit", return_value=exits),
+                mock.patch.object(focus.os, "kill",
+                                  side_effect=lambda p, s: signals.append((p, s))),
+                mock.patch.object(focus, "_launch_tern", return_value=0) as launch,
+                mock.patch.object(focus.sys, "stderr", io.StringIO()),
+            ):
+                code = focus.teleport("omp", "sid-1")
+        return code, signals, launch
+
+    def test_idle_session_hangs_up_then_closes_window_then_resumes_in_tern(self) -> None:
+        code, signals, launch = self.teleport()
+        self.assertEqual(code, 0)
+        self.assertEqual(signals, [(self.AGENT, focus.signal.SIGHUP),
+                                   (self.SHELL, focus.signal.SIGHUP)])
+        cwd, _shell, command = launch.call_args.args
+        self.assertEqual(cwd, "/work/project")
+        self.assertEqual(command, "cd -- /work/project && omp --resume sid-1")
+
+    def test_refusals_never_signal_or_launch(self) -> None:
+        cases = {
+            "busy": ({"info": {"state": "working"}}, 9),
+            "pid now runs another session": ({"info": {"sessionId": "sid-2"}}, 3),
+            "unproven identity": ({"info": {"identityExact": False}}, 3),
+            "not in kitty": ({"host": "konsole"}, 7),
+            "Tern cannot start": ({"tern_ready": False}, 8),
+        }
+        for name, (kwargs, expected) in cases.items():
+            with self.subTest(name):
+                code, signals, launch = self.teleport(**kwargs)
+                self.assertEqual(code, expected)
+                self.assertEqual(signals, [])
+                launch.assert_not_called()
+
+    def test_agent_that_survives_hangup_and_term_is_not_resumed_twice(self) -> None:
+        code, signals, launch = self.teleport(exits=False)
+        self.assertEqual(code, 10)
+        self.assertEqual([s for _, s in signals],
+                         [focus.signal.SIGHUP, focus.signal.SIGTERM])
+        launch.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

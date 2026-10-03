@@ -20,6 +20,12 @@ starts the saved resume command of a history record. A kitty record gets a
 new kitty window in its own systemd scope, so a plasmashell restart does not
 kill it, moved to the record's saved virtual desktop. A Tern record gets a
 new tab in the running Tern window, whose session daemon owns the process.
+
+  codexbar_focus.py --teleport <provider> <sessionId>
+
+moves an idle live kitty session into a new Tern tab: it hangs up the agent
+as closing its window would, closes that kitty window, and resumes the
+session in Tern.
 """
 from __future__ import annotations
 
@@ -27,6 +33,8 @@ import json
 import os
 import pwd
 import shlex
+import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -396,8 +404,7 @@ def launch(provider: str, session_id: str) -> int:
     if host not in agents.LAUNCH_HOSTS:
         sys.stderr.write("codexbar_focus: only kitty and Tern history records launch\n")
         return 7
-    shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell
-    shell = shell or "/bin/sh"
+    shell = _user_shell()
     if host == "tern":
         return _launch_tern(cwd, shell, command)
     # An interactive shell loads the user's PATH; the trailing shell keeps
@@ -431,6 +438,108 @@ def launch(provider: str, session_id: str) -> int:
     if desktop and not _kwin_place(proc.pid, desktop):
         sys.stderr.write("codexbar_focus: launched, but could not move window\n")
     return 0
+
+
+def _user_shell() -> str:
+    return os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell or "/bin/sh"
+
+
+# Shells whose exit closes the kitty window they run in.
+SHELL_COMMS = {"bash", "zsh", "fish", "sh", "dash", "ksh", "mksh", "tcsh", "nu"}
+TELEPORT_HUP_WAIT = 3.0
+TELEPORT_TERM_WAIT = 7.0
+
+
+def _exited(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True
+    # The state follows the parenthesized comm; a zombie has exited.
+    return stat.rsplit(")", 1)[-1].split()[:1] == ["Z"]
+
+
+def _wait_exit(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while not _exited(pid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def _signal(pid: int, sig: int) -> None:
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def teleport(provider: str, session_id: str) -> int:
+    """Resume an idle live kitty session in a new Tern tab.
+
+    The agent must exit first: a session file has one live writer, so Tern
+    starts only after the kitty process is gone."""
+    if shutil.which("tern") is None:
+        sys.stderr.write("codexbar_focus: Tern is not installed\n")
+        return 7
+    payload = agents._load_payload(AGGREGATE_PATH)
+    key = (provider, session_id)
+    record = next(
+        (r for r in payload["agents"] if agents._record_key(r) == key), None
+    )
+    if record is None:
+        sys.stderr.write("codexbar_focus: session is not running\n")
+        return 2
+    pid = record.get("pid")
+    info_fn = agents._INFO_FN.get(provider)
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or info_fn is None:
+        sys.stderr.write("codexbar_focus: session has no process\n")
+        return 3
+    # Re-read the process, so a stale snapshot never signals a reused pid.
+    try:
+        info = info_fn(pid)
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError):
+        info = {}
+    info = info if isinstance(info, dict) else {}
+    if (
+        agents._session_id(info.get("sessionId")) != session_id
+        or info.get("identityExact") is not True
+    ):
+        sys.stderr.write("codexbar_focus: process no longer runs this session\n")
+        return 3
+    if agents._parent_walk_for_host(pid)[0] != "kitty":
+        sys.stderr.write("codexbar_focus: only kitty sessions teleport\n")
+        return 7
+    if (info.get("state") or "working") != "idle":
+        sys.stderr.write("codexbar_focus: session is busy; teleport it once idle\n")
+        return 9
+    cwd = agents._text(info.get("cwd")) or agents._cwd_of(pid)
+    command = agents._resume_command(
+        provider, session_id, cwd, True, info.get("codexHome")
+    )
+    if not command:
+        sys.stderr.write("codexbar_focus: no verified resume command\n")
+        return 6
+    # Start Tern before ending the agent, so a failure leaves it running.
+    if not _tern_ready() and not _start_tern():
+        sys.stderr.write("codexbar_focus: teleport failed: Tern did not start\n")
+        return 8
+    parent = agents._ppid_of(pid)
+    window_shell = parent if (
+        _comm(parent) in SHELL_COMMS and _comm(agents._ppid_of(parent)) == "kitty"
+    ) else 0
+    # A hangup is what closing the window sends; every agent saves on it.
+    _signal(pid, signal.SIGHUP)
+    if not _wait_exit(pid, TELEPORT_HUP_WAIT):
+        _signal(pid, signal.SIGTERM)
+        if not _wait_exit(pid, TELEPORT_TERM_WAIT):
+            sys.stderr.write("codexbar_focus: teleport failed: the agent did not exit\n")
+            return 10
+    if window_shell:
+        _signal(window_shell, signal.SIGHUP)
+    return _launch_tern(cwd, _user_shell(), command)
+
 
 
 def _tern_ready() -> bool:
@@ -595,10 +704,11 @@ def focus(session_id: str) -> int:
 def main(argv: list[str]) -> int:
     if not argv:
         return 1
-    if argv[0] == "--launch":
+    if argv[0] in ("--launch", "--teleport"):
         if len(argv) != 3:
             return 1
-        return launch(argv[1], argv[2])
+        action = launch if argv[0] == "--launch" else teleport
+        return action(argv[1], argv[2])
     if argv[0] == "--launch-all":
         if len(argv) != 2:
             return 1

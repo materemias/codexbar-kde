@@ -55,7 +55,7 @@ Drag the popup's edges to resize it within the available screen space.
 | CMake 3.21+, a C++17 compiler, Qt 6 Core/QML development files | Building. On Arch: `base-devel`, `cmake`, `qt6-declarative` |
 | [`codexbar`](https://github.com/steipete/CodexBar) CLI | Usage tab and tray rings. Without it, Agents and History still work |
 | `qdbus6` (Plasma's Qt tools) | *Optional:* click to focus and desktop switching |
-| kitty or Tern | *Optional:* **Launch** and **Restore all**. Other terminals keep the copyable resume command |
+| kitty or Tern | *Optional:* **Launch** and **Restore all**; with both, **Teleport to Tern**. Other terminals keep the copyable resume command |
 | systemd user session | *Optional:* **Launch**, so restored terminals survive a plasmashell restart |
 | kitty remote control (`allow_remote_control`, `listen_on`) | *Optional:* faster, exact focus of kitty windows. KWin is used otherwise |
 | `notify-send` (libnotify) | *Optional:* desktop usage warnings and agent waiting-for-input notifications |
@@ -199,15 +199,20 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 ### Agents tab
 
 - **Live sessions.** Every Claude Code, Codex, OpenCode, pi and omp session in
-  a terminal, grouped by project folder, newest first. Each row shows the task
-  title, then aligned columns for the model family (`opus-5-5`, `gpt-6-astra`),
-  terminal and how long the session has been in its state (`7m`, `23h`, `4d`).
-  The dot and the age share the state colour: working (green), blocked on your
-  input (red), idle (grey), or untracked (blue) when the process has no
-  resolvable session. Freshly idle rows pulse for five minutes; rows idle for
-  over a day are dimmed.
+  a terminal, grouped by project folder into cards, newest first. Each row
+  shows the task title, then aligned columns for the model family
+  (`opus-5-5`, `gpt-6-astra`), terminal and how long the session has been in
+  its state (`7m`, `23h`, `4d`). Model names are tinted by vendor: Claude
+  orange, OpenAI violet. The age is brightest within 15 minutes, muted after
+  that and dim from a day on.
+  The state marker differs by shape as well as colour: working is a green dot
+  with an expanding halo, blocked on your input a red diamond, idle a hollow
+  grey ring, untracked a blue dot (the process has no resolvable session).
+  Working and blocked rows get a tinted background and a left accent bar.
+  Freshly idle rows show a green ring and wash that fade over five minutes;
+  rows idle for over a day are dimmed.
 - **Desktop badges.** The number of the virtual desktop the session's window
-  is on, highlighted when it is the current one.
+  is on, softly filled when it is the current one and outlined otherwise.
 - **Focused session.** A thin ring around the state dot marks the session
   shown in the window you last focused. Tern reports its visible
   pane; kitty and VS Code are told apart by window caption (session title or
@@ -223,7 +228,15 @@ Arch `codexbar-cli` package installs. Set another path in Settings → Backend.
 - **Click to focus.** Clicking a row, or `Enter`, raises the terminal hosting
   the session, switching desktop if needed.
 - **Conversation peek.** The arrow shown on hover, or `Space`, expands the
-  last eight user, assistant and tool turns.
+  last eight user, assistant and tool turns, laid out like a chat: your turns
+  in tinted bubbles on the right, the agent's replies as plain text, and tool
+  runs as one muted line.
+- **Teleport to Tern.** When Tern is installed, kitty sessions with a known
+  resume command get a new-tab button on hover. It works on idle sessions
+  only: CodexBar hangs up the agent the way closing its window would, closes
+  that kitty window, and resumes the session in a new tab of the running
+  Tern window. Tern is started first, and a session that fails to exit is
+  never resumed twice.
 - **Type to filter.** Typing filters by title, prompt, folder, provider and
   model, and by recent conversation text (exact). A field matches when it
   contains the query, or when the query's letters start words in order
