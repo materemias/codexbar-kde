@@ -121,6 +121,8 @@ credentials" for setup.
   `~/.t3/userdata/state.sqlite`, then activates the window through KWin.
 - Claude Code's agent view runs tasks as `kind: "bg"` sessions under
   `claude daemon`, with no terminal ancestor; they are not listed.
+- omp and pi under `--mode rpc` or `--mode json` are program-driven, like
+  Tern's built-in Carly assistant, and are not listed.
 - `codexbar_focus.py --launch <provider> <sessionId>` resumes a kitty or
   Tern history record only when its saved resume command matches
   `_resume_command` and the session is not live. For kitty it runs kitty under

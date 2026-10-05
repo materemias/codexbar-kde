@@ -63,9 +63,11 @@ _SERVICE_VERBS = {
     "app-server", "app-server-protocol", "serve", "doctor", "agents", "lsp",
 }
 
-# Headless/piped invocations (SDK calls from claudecodeui, `-p` one-shots).
+# Headless/piped invocations (SDK calls from claudecodeui, `-p` one-shots,
+# `omp --mode rpc` drivers such as Tern's built-in Carly assistant).
 # Real processes, but no terminal session behind them.
 _HEADLESS_FLAGS = {"--output-format", "--input-format", "--print", "-p"}
+_HEADLESS_MODES = {"rpc", "json"}
 
 # Fork helpers (embeddings, js eval, lsp mux, ...) keep comm="omp"/"pi" and so
 # show up in `pgrep -x`; their cmdline carries a `__*_worker_` verb.
@@ -289,7 +291,14 @@ def _is_service_argv(argv: list[str]) -> bool:
             return True
     if rest and rest[0] in _SERVICE_VERBS:
         return True
-    return any(a in _HEADLESS_FLAGS for a in rest)
+    for i, a in enumerate(rest):
+        if a in _HEADLESS_FLAGS:
+            return True
+        mode = a[7:] if a.startswith("--mode=") else (
+            rest[i + 1] if a == "--mode" and i + 1 < len(rest) else None)
+        if mode in _HEADLESS_MODES:
+            return True
+    return False
 
 
 def _under_t3(pid: int) -> bool:

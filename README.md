@@ -343,6 +343,8 @@ When T3 Code stops a thread's provider session, its row moves to History even
 though the thread stays in T3 Code. A process
 whose session cannot be identified is listed as untracked, with its state and
 folder but no title; Settings → Agents can hide these.
+Program-driven omp/pi processes (`--mode rpc` or `--mode json`), such as
+Tern's built-in Carly assistant, are not listed.
 
 ## Configure provider credentials
 

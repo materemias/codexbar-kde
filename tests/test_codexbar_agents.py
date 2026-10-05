@@ -859,6 +859,16 @@ class ResumeAndIdentityTests(unittest.TestCase):
         self.assertEqual(records[0]["resumeCommand"], "cd -- /work && claude --resume shared")
 
 
+class HeadlessArgvTests(unittest.TestCase):
+    def test_omp_rpc_and_json_modes_are_headless(self) -> None:
+        # Tern's built-in Carly assistant drives omp over RPC.
+        self.assertTrue(agents._is_service_argv(["omp", "--mode", "rpc", "--no-tools"]))
+        self.assertTrue(agents._is_service_argv(["omp", "--mode=json", "hi"]))
+        self.assertFalse(agents._is_service_argv(["omp", "--mode", "text"]))
+        self.assertFalse(agents._is_service_argv(["omp", "--model", "rpc"]))
+        self.assertFalse(agents._is_service_argv(["omp", "--mode"]))
+
+
 class T3CodeTests(unittest.TestCase):
     # T3 Code runs Claude as stream-json and Codex as one app-server per
     # thread, directly under its Electron main process.
