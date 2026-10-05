@@ -213,7 +213,7 @@ class TeleportTests(unittest.TestCase):
                 mock.patch.object(focus.agents, "_parent_walk_for_host",
                                   return_value=(host, [])),
                 mock.patch.object(focus.agents, "_ppid_of", side_effect=parents.get),
-                mock.patch.object(focus, "_comm", side_effect=lambda p: comms.get(p, "")),
+                mock.patch.object(focus.agents, "_comm_of", side_effect=lambda p: comms.get(p, "")),
                 mock.patch.object(focus, "_tern_ready", return_value=tern_ready),
                 mock.patch.object(focus, "_start_tern", return_value=False),
                 mock.patch.object(focus, "_wait_exit", return_value=exits),

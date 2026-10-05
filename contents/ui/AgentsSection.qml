@@ -240,17 +240,6 @@ ColumnLayout {
         return out.concat(turns.map(function(turn) { return turn.line }))
     }
 
-    function _providerName(provider) {
-        var names = {
-            claude: "Claude",
-            codex: "Codex",
-            opencode: "OpenCode",
-            pi: "pi",
-            omp: "omp"
-        }
-        return names[provider] || provider || "Agent"
-    }
-
     // Model family for display and filtering: provider path and the
     // redundant "claude-" vendor prefix dropped (claude-opus-5-5 -> opus-5-5).
     function _modelName(model) {
@@ -373,10 +362,6 @@ ColumnLayout {
         if (a && a.sessionId) {
             Qt.openUrlExternally("codexbar://focus/" + a.sessionId)
         }
-    }
-
-    function _ageLabel(ms) {
-        return root.ageFrom(ms, root.nowMs)
     }
 
     // Header row: section label + count summary on the right.
@@ -596,7 +581,7 @@ ColumnLayout {
                     }
 
                     PC3.Label {
-                        text: agents._ageLabel(rowItem.modelData.stateChangedAt)
+                        text: root.ageFrom(rowItem.modelData.stateChangedAt, root.nowMs)
                         opacity: agents.ageOpacity(rowItem.modelData.stateChangedAt)
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                         font.weight: opacity === 1 ? Font.DemiBold : Font.Normal

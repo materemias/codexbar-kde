@@ -78,33 +78,10 @@ def _ancestor_pids(start_pid: int, max_depth: int = 16) -> list[int]:
     """Walk /proc up from start_pid; return [start_pid, parent, grandparent, …]."""
     pids: list[int] = []
     cur = int(start_pid or 0)
-    while cur > 1 and len(pids) < max_depth:
-        if cur in pids:
-            break
+    while cur > 1 and len(pids) < max_depth and cur not in pids:
         pids.append(cur)
-        try:
-            status = Path(f"/proc/{cur}/status").read_text()
-        except OSError:
-            break
-        ppid = 0
-        for line in status.splitlines():
-            if line.startswith("PPid:"):
-                try:
-                    ppid = int(line.split(":", 1)[1].strip())
-                except ValueError:
-                    ppid = 0
-                break
-        if not ppid:
-            break
-        cur = ppid
+        cur = agents._ppid_of(cur)
     return pids
-
-
-def _comm(pid: int) -> str:
-    try:
-        return Path(f"/proc/{pid}/comm").read_text().strip()
-    except OSError:
-        return ""
 
 
 def _kitty_focus(candidate_pids: list[int]) -> bool:
@@ -527,7 +504,7 @@ def teleport(provider: str, session_id: str) -> int:
         return 8
     parent = agents._ppid_of(pid)
     window_shell = parent if (
-        _comm(parent) in SHELL_COMMS and _comm(agents._ppid_of(parent)) == "kitty"
+        agents._comm_of(parent) in SHELL_COMMS and agents._comm_of(agents._ppid_of(parent)) == "kitty"
     ) else 0
     # A hangup is what closing the window sends; every agent saves on it.
     _signal(pid, signal.SIGHUP)
@@ -689,7 +666,7 @@ def focus(session_id: str) -> int:
         _tern_focus(pid)
         candidates += [p for p in agents.tern_window_pids() if p not in candidates]
     # Skip kitty branch if no kitty in the tree.
-    elif any(_comm(p) == "kitty" for p in candidates) and _kitty_focus(candidates):
+    elif any(agents._comm_of(p) == "kitty" for p in candidates) and _kitty_focus(candidates):
         return 0
 
     if _kwin_activate(candidates, record):

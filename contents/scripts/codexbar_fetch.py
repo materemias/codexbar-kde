@@ -329,7 +329,6 @@ def _normalize_record(provider: str, record: dict) -> dict:
             )),
         )
         result.update({
-            "identity": identity,
             "loginMethod": login_method,
             "accountEmail": account_email,
         })
@@ -387,7 +386,6 @@ def _normalize_record(provider: str, record: dict) -> dict:
     return {
         "id": provider,
         "ok": True,
-        "identity": identity,
         "loginMethod": login_method,
         "accountEmail": account_email,
         "primary": _clamp_to_account_reset(provider, primary, secondary),
